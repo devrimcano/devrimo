@@ -713,21 +713,33 @@ async def reindex_embeddings(
     if not config.enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, "Enable a local or remote embedding provider first")
     sources = (
-        await db.execute(
-            select(CampusSource).where(
-                CampusSource.organization_id == organization_id,
-                CampusSource.status == "published",
-                CampusSource.enabled.is_(True),
-                CampusSource.active_revision_id.is_not(None),
+        (
+            await db.execute(
+                select(CampusSource)
+                .where(
+                    CampusSource.organization_id == organization_id,
+                    CampusSource.status == "published",
+                    CampusSource.enabled.is_(True),
+                    CampusSource.active_revision_id.is_not(None),
+                )
+                .order_by(CampusSource.id)
+                .with_for_update()
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     queued = []
     for source in sources:
         active = await db.scalar(
             select(CampusIngestionJob.id).where(
                 CampusIngestionJob.source_id == source.id,
-                CampusIngestionJob.status.in_(["queued", "leased", "failed"]),
+                CampusIngestionJob.revision_id == source.active_revision_id,
+                CampusIngestionJob.kind == "reembed",
+                # Pending re-embeds read the latest settings when they start.
+                # Running jobs may already have captured the previous model,
+                # so they need a queued successor after a settings change.
+                CampusIngestionJob.status.in_(["queued", "failed"]),
             )
         )
         if active is None:

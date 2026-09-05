@@ -136,6 +136,7 @@ async def publish_revision(
 ) -> CampusIngestionJob:
     if revision.source_id != source.id or not revision.validation.get("ok"):
         raise ValueError("Only a valid revision for this source can be published")
+    await db.refresh(source, with_for_update=True)
     now = datetime.now(UTC)
     old = (
         await db.execute(
@@ -154,6 +155,10 @@ async def publish_revision(
     source.status = "published"
     source.enabled = enabled
     source.last_error = None
+    # HTTP validators describe the page bytes, not the parser configuration.
+    # A new revision (including rollback) must parse the page again.
+    source.etag = None
+    source.last_modified = None
     job = CampusIngestionJob(source_id=source.id, revision_id=revision.id)
     db.add(job)
     await db.commit()
