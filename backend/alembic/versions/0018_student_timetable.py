@@ -10,9 +10,8 @@ Revises: 0017_student_year_of_study
 """
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "0018_student_timetable"
 down_revision = "0017_student_year_of_study"

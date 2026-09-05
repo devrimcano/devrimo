@@ -10,7 +10,6 @@ Nullable with no backfill: it fills on each student's next context sync.
 """
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0014_student_surname"

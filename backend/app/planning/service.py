@@ -26,8 +26,26 @@ GRADE_POINTS = {
 }
 
 
+def current_term(now: datetime | None = None) -> str:
+    """The term a student is registering for, as METU codes it.
+
+    ``YYYY`` + a part number, where the year is the one the academic year
+    starts in: 20261 is 2026-2027 Fall, 20253 the summer school running in
+    calendar 2026.
+    """
+    moment = now or datetime.now(UTC)
+    if moment.month >= 8:
+        return f"{moment.year}1"
+    if moment.month <= 5:
+        return f"{moment.year - 1}2"
+    return f"{moment.year - 1}3"
+
+
 class SemesterPlanRequest(BaseModel):
-    term: str = Field(min_length=3, max_length=32)
+    # Defaulted rather than required. A model asked to plan "this semester" has
+    # no way to know METU's code for it, so it omitted the field and every call
+    # failed validation before reaching any planning logic.
+    term: str = Field(default_factory=current_term, min_length=3, max_length=32)
     required_courses: list[str] = Field(default_factory=list)
     preferred_courses: list[str] = Field(default_factory=list)
     excluded_courses: list[str] = Field(default_factory=list)
@@ -283,25 +301,64 @@ async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRe
     }
 
 
+def _course_key(row: object) -> tuple[str, str]:
+    if not isinstance(row, dict):
+        return ("", "")
+    code = "".join(str(row.get("course_code") or row.get("code") or "").upper().split())
+    return (code, str(row.get("section") or ""))
+
+
+def merge_courses(stored: list[dict], incoming: list[dict]) -> list[dict]:
+    """A refreshed course list laid over the stored one, not replacing it.
+
+    A transcript accumulates: a course that was on it last month is still on it
+    today, so a read that comes back short is a failed read rather than a
+    student who un-took four courses. Rows the new read does carry win — a
+    repeated course now has its passing grade — and rows it does not are kept.
+    """
+    merged = {_course_key(row): row for row in stored if isinstance(row, dict)}
+    for row in incoming:
+        if isinstance(row, dict):
+            merged[_course_key(row)] = row
+    return list(merged.values())
+
+
 async def upsert_academic_snapshot(
     db: AsyncSession,
     user_id: UUID,
     term: str,
     *,
-    completed_courses: list[dict],
-    enrolled_courses: list[dict],
-    current_credits: Decimal | float,
-    current_grade_points: Decimal | float,
+    completed_courses: list[dict] | None,
+    enrolled_courses: list[dict] | None,
+    current_credits: Decimal | float | None,
+    current_grade_points: Decimal | float | None,
     source: str = "sais",
 ) -> StudentAcademicSnapshot:
+    """Store what this read actually learned, and nothing more.
+
+    ``None`` means "not read this time" and leaves the stored value alone.
+    An empty list means "read, and there genuinely are none" — the weekly
+    schedule of a term the student has not registered for yet.
+
+    The distinction exists because every field here used to be assigned
+    unconditionally: one SAIS read that reached the server but returned an
+    unparseable transcript replaced sixteen completed courses with none, along
+    with the credits and grade points, and nothing said it had happened.
+    """
     snapshot = await db.get(StudentAcademicSnapshot, (user_id, term))
     if snapshot is None:
         snapshot = StudentAcademicSnapshot(user_id=user_id, term=term)
         db.add(snapshot)
-    snapshot.completed_courses = completed_courses
-    snapshot.enrolled_courses = enrolled_courses
-    snapshot.current_credits = current_credits
-    snapshot.current_grade_points = current_grade_points
+    if completed_courses is not None:
+        snapshot.completed_courses = merge_courses(snapshot.completed_courses or [], completed_courses)
+    if enrolled_courses is not None:
+        # Replaced, not merged: dropping a course is a real thing that happens,
+        # and this list is small enough that a failed read is reported as None.
+        snapshot.enrolled_courses = enrolled_courses
+    if current_credits is not None:
+        snapshot.current_credits = current_credits
+    if current_grade_points is not None:
+        snapshot.current_grade_points = current_grade_points
     snapshot.source = source
     snapshot.fetched_at = datetime.now(UTC)
     await db.commit()

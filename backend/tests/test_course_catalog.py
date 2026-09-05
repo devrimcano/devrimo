@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from app.campus.course_info import department_code, json_value
+from app.campus.course_info import department_code, department_options, json_value
 from app.campus.mcp_results import mcp_payload, parse_json_document
 from app.core.ttl_cache import TTLCache
 
@@ -219,3 +219,35 @@ def test_a_caller_giving_up_does_not_cancel_the_shared_fill():
         assert await second == "value"
 
     asyncio.run(scenario())
+
+
+# --- the department picker's options ----------------------------------------
+
+
+def test_department_options_only_offer_explicitly_labelled_codes():
+    """The picker must not be able to offer a student id as a department.
+
+    It goes through the same extraction ``department_code`` uses, so a payload
+    carrying a seven-digit student number and a row count yields neither.
+    """
+    payload = {
+        "student_no": "2512345",
+        "row_count": "412",
+        "departments": [
+            {"department_code": "567", "department_name": "Computer Engineering"},
+            {"department_code": "571", "department_name": "Mathematics"},
+        ],
+    }
+    assert department_options(payload) == [
+        {"code": "567", "name": "Computer Engineering"},
+        {"code": "571", "name": "Mathematics"},
+    ]
+
+
+def test_department_options_fall_back_to_the_code_as_its_own_label():
+    """An unnamed department is still selectable — it just shows its code."""
+    assert department_options({"code": "580"}) == [{"code": "580", "name": "580"}]
+
+
+def test_department_options_are_empty_when_nothing_is_labelled():
+    assert department_options({"results": ["Computer Engineering", "Mathematics"]}) == []

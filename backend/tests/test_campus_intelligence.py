@@ -597,7 +597,9 @@ async def test_sais_context_sync_stores_a_verified_but_unconfirmed_context(clien
     assert context.campus == "Ankara"
     assert context.source == "sais"
     assert context.verified_at is not None
-    assert context.confirmed_at is None
+    # Confirmed on arrival: SAIS is the registrar's own record, so there is no
+    # second step where the student agrees with it before it can be used.
+    assert context.confirmed_at is not None
 
 
 async def test_sais_context_sync_reports_failure_when_the_tool_is_absent(client, monkeypatch):

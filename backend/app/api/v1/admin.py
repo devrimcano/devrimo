@@ -38,6 +38,7 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.observability.client import report_exception
+from app.student.purge import purge_student_data
 
 router = APIRouter()
 
@@ -546,6 +547,10 @@ async def delete_user(
         await db.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
         await db.execute(delete(Agent).where(Agent.user_id == user_id))
         await db.execute(delete(AdminMembership).where(AdminMembership.user_id == user_id))
+        # The transcript snapshot, the campus context and everything keyed off
+        # them used to survive a permanent deletion, so an account could be
+        # gone while its completed courses, credits and grade points remained.
+        await purge_student_data(db, user_id)
         digest = hashlib.sha256(str(user_id).encode()).hexdigest()[:16]
         account.email = f"deleted-{digest}@redacted.invalid"
         account.email_normalized = account.email

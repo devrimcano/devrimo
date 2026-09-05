@@ -130,6 +130,45 @@ async def get_session(
     )
 
 
+@router.delete("")
+async def delete_all_sessions(
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Soft-delete every one of this student's conversations.
+
+    The same two steps as deleting one, done in a loop: drop the Agno session
+    that holds the messages, then mark our index row deleted. A failure on the
+    Agno side does not stop the pass — the student asked for all of them to go,
+    and an orphaned session they can no longer reach is a cleanup problem
+    rather than a reason to leave the rest of their history on screen.
+    """
+    result = await db.execute(
+        select(ChatSession).where(ChatSession.user_id == user.id, ChatSession.deleted_at.is_(None))
+    )
+    sessions = list(result.scalars().all())
+    if not sessions:
+        return {"deleted": 0}
+
+    agno_db = get_agno_db()
+    now = datetime.now(UTC)
+    failed = 0
+    for session in sessions:
+        try:
+            await asyncio.to_thread(
+                agno_db.delete_session,
+                session_id=session.agno_session_id or session.id,
+                user_id=str(user.id),
+            )
+        except Exception as exc:
+            failed += 1
+            logger.warning("agno_session_delete_failed", user_id=str(user.id), error=str(exc))
+        session.deleted_at = now
+    await db.commit()
+    logger.info("chat_sessions_deleted", user_id=str(user.id), count=len(sessions), agno_failures=failed)
+    return {"deleted": len(sessions)}
+
+
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,

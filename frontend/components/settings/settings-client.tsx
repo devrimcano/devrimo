@@ -14,6 +14,7 @@ import {
   SparklesIcon,
   Trash2Icon,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -104,7 +105,7 @@ export function SettingsClient() {
           </nav>
           <div className="mt-3 rounded-2xl border border-primary/15 bg-primary/[0.035] p-4">
             <div className="flex items-center gap-2 text-sm font-semibold"><ShieldCheckIcon className="size-4 text-primary" />{pick({ tr: "Gizlilik özeti", en: "Privacy summary" })}</div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">{pick({ tr: "E-posta ve ODTÜClass isteğe bağlıdır. Şifren ve kişisel içeriklerin gizli tutulur.", en: "Email and ODTÜClass are optional. Your password and personal contents stay private." })}</p>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">{pick({ tr: "E-posta ve ODTÜClass isteğe bağlıdır. Şifren gösterilmez; içerikler yönetici ekranlarına taşınmaz.", en: "Email and ODTÜClass are optional. Your password is never shown, and contents never appear in admin views." })}</p>
           </div>
         </aside>
 
@@ -112,8 +113,8 @@ export function SettingsClient() {
           <CampusConnectionCard />
 
           <Card id="personalization" className="motion-enter surface-raised scroll-mt-24 border-0 ring-1 ring-foreground/8 [animation-delay:40ms]">
-            <CardHeader className="border-b bg-muted/20"><div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><SparklesIcon className="size-4" /></span><div><CardTitle>{pick({ tr: "Kişiselleştirme ve güncellemeler", en: "Personalization and updates" })}</CardTitle><CardDescription className="mt-1">{pick({ tr: "İlgi alanlarını düzenle ve e-postalardaki önemli tarihlerin takvime eklenmesine izin ver.", en: "Edit your interests and choose whether important dates from email appear on your calendar." })}</CardDescription></div></div></CardHeader>
-            <CardContent className="space-y-5"><AcademicContextEditor /><AcademicDataManager /><PreferenceEditor /><div className="grid grid-cols-[1fr_auto] items-start gap-4 rounded-xl border bg-background/55 p-4"><div><Label htmlFor="mail-facts" className="font-semibold">{pick({ tr: "E-postadan önemli tarihler ve etkinlikler", en: "Important dates and events from email" })}</Label><p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Yalnızca etkinlik ve son tarih bilgileri yakalanır. E-postalarının içeriği saklanmaz.", en: "Only event and deadline details are captured. Email bodies are not kept." })}</p></div><Switch id="mail-facts" checked={profile?.mail_facts_enabled ?? false} disabled={!profile || updateProfile.isPending} onCheckedChange={(checked) => void updateProfile.mutateAsync({ mail_facts_enabled: checked }).catch((error) => toast.error(error instanceof Error ? error.message : "Update failed"))} /></div></CardContent>
+            <CardHeader className="border-b bg-muted/20"><div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><SparklesIcon className="size-4" /></span><div><CardTitle>{pick({ tr: "Kişiselleştirme ve güncellemeler", en: "Personalization and updates" })}</CardTitle><CardDescription className="mt-1">{pick({ tr: "İlgi alanlarını düzenle ve e-postadan yalnızca yapılandırılmış tarih/etkinlik bilgisi çıkarılmasına izin ver.", en: "Edit your interests and choose whether email may yield structured date and event facts." })}</CardDescription></div></div></CardHeader>
+            <CardContent className="space-y-5"><AcademicContextEditor /><AcademicDataManager /><PreferenceEditor /><div className="grid grid-cols-[1fr_auto] items-start gap-4 rounded-xl border bg-background/55 p-4"><div><Label htmlFor="mail-facts" className="font-semibold">{pick({ tr: "E-postadan yapılandırılmış güncellemeler", en: "Structured updates from email" })}</Label><p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Yalnızca etkinlik veya son tarih başlığı, özeti ve zamanı saklanır. Ham e-posta gövdesi kaydedilmez ve vektör dizinine gönderilmez.", en: "Only an event or deadline title, summary, and time are kept. Raw email bodies are not stored or embedded." })}</p></div><Switch id="mail-facts" checked={profile?.mail_facts_enabled ?? false} disabled={!profile || updateProfile.isPending} onCheckedChange={(checked) => void updateProfile.mutateAsync({ mail_facts_enabled: checked }).catch((error) => toast.error(error instanceof Error ? error.message : "Update failed"))} /></div></CardContent>
           </Card>
 
           <Card id="memory" className="motion-enter surface-raised scroll-mt-24 border-0 ring-1 ring-foreground/8 [animation-delay:70ms]">
@@ -169,22 +170,68 @@ export function SettingsClient() {
 
 type PreferenceItem = { key: string; value: Record<string, unknown>; provenance: "explicit" | "learned"; confidence: number; updated_at: string };
 
-type AcademicContext = { department: string | null; degree_level: string | null; program_code: string | null; campus: string | null; source: string; verified_at: string | null; confirmed_at: string | null; needs_confirmation: boolean };
-
-const DEGREE_OPTIONS = [
-  { value: "undergraduate", tr: "Lisans", en: "Undergraduate" },
-  { value: "masters", tr: "Yüksek Lisans", en: "Master's" },
-  { value: "doctoral", tr: "Doktora", en: "Doctoral" },
-  { value: "exchange", tr: "Değişim", en: "Exchange" },
-  { value: "other", tr: "Diğer", en: "Other" },
-] as const;
+type AcademicContext = { department: string | null; surname_prefix: string | null; degree_level: string | null; year_of_study: number | null; program_code: string | null; campus: string | null; source: string; verified_at: string | null; confirmed_at: string | null };
 
 function AcademicContextEditor() {
-  const { pick, locale } = useLocale(); const client = useQueryClient(); const query = useQuery({ queryKey: ["student", "context"], queryFn: () => jsonFetch<AcademicContext>("/api/student/context") });
-  const [department, setDepartment] = useState<string>(); const [degree, setDegree] = useState<string>(); const [program, setProgram] = useState<string>(); const [campus, setCampus] = useState<string>();
-  const mutation = useMutation({ mutationFn: (body: Record<string, unknown>) => jsonFetch<AcademicContext>("/api/student/context", { method: "PUT", body }), onSuccess: (data) => { client.setQueryData(["student", "context"], data); toast.success(pick({ tr: "Öğrenim bilgileri kaydedildi", en: "Academic info saved" })); }, onError: (error) => toast.error(error.message) });
+  const { pick } = useLocale(); const client = useQueryClient();
+  const query = useQuery({ queryKey: ["student", "context"], queryFn: () => jsonFetch<AcademicContext>("/api/student/context") });
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Partial<AcademicContext>>({});
+  const mutation = useMutation({
+    mutationFn: (body: Record<string, unknown>) => jsonFetch<AcademicContext>("/api/student/context", { method: "PUT", body }),
+    onSuccess: (data) => { client.setQueryData(["student", "context"], data); setEditing(false); setDraft({}); toast.success(pick({ tr: "Akademik bağlam kaydedildi", en: "Academic context saved" })); },
+    onError: (error) => toast.error(error.message),
+  });
   const context = query.data;
-  return <div className="rounded-xl border bg-background/55 p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="font-semibold">{pick({ tr: "Öğrenim bilgileri", en: "Academic information" })}</p><p className="text-xs text-muted-foreground">{context?.verified_at ? pick({ tr: "ODTÜ kayıtlarından alındı.", en: "Fetched from your METU record." }) : pick({ tr: "Bilgilerini buradan düzenleyebilirsin.", en: "You can edit your details here." })}</p></div>{context ? <Badge variant={context.verified_at ? "secondary" : "outline"}>{context.verified_at ? pick({ tr: "ODTÜ Kaydı", en: "METU Record" }) : pick({ tr: "Elle Düzenlendi", en: "Manual" })}</Badge> : null}</div>{context?.needs_confirmation ? <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 p-3"><p className="text-sm">{[context.department, context.degree_level, context.program_code, context.campus].filter(Boolean).join(" · ")}</p><Button size="sm" onClick={() => mutation.mutate({ confirm_verified: true })}>{pick({ tr: "Doğrula", en: "Confirm" })}</Button></div> : <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Input value={department ?? context?.department ?? ""} onChange={(event) => setDepartment(event.target.value)} placeholder={pick({ tr: "Bölüm", en: "Department" })} /><Select value={degree ?? context?.degree_level ?? "undergraduate"} onValueChange={(value) => setDegree(value ?? undefined)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{DEGREE_OPTIONS.map((opt) => <SelectItem key={opt.value} value={opt.value}>{opt[locale]}</SelectItem>)}</SelectContent></Select><Input value={program ?? context?.program_code ?? ""} onChange={(event) => setProgram(event.target.value)} placeholder={pick({ tr: "Program kodu", en: "Program code" })} /><div className="flex gap-2"><Input value={campus ?? context?.campus ?? "Ankara"} onChange={(event) => setCampus(event.target.value)} placeholder={pick({ tr: "Kampüs", en: "Campus" })} /><Button variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate({ department: department ?? context?.department, degree_level: degree ?? context?.degree_level ?? "undergraduate", program_code: program ?? context?.program_code, campus: campus ?? context?.campus ?? "Ankara" })}>{pick({ tr: "Kaydet", en: "Save" })}</Button></div></div>}</div>;
+  const value = <K extends keyof AcademicContext>(key: K) => (draft[key] ?? context?.[key] ?? "") as string;
+
+  // Saving sends the draft alone — only the fields actually typed into. It used
+  // to send every rendered value, so a save from a form that had not finished
+  // loading overwrote a department SAIS had just read with an empty string.
+  // The server patches what it is given and leaves everything else untouched.
+
+  // What the planner and chat actually need before they can answer anything.
+  const rows: Array<{ key: keyof AcademicContext; label: string; hint: string }> = [
+    { key: "department", label: pick({ tr: "Bölüm", en: "Department" }), hint: pick({ tr: "Hangi derslerin açık olduğunu belirler", en: "Decides which courses are open to you" }) },
+    { key: "surname_prefix", label: pick({ tr: "Soyadı (ilk 2 harf)", en: "Surname (first 2 letters)" }), hint: pick({ tr: "Şube soyadı kısıtları için", en: "For section surname restrictions" }) },
+    { key: "year_of_study", label: pick({ tr: "Sınıf", en: "Year of study" }), hint: pick({ tr: "Bazı şubeler yalnızca belirli sınıflara açık", en: "Some sections are open to one year only" }) },
+    { key: "program_code", label: pick({ tr: "Program kodu", en: "Program code" }), hint: pick({ tr: "İsteğe bağlı", en: "Optional" }) },
+    { key: "campus", label: pick({ tr: "Kampüs", en: "Campus" }), hint: pick({ tr: "İsteğe bağlı", en: "Optional" }) },
+  ];
+  const optional: Array<keyof AcademicContext> = ["program_code", "campus", "year_of_study"];
+  const missing = rows.filter((row) => !optional.includes(row.key) && !value(row.key));
+
+  return <div className="rounded-xl border bg-background/55 p-4">
+    <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+      <div>
+        <p className="font-semibold">{pick({ tr: "Akademik bağlam", en: "Academic context" })}</p>
+        <p className="mt-0.5 max-w-xl text-xs leading-5 text-muted-foreground">{pick({ tr: "Ders planlayıcı ve sohbet bu bilgileri kullanır. Normalde ODTÜ kayıtlarından bir kez okunur; okunamazsa elle girebilirsin.", en: "The planner and chat use these. They are read from your METU record once; you can fill them in by hand if that fails." })}</p>
+      </div>
+      {context ? <Badge variant={context.verified_at ? "secondary" : "outline"}>{context.source === "sais" ? "SAIS" : pick({ tr: "elle", en: "manual" })}</Badge> : null}
+    </div>
+
+    {missing.length && !editing ? <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2 text-xs leading-5">
+      {pick({ tr: `${missing.map((row) => row.label).join(" ve ")} eksik. SAIS'ten okunamadıysa aşağıdan elle girebilirsin.`, en: `${missing.map((row) => row.label).join(" and ")} missing. If your METU record did not provide it, fill it in below.` })}
+    </p> : null}
+
+    {editing ? <div className="grid gap-3 sm:grid-cols-2">
+      {rows.map((row) => <div key={row.key} className="space-y-1">
+        <Label className="text-xs">{row.label}</Label>
+        <Input value={value(row.key)} maxLength={row.key === "surname_prefix" ? 2 : undefined} onChange={(event) => setDraft((current) => ({ ...current, [row.key]: event.target.value }))} />
+        <p className="text-[11px] text-muted-foreground">{row.hint}</p>
+      </div>)}
+      <div className="flex items-end gap-2 sm:col-span-2">
+        <Button disabled={mutation.isPending} onClick={() => mutation.mutate({ ...draft, ...(draft.year_of_study === undefined ? {} : { year_of_study: Number(draft.year_of_study) || null }) })}>{mutation.isPending ? <Loader2Icon className="animate-spin" /> : null}{pick({ tr: "Kaydet", en: "Save" })}</Button>
+        <Button variant="ghost" onClick={() => { setEditing(false); setDraft({}); }}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button>
+      </div>
+    </div> : <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+      {rows.map((row) => <div key={row.key}>
+        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{row.label}</p>
+        <p className={cn("text-sm", value(row.key) ? "font-medium" : "text-muted-foreground")}>{value(row.key) || pick({ tr: "—", en: "—" })}</p>
+      </div>)}
+      <Button variant="outline" size="sm" className="ml-auto" onClick={() => setEditing(true)}>{pick({ tr: "Düzenle", en: "Edit" })}</Button>
+    </div>}
+  </div>;
 }
 
 type AcademicData = {
@@ -203,27 +250,37 @@ function AcademicDataManager() {
     onSuccess: (data) => {
       client.setQueryData(["student", "academic-data"], data);
       void client.invalidateQueries({ queryKey: ["student", "context"] });
-      toast.success(pick({ tr: "Akademik veriler ODTÜ'den yenilendi.", en: "Academic data refreshed from METU." }));
+      toast.success(pick({ tr: "Akademik veriler SAIS'ten yenilendi.", en: "Academic data refreshed from SAIS." }));
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error) => {
+      // The refresh writes its snapshot in its own transaction before the
+      // reply is built, so a dropped or cancelled response does not mean the
+      // data was not saved. Re-read rather than assume the worst.
+      void client.invalidateQueries({ queryKey: ["student", "academic-data"] });
+      void client.invalidateQueries({ queryKey: ["student", "context"] });
+      toast.error(error.message);
+    },
   });
   const reset = useMutation({
     mutationFn: () => jsonFetch<{ deleted: boolean }>("/api/student/academic-data", { method: "DELETE" }),
     onSuccess: () => {
       client.setQueryData(["student", "academic-data"], { context: null, snapshots: [], has_cached_data: false });
       void client.invalidateQueries({ queryKey: ["student", "context"] });
-      toast.success(pick({ tr: "Akademik veriler silindi.", en: "Academic data deleted." }));
+      toast.success(pick({ tr: "Bölüm ve transkript verileri silindi.", en: "Department and transcript data deleted." }));
     },
     onError: (error) => toast.error(error.message),
   });
   const latest = query.data?.snapshots[0];
   return <div className="rounded-xl border bg-background/55 p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><p className="font-semibold">{pick({ tr: "Kayıtlı akademik veriler", en: "Stored academic data" })}</p><p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{pick({ tr: "Bölümün ve transkriptindeki dersler sana özel öneriler için kullanılır. Notların burada gösterilmez.", en: "Your department and courses are used for personal recommendations. Grades are not shown here." })}</p></div>
+      <div><p className="font-semibold">{pick({ tr: "Kayıtlı akademik veriler", en: "Stored academic data" })}</p><p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{pick({ tr: "Bölümün ve transkriptindeki ders kodları ilk kullanımda bir kez alınır. Notlar burada gösterilmez veya yapay zekâ belleğine eklenmez.", en: "Your department and transcript course codes are fetched once on first use. Grades are not shown here or added to AI memory." })}</p></div>
       {query.isLoading ? <Loader2Icon className="size-4 animate-spin text-muted-foreground" /> : <Badge variant={query.data?.has_cached_data ? "secondary" : "outline"}>{query.data?.has_cached_data ? pick({ tr: "Kayıtlı", en: "Stored" }) : pick({ tr: "Henüz alınmadı", en: "Not fetched" })}</Badge>}
     </div>
     {latest ? <div className="mt-3 rounded-lg border bg-muted/20 p-3 text-sm"><p className="font-medium">{latest.completed_course_count} {pick({ tr: "tamamlanmış ders", en: "completed courses" })} · {latest.enrolled_course_count} {pick({ tr: "kayıtlı ders", en: "enrolled courses" })}</p><p className="mt-1 text-xs text-muted-foreground">{pick({ tr: "Dönem", en: "Term" })}: {formatAcademicTerm(latest.term, locale)} · {new Date(latest.fetched_at).toLocaleDateString(locale === "tr" ? "tr-TR" : "en-US")}</p>{latest.completed_course_codes.length ? <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{latest.completed_course_codes.join(" · ")}</p> : null}</div> : null}
     <div className="mt-4 flex flex-wrap items-end gap-2"><div className="space-y-1"><Label htmlFor="academic-term" className="text-xs">{pick({ tr: "Dönem", en: "Term" })}</Label><select id="academic-term" value={term} onChange={(event) => setTerm(event.target.value)} className="h-10 rounded-md border bg-background px-3 text-sm">{AVAILABLE_TERMS.map((item) => <option key={item.value} value={item.value}>{item[locale]}</option>)}</select></div><Button variant="outline" disabled={sync.isPending || term.trim().length < 3} onClick={() => sync.mutate()}>{sync.isPending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}{pick({ tr: "ODTÜ'den yenile", en: "Refresh from METU" })}</Button>
+      {/* Kept from the planner work: the read really does take a minute or two,
+          and a button that looks stuck is the reason people reload mid-scrape. */}
+      {sync.isPending ? <p className="w-full text-xs text-muted-foreground">{pick({ tr: "ODTÜ kayıtların okunuyor; bu bir iki dakika sürebilir. Sayfayı açık bırak.", en: "Your METU records are being read; this can take a minute or two. Keep the page open." })}</p> : null}
       {query.data?.has_cached_data ? <AlertDialog><AlertDialogTrigger render={<Button variant="outline" className="text-destructive" />}><Trash2Icon />{pick({ tr: "Akademik verileri sıfırla", en: "Reset academic data" })}</AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{pick({ tr: "Akademik veriler silinsin mi?", en: "Delete academic data?" })}</AlertDialogTitle><AlertDialogDescription>{pick({ tr: "Kayıtlı bölüm ve transkript dersleri kalıcı olarak silinir. ODTÜ bağlantın ve giriş bilgilerin silinmez; gerektiğinde veriler tekrar alınabilir.", en: "Stored department and transcript courses are permanently deleted. Your METU connection and credentials remain; the data can be fetched again when needed." })}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{pick({ tr: "Vazgeç", en: "Cancel" })}</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={reset.isPending} onClick={() => reset.mutate()}>{reset.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}{pick({ tr: "Sil ve sıfırla", en: "Delete and reset" })}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}
     </div>
   </div>;
@@ -237,5 +294,5 @@ function PreferenceEditor() {
   const query = useQuery({ queryKey: ["student", "preferences"], queryFn: () => jsonFetch<{ items: PreferenceItem[] }>("/api/student/preferences") });
   const save = useMutation({ mutationFn: ({ key, value }: { key: string; value: Record<string, unknown> }) => jsonFetch<void>(`/api/student/preferences/${key}`, { method: "PUT", body: { value } }), onSuccess: () => { toast.success(pick({ tr: "Tercih kaydedildi", en: "Preference saved" })); void client.invalidateQueries({ queryKey: ["student", "preferences"] }); }, onError: (error) => toast.error(error.message) });
   const remove = useMutation({ mutationFn: (key: string) => jsonFetch<void>(`/api/student/preferences/${key}`, { method: "DELETE" }), onSuccess: () => void client.invalidateQueries({ queryKey: ["student", "preferences"] }) });
-  return <div className="space-y-4"><div className="grid gap-3 sm:grid-cols-[1fr_12rem_auto]"><div className="space-y-2"><Label htmlFor="interests">{pick({ tr: "İlgi alanları", en: "Interests" })}</Label><Input id="interests" value={interests} onChange={(event) => setInterests(event.target.value)} placeholder={pick({ tr: "sinema, caz, robotik", en: "cinema, jazz, robotics" })} /></div><div className="space-y-2"><Label>{pick({ tr: "Cihaz", en: "Device" })}</Label><Select value={device} onValueChange={(value) => setDevice(value ?? "unspecified")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["unspecified", "ios", "android", "windows", "macos", "linux"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div><div className="flex items-end"><Button variant="outline" disabled={save.isPending || (!interests.trim() && device === "unspecified")} onClick={() => { if (interests.trim()) save.mutate({ key: "interests", value: { items: interests.split(",").map((item) => item.trim()).filter(Boolean) } }); if (device !== "unspecified") save.mutate({ key: "device_platform", value: { platform: device } }); }}>{pick({ tr: "Kaydet", en: "Save" })}</Button></div></div>{query.data?.items.length ? <div className="flex flex-wrap gap-2">{query.data.items.map((item) => <Badge key={item.key} variant="secondary" className="gap-2 py-1.5">{item.key.replaceAll("_", " ")}<button type="button" className="rounded-full hover:text-destructive" aria-label={pick({ tr: "Tercihi sil", en: "Delete preference" })} onClick={() => remove.mutate(item.key)}>×</button></Badge>)}</div> : null}</div>;
+  return <div className="space-y-4"><div className="grid gap-3 sm:grid-cols-[1fr_12rem_auto]"><div className="space-y-2"><Label htmlFor="interests">{pick({ tr: "İlgi alanları", en: "Interests" })}</Label><Input id="interests" value={interests} onChange={(event) => setInterests(event.target.value)} placeholder={pick({ tr: "sinema, caz, robotik", en: "cinema, jazz, robotics" })} /></div><div className="space-y-2"><Label>{pick({ tr: "Cihaz", en: "Device" })}</Label><Select value={device} onValueChange={(value) => setDevice(value ?? "unspecified")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["unspecified", "ios", "android", "windows", "macos", "linux"].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></div><div className="flex items-end"><Button variant="outline" disabled={save.isPending || (!interests.trim() && device === "unspecified")} onClick={() => { if (interests.trim()) save.mutate({ key: "interests", value: { items: interests.split(",").map((item) => item.trim()).filter(Boolean) } }); if (device !== "unspecified") save.mutate({ key: "device_platform", value: { platform: device } }); }}>{pick({ tr: "Kaydet", en: "Save" })}</Button></div></div>{query.data?.items.length ? <div className="flex flex-wrap gap-2">{query.data.items.map((item) => <Badge key={item.key} variant="secondary" className="gap-2 py-1.5">{item.key.replaceAll("_", " ")} · {item.provenance}<button type="button" className="rounded-full hover:text-destructive" aria-label={pick({ tr: "Tercihi sil", en: "Delete preference" })} onClick={() => remove.mutate(item.key)}>×</button></Badge>)}</div> : null}</div>;
 }

@@ -17,12 +17,18 @@ export function useChatSessions() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["chat-sessions"] }),
   });
 
+  const removeAll = useMutation({
+    mutationFn: () => jsonFetch<{ deleted: number }>("/api/sessions", { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["chat-sessions"] }),
+  });
+
   return {
     sessions: query.data ?? [],
     isLoading: query.isLoading,
     error: query.error,
     refetch: query.refetch,
     remove,
+    removeAll,
   };
 }
 

@@ -134,7 +134,7 @@ function AssistantThread({
   const [telemetry] = useState(() => new ChatTelemetry());
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatConfirmation | null>(null);
   const [confirmationPending, setConfirmationPending] = useState(false);
-  const { pick, locale } = useLocale();
+  const { pick } = useLocale();
 
   const runtime = useChatRuntime({
     id: threadId,
@@ -307,12 +307,13 @@ function AssistantThread({
 export function ChatShell() {
   const { pick } = useLocale();
   const desktop = useDesktopLayout();
-  const { sessions, remove, refetch } = useChatSessions();
+  const { sessions, remove, removeAll, refetch } = useChatSessions();
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
   const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
   const [seedMessages, setSeedMessages] = useState<UIMessage[] | undefined>(undefined);
   const [chatKey, setChatKey] = useState(0);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
@@ -355,6 +356,19 @@ export function ChatShell() {
     } catch (error) {
       captureError(error, { source: "chat_delete_session" });
       toast.error(error instanceof Error ? error.message : "Could not delete session");
+    }
+  }
+
+  async function deleteAllSessions() {
+    try {
+      const { deleted } = await removeAll.mutateAsync();
+      newChat();
+      setConfirmDeleteAll(false);
+      captureProductEvent("chat_deleted_all", { count: deleted });
+      toast.success(pick({ tr: `${deleted} sohbet silindi.`, en: `${deleted} chats deleted.` }));
+    } catch (error) {
+      captureError(error, { source: "chat_delete_all_sessions" });
+      toast.error(error instanceof Error ? error.message : "Could not delete chats");
     }
   }
 
@@ -405,6 +419,7 @@ export function ChatShell() {
               onNewChat={startNewChat}
               onSelect={selectSession}
               onDelete={requestDelete}
+              onDeleteAll={() => setConfirmDeleteAll(true)}
             />
           </ResizablePanel>
           <ResizableHandle
@@ -446,6 +461,7 @@ export function ChatShell() {
               requestDelete(sessionId);
               setMobileHistoryOpen(false);
             }}
+            onDeleteAll={() => { setConfirmDeleteAll(true); setMobileHistoryOpen(false); }}
           />
         </SheetContent>
       </Sheet>
@@ -488,6 +504,42 @@ export function ChatShell() {
             >
               {remove.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
               {pick({ tr: "Sohbeti sil", en: "Delete chat" })}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={confirmDeleteAll}
+        onOpenChange={(open) => {
+          if (!open && !removeAll.isPending) setConfirmDeleteAll(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-destructive/10 text-destructive">
+              <Trash2Icon />
+            </AlertDialogMedia>
+            <AlertDialogTitle>
+              {pick({ tr: "Tüm sohbetler silinsin mi?", en: "Delete all chats?" })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pick({
+                tr: `${sessions.length} sohbetin tamamı kalıcı olarak silinecek. Bu işlem geri alınamaz.`,
+                en: `All ${sessions.length} of your chats will be permanently deleted. This action cannot be undone.`,
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removeAll.isPending}>
+              {pick({ tr: "Vazgeç", en: "Cancel" })}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={removeAll.isPending || !sessions.length}
+              onClick={() => void deleteAllSessions()}
+            >
+              {removeAll.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
+              {pick({ tr: "Hepsini sil", en: "Delete all" })}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

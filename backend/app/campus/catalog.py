@@ -99,6 +99,7 @@ CAMPUS_TOOLS: tuple[CampusTool, ...] = (
             "search_departments",
             "list_program_courses",
             "get_course_info",
+            "get_section_constraints",
             "get_course_prerequisites",
             "get_course_replacements",
             "get_thesis_courses",

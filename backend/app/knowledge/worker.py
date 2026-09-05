@@ -14,6 +14,7 @@ import os
 import socket
 import uuid
 
+from app.campus.warmer import warm_once
 from app.config import get_settings
 from app.db.models import CampusIngestionJob
 from app.db.session import SessionLocal
@@ -142,5 +143,29 @@ async def run() -> None:
         await asyncio.to_thread(posthog_logs_shutdown)
 
 
+async def warm_catalog_loop() -> None:
+    """Keep the shared course catalog warm, quietly and slowly.
+
+    Runs beside the ingestion loop rather than inside it so a long warm-up
+    never delays a queued knowledge job. Every failure is contained here: the
+    warm-up is an optimisation, and it must not be able to stop the worker.
+    """
+    settings = get_settings()
+    while True:
+        try:
+            fetched = await warm_once()
+            if fetched:
+                logger.info("catalog_warm_pass", fetched=fetched)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("catalog_warm_iteration_failed", error=str(exc))
+        await asyncio.sleep(settings.catalog_warm_poll_seconds)
+
+
+async def main() -> None:
+    await asyncio.gather(run(), warm_catalog_loop())
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())

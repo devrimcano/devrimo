@@ -11,7 +11,6 @@ the schema: the field is a prefix, not a name.
 """
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0015_surname_prefix"
