@@ -5,44 +5,37 @@ import {
   getCampusConnection,
   putCampusConnection,
 } from "@/lib/api/campus";
-import { apiErrorResponse, requireAuth } from "@/lib/api/route-utils";
+import { apiErrorResponse, authenticatedRoute } from "@/lib/api/route-utils";
 import type { CampusConnectionInput } from "@/lib/types";
 
-export async function GET() {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
+const ROUTE = "/api/campus/connection";
 
+export const GET = authenticatedRoute(ROUTE, async (context) => {
   try {
-    return NextResponse.json(await getCampusConnection(result.auth.accessToken));
+    return NextResponse.json(await getCampusConnection(context.auth.accessToken));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});
 
 /**
  * The student's METU password passes through this handler on its way to the
  * broker, and is never logged, cached, or echoed back — the broker's response
  * describes the connection without containing it.
  */
-export async function PUT(request: NextRequest) {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
-
+export const PUT = authenticatedRoute(ROUTE, async (context, request: NextRequest) => {
   try {
     const body = (await request.json()) as CampusConnectionInput;
-    return NextResponse.json(await putCampusConnection(result.auth.accessToken, body));
+    return NextResponse.json(await putCampusConnection(context.auth.accessToken, body));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});
 
-export async function DELETE() {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
-
+export const DELETE = authenticatedRoute(ROUTE, async (context) => {
   try {
-    return NextResponse.json(await deleteCampusConnection(result.auth.accessToken));
+    return NextResponse.json(await deleteCampusConnection(context.auth.accessToken));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});

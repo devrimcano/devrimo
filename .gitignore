@@ -1,0 +1,3 @@
+# Written by scripts/deploy-vps.sh next to the deployed tree so the running
+# services know which commit they are. Never committed.
+.release-sha

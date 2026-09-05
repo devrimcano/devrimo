@@ -12,6 +12,21 @@ os.environ["AGENT_RUNTIME"] = "fake"
 # Belt and braces: the Agent is constructed with telemetry=False, but a test
 # must never be able to reach os-api.agno.com even if that regresses.
 os.environ["AGNO_TELEMETRY"] = "false"
+
+# No test run may reach PostHog. ``Settings`` reads the developer's real
+# ``backend/.env``, so a machine with a working key turned every assertion that
+# exercised a capture path into a production event — which is how a literal
+# ``some_event`` and a pytest ``ValueError: boom`` ended up in the live
+# project's error tracking. Blanked here, before ``app`` is imported anywhere,
+# because the client is built once and memoised.
+#
+# ``POSTHOG_ENABLED`` is deliberately left at its default: the middleware is
+# gated on it, and the tests that assert identity binding turn telemetry on by
+# monkeypatching the key onto the settings object.
+os.environ["POSTHOG_API_KEY"] = ""
+os.environ["POSTHOG_PERSONAL_API_KEY"] = ""
+os.environ["ENVIRONMENT"] = "test"
+os.environ["RELEASE"] = "test"
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret-not-for-production")
 os.environ.setdefault("SECRET_ENCRYPTION_KEY", "test-encryption-key")

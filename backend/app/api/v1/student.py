@@ -13,6 +13,7 @@ from app.campus.course_info import forget_user
 from app.db.models import StudentAcademicSnapshot, StudentContext, UserPreference, UserUpdateState
 from app.db.session import get_db
 from app.logging import get_logger
+from app.observability.client import report_exception
 from app.planning.groups import get_course_group
 from app.planning.mcp_bridge import sync_planning_snapshot_from_sais, sync_student_context_from_sais
 from app.planning.service import SemesterPlanRequest, plan_semester
@@ -136,6 +137,13 @@ async def academic_data_sync(
             reached_sais = True
     except Exception as exc:
         logger.warning("academic_data_sync_failed", user_id=str(user.id), error=str(exc))
+        report_exception(
+            exc,
+            distinct_id=str(user.id),
+            handler="academic_data_sync",
+            dependency="sais",
+            forced=body.force,
+        )
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Academic data could not be fetched from SAIS") from exc
     if not reached_sais:
         raise HTTPException(
@@ -285,6 +293,12 @@ async def semester_plan(
             # Preserve the planner's established needs_academic_snapshot
             # response when SAIS is disconnected or temporarily unavailable.
             logger.warning("planning_snapshot_sync_failed", user_id=str(user.id), error=str(exc))
+            report_exception(
+                exc,
+                distinct_id=str(user.id),
+                handler="planning_snapshot_sync",
+                dependency="sais",
+            )
     return await plan_semester(db, user.id, body)
 
 

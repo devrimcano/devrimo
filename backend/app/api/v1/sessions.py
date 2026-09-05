@@ -21,6 +21,7 @@ from app.db.models import ChatSession
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability import capture_exception
+from app.observability.client import report_exception
 from app.schemas import ChatMessageOut, ChatSessionDetailOut, ChatSessionListOut, ChatSessionOut
 
 router = APIRouter()
@@ -104,6 +105,12 @@ async def get_session(
         # A history read failing should not blank the thread list; log it and
         # return the session with no messages rather than a 502.
         logger.error("history_load_failed", user_id=str(user.id), session_id=session_id, error=str(exc))
+        report_exception(
+            exc,
+            distinct_id=str(user.id),
+            handler="session_history",
+            chat_session_id=session_id,
+        )
         # Degrading to an empty thread is invisible to the student and to us;
         # this is the only signal that their history stopped loading.
         capture_exception(
@@ -142,6 +149,7 @@ async def delete_session(
         # either way; an orphaned Agno session is a cleanup problem, not a
         # reason to fail their delete.
         logger.warning("agno_session_delete_failed", user_id=str(user.id), error=str(exc))
+        report_exception(exc, distinct_id=str(user.id), handler="session_delete", chat_session_id=session_id)
         capture_exception(
             exc,
             distinct_id=str(user.id),

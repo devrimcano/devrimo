@@ -32,12 +32,16 @@ class JobLease:
     job_id: UUID
     owner: str
     attempt: int
+    # Carried so a worker can label its telemetry with the source it is
+    # ingesting without re-reading the job row it no longer holds.
+    source_id: UUID
+    kind: str
 
     @classmethod
     def from_job(cls, job: CampusIngestionJob) -> "JobLease":
         if job.status != "leased" or not job.lease_owner:
             raise JobLeaseLost("Knowledge job must be claimed before processing")
-        return cls(job.id, job.lease_owner, job.attempt)
+        return cls(job.id, job.lease_owner, job.attempt, job.source_id, job.kind)
 
 
 def _lease_conditions(lease: JobLease) -> tuple:
@@ -410,11 +414,17 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
     return len(records)
 
 
-async def fail_job(db: AsyncSession, lease: JobLease, exc: Exception) -> None:
+async def fail_job(db: AsyncSession, lease: JobLease, exc: Exception) -> str | None:
+    """Record the failure and decide whether the job retries or is dead.
+
+    Returns the resulting job status so the caller can report the difference:
+    "this will be retried in 30 seconds" and "this source will never be
+    ingested again" are the same log line today and very different problems.
+    """
     await db.rollback()
     job = await db.get(CampusIngestionJob, lease.job_id)
     if job is None:
-        return
+        return None
     source = await db.scalar(
         select(CampusSource)
         .where(CampusSource.id == job.source_id)
@@ -425,7 +435,7 @@ async def fail_job(db: AsyncSession, lease: JobLease, exc: Exception) -> None:
         await _lock_lease(db, lease)
     except JobLeaseLost:
         await db.rollback()
-        return
+        return None
     now = datetime.now(UTC)
     superseded = source is None or source.active_revision_id != job.revision_id
     dead = superseded or isinstance(exc, SourceRevisionChanged) or job.attempt >= job.max_attempts
@@ -441,3 +451,4 @@ async def fail_job(db: AsyncSession, lease: JobLease, exc: Exception) -> None:
         source.last_fetched_at = now
         source.last_error = str(exc)[:2000]
     await db.commit()
+    return job.status

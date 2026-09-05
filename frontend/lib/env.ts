@@ -61,11 +61,33 @@ export function isPostHogConfigured() {
  * everything through to the FastAPI broker — so this is the app's hostname,
  * never the broker's. Ports are not part of a hostname: "localhost:3000" would
  * match nothing at all.
+ *
+ * The current hostname is always included. The previous default covered only
+ * `localhost` and `127.0.0.1`, so unless `NEXT_PUBLIC_POSTHOG_TRACING_HOSTS`
+ * happened to be set correctly, the deployed app attached no tracing headers
+ * at all and every backend trace was orphaned from the session that caused it.
+ * Including it is safe precisely because the browser only ever calls its own
+ * origin: the headers cannot reach a third party this way.
  */
 export function getTracingHostnames() {
   const configured = process.env.NEXT_PUBLIC_POSTHOG_TRACING_HOSTS;
-  if (configured) {
-    return configured.split(",").map((host) => host.trim()).filter(Boolean);
+  const hosts = new Set(
+    configured
+      ? configured.split(",").map((host) => host.trim()).filter(Boolean)
+      : ["localhost", "127.0.0.1"],
+  );
+
+  const current = typeof window !== "undefined" ? window.location.hostname : "";
+  if (current) hosts.add(current);
+
+  const site = getSiteUrl();
+  if (site) {
+    try {
+      hosts.add(new URL(site).hostname);
+    } catch {
+      // getSiteUrl already validated this; ignore anything that slipped past.
+    }
   }
-  return ["localhost", "127.0.0.1"];
+
+  return [...hosts];
 }

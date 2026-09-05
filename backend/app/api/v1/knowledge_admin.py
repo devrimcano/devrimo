@@ -28,6 +28,7 @@ from app.knowledge import registry
 from app.knowledge.embeddings import embedding_column, get_embedding_config
 from app.knowledge.retrieval import search_knowledge
 from app.knowledge.templates import DEFAULT_SOURCE_TEMPLATES
+from app.observability.client import report_exception
 
 router = APIRouter()
 
@@ -487,6 +488,17 @@ async def preview_revision(
     try:
         records = await registry.preview_revision(source, revision)
     except Exception as exc:
+        # Flattened to a 422 so the admin sees why their parsing settings did
+        # not work — but an adapter or a fetch blowing up is our defect, and a
+        # 422 is the one status the outcome event will not treat as one.
+        report_exception(
+            exc,
+            distinct_id=str(principal.user.id),
+            handler="knowledge_preview_revision",
+            source_id=str(source.id),
+            source_kind=source.kind,
+            revision=revision.revision,
+        )
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return {
         "count": len(records),

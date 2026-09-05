@@ -31,6 +31,7 @@ from app.core.ttl_cache import TTLCache
 from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
+from app.observability.client import report_exception
 from app.planning.mcp_bridge import sync_student_context_from_sais
 
 router = APIRouter()
@@ -123,6 +124,13 @@ async def _sync_context(user_id) -> bool:
         return await sync_student_context_from_sais(user_id)
     except Exception as exc:
         logger.warning("schedule_context_sync_failed", user_id=str(user_id), error=str(exc))
+        report_exception(
+            exc,
+            distinct_id=str(user_id),
+            handler="schedule_context_sync",
+            operation="sync_student_context_from_sais",
+            dependency="sais",
+        )
         return False
 
 
@@ -312,6 +320,7 @@ async def ai_schedule_plan(
         raise
     except Exception as exc:
         logger.warning("schedule_agent_failed", user_id=str(user.id), error=str(exc))
+        report_exception(exc, distinct_id=str(user.id), handler="schedule_recommendation", dependency="agent")
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "The course recommendation service failed. Department and term were not changed; try this step again.",

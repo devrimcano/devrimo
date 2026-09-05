@@ -1,28 +1,24 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getProfile, patchProfile } from "@/lib/api/profile";
-import { apiErrorResponse, requireAuth } from "@/lib/api/route-utils";
+import { apiErrorResponse, authenticatedRoute } from "@/lib/api/route-utils";
 import type { ProfileInput } from "@/lib/types";
 
-export async function GET() {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
+const ROUTE = "/api/profile";
 
+export const GET = authenticatedRoute(ROUTE, async (context) => {
   try {
-    return NextResponse.json(await getProfile(result.auth.accessToken));
+    return NextResponse.json(await getProfile(context.auth.accessToken));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});
 
-export async function PATCH(request: NextRequest) {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
-
+export const PATCH = authenticatedRoute(ROUTE, async (context, request: NextRequest) => {
   try {
     const body = (await request.json()) as ProfileInput;
-    return NextResponse.json(await patchProfile(result.auth.accessToken, body));
+    return NextResponse.json(await patchProfile(context.auth.accessToken, body));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});

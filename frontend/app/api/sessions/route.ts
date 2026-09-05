@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { listChatSessions } from "@/lib/api/chat";
-import { apiErrorResponse, requireAuth } from "@/lib/api/route-utils";
+import { apiErrorResponse, authenticatedRoute } from "@/lib/api/route-utils";
 
-export async function GET() {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
-
+export const GET = authenticatedRoute("/api/sessions", async (context) => {
   try {
-    const sessions = await listChatSessions(result.auth.accessToken);
+    const sessions = await listChatSessions(context.auth.accessToken);
     return NextResponse.json({ sessions });
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});

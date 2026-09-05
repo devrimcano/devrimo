@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLocale } from "@/components/locale-provider";
-import { captureError, identifyStudent } from "@/components/posthog-analytics";
+import { captureError, captureProductEvent, identifyStudent } from "@/components/posthog-analytics";
 
 export function LoginForm() {
   const { pick } = useLocale();
@@ -53,6 +53,11 @@ export function LoginForm() {
 
     const supabase = createClient();
 
+    const authMode = mode === "login" ? "sign-in" : "sign-up";
+    // The denominator. Without an attempt event a student who cannot sign in
+    // is indistinguishable from one who never tried.
+    captureProductEvent("auth_submitted", { mode: authMode });
+
     try {
       if (mode === "login") {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
@@ -65,6 +70,7 @@ export function LoginForm() {
         // sign-in itself lands on the student rather than on the anonymous
         // device that preceded it.
         identifyStudent(data.session.user.id);
+        captureProductEvent("auth_result", { mode: authMode, result: "success", reason: null });
         setInfo(pick({ tr: "Giriş başarılı, asistanın açılıyor…", en: "Signed in. Opening your assistant…" }));
         window.location.replace(next);
         return;
@@ -81,11 +87,18 @@ export function LoginForm() {
       if (signUpError) throw signUpError;
       if (data.session) {
         identifyStudent(data.session.user.id);
+        captureProductEvent("auth_result", { mode: authMode, result: "success", reason: null });
         window.location.assign(next);
         return;
       }
+      captureProductEvent("auth_result", { mode: authMode, result: "success", reason: "confirmation_email_sent" });
       setInfo(pick({ tr: "Hesabını etkinleştirmek için e-posta adresine gönderdiğimiz bağlantıyı aç.", en: "Open the link we sent to your email to activate your account." }));
     } catch (caught) {
+      captureProductEvent("auth_result", {
+        mode: authMode,
+        result: "error",
+        reason: caught instanceof Error ? caught.name : "unknown",
+      });
       captureError(caught, { source: "auth", mode });
       setError(authErrorMessage(caught));
     } finally {

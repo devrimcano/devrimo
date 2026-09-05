@@ -27,9 +27,11 @@ by the chat route:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
@@ -37,6 +39,12 @@ from app.config import get_settings
 from app.logging import get_logger
 
 logger = get_logger(__name__)
+
+# PostHog's AI event names. Embeddings are a first-class event type, so an
+# embedding batch belongs beside the generations rather than in a bespoke
+# product event nothing else knows how to read.
+EVENT_AI_EMBEDDING = "$ai_embedding"
+EVENT_AI_SPAN = "$ai_span"
 
 # Set per turn by the chat route; read by every nested model call.
 current_trace_id: ContextVar[str | None] = ContextVar("posthog_ai_trace_id", default=None)
@@ -189,3 +197,125 @@ def build_traced_async_client(
         # it; the caller falls back to the uninstrumented client.
         logger.warning("posthog_ai_client_build_failed", error=exc.__class__.__name__)
         return None
+
+
+@dataclass
+class AiOperation:
+    """One non-chat model call — an embedding batch, a classification, a rerank.
+
+    ``build_traced_async_client`` covers everything Agno routes through the chat
+    model client, which is most of the model traffic but not all of it: the
+    embedding provider is reached with a plain ``httpx`` call and was therefore
+    invisible. A failing embedding endpoint showed up as a slow ingestion queue
+    and nothing else.
+
+    Usage is recorded as *reported by the provider*, and its absence is recorded
+    explicitly. "This provider does not return token counts" and "this call used
+    no tokens" are different facts, and collapsing them into a missing property
+    makes cost analysis quietly wrong.
+    """
+
+    operation: str
+    provider: str
+    model: str
+    event: str = EVENT_AI_SPAN
+    distinct_id: str | None = None
+    started: float = field(default_factory=time.monotonic)
+    input_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    http_status: int | None = None
+    is_error: bool = False
+    error_type: str | None = None
+    error_message: str | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
+    _finished: bool = False
+
+    @property
+    def duration_seconds(self) -> float:
+        return round(time.monotonic() - self.started, 4)
+
+    def detail(self, **properties: Any) -> None:
+        self.properties.update(properties)
+
+    def usage(self, *, input_tokens: int | None = None, total_tokens: int | None = None) -> None:
+        self.input_tokens = input_tokens
+        self.total_tokens = total_tokens
+
+    def failed(self, exc: BaseException, *, http_status: int | None = None) -> None:
+        self.is_error = True
+        self.error_type = exc.__class__.__name__
+        self.error_message = str(exc) or None
+        if http_status is not None:
+            self.http_status = http_status
+
+    def finish(self) -> None:
+        """Emit the AI event. Idempotent, and never raises."""
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            from app.observability.client import USAGE_UNAVAILABLE, capture
+
+            payload: dict[str, Any] = {
+                "$ai_provider": self.provider,
+                "$ai_model": self.model,
+                "$ai_latency": self.duration_seconds,
+                "$ai_span_name": self.operation,
+                "ai_operation": self.operation,
+                **trace_properties(),
+                **self.properties,
+            }
+            trace_id = current_trace_id.get()
+            if trace_id:
+                payload["$ai_trace_id"] = trace_id
+            if self.http_status is not None:
+                payload["$ai_http_status"] = self.http_status
+
+            if self.input_tokens is not None:
+                payload["$ai_input_tokens"] = self.input_tokens
+            if self.total_tokens is not None:
+                payload["$ai_total_tokens"] = self.total_tokens
+            if self.input_tokens is None and self.total_tokens is None:
+                payload["ai_usage"] = USAGE_UNAVAILABLE
+            if self.cost_usd is not None:
+                payload["$ai_total_cost_usd"] = self.cost_usd
+            else:
+                payload["ai_cost"] = USAGE_UNAVAILABLE
+
+            if self.is_error:
+                payload["$ai_is_error"] = True
+                payload["$ai_error"] = self.error_message or self.error_type or "unknown"
+                payload["error_type"] = self.error_type
+
+            capture(self.event, distinct_id=self.distinct_id, **payload)
+        except Exception as exc:  # pragma: no cover - observation must not break a call
+            from app.observability.diagnostics import report_local
+
+            report_local("ai_operation_observation_failed", operation=self.operation, error=exc.__class__.__name__)
+
+
+@contextmanager
+def observed_ai_operation(
+    operation: str,
+    *,
+    provider: str,
+    model: str,
+    event: str = EVENT_AI_SPAN,
+    distinct_id: str | None = None,
+    **properties: Any,
+) -> Iterator[AiOperation]:
+    """Observe a model call this process makes outside Agno's client.
+
+    An exception escaping the block is recorded on the event and re-raised; the
+    caller keeps whatever fallback behaviour it already had.
+    """
+    call = AiOperation(operation=operation, provider=provider, model=model, event=event, distinct_id=distinct_id)
+    call.detail(**properties)
+    try:
+        yield call
+    except BaseException as exc:
+        call.failed(exc, http_status=getattr(getattr(exc, "response", None), "status_code", None))
+        raise
+    finally:
+        call.finish()

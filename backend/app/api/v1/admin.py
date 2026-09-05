@@ -37,6 +37,7 @@ from app.db.models import (
     UserProfile,
 )
 from app.db.session import get_db
+from app.observability.client import report_exception
 
 router = APIRouter()
 
@@ -444,8 +445,18 @@ async def suspend_user(
     result = "success"
     try:
         await SupabaseAdmin().update_user(user_id, ban_duration="876000h")
-    except Exception:
+    except Exception as exc:
+        # The local deny already committed, so the student is locked out of the
+        # broker — but their Supabase session is still valid. A suspension that
+        # is only half applied is exactly the state worth an issue.
         result = "partial"
+        report_exception(
+            exc,
+            distinct_id=str(principal.user.id),
+            handler="admin_user_suspend",
+            dependency="supabase_admin",
+            target_user_id=str(user_id),
+        )
     await record_event(
         db,
         actor_user_id=principal.user.id,
@@ -939,8 +950,9 @@ async def system_health(
     database = "ok"
     try:
         await db.execute(select(1))
-    except Exception:
+    except Exception as exc:
         database = "error"
+        report_exception(exc, distinct_id=str(principal.user.id), handler="admin_system_health", dependency="database")
     settings = get_settings()
     return {
         "broker": "ok",

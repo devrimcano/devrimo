@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { jsonFetch } from "@/lib/api/fetcher";
+import { captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import { AVAILABLE_TERMS, formatAcademicTerm } from "@/lib/campus";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
@@ -211,7 +212,12 @@ export function SchedulePlanner() {
         // then quietly load another department's courses.
         setDepartment(context.department_code ?? "");
       })
-      .catch((error) => { if (!cancelled) toast.error(error instanceof Error ? error.message : t("Bölüm bilgisi alınamadı.", "Department could not be loaded.")); })
+      .catch((error) => {
+        // The planner is driven imperatively rather than through TanStack
+        // Query, so none of its failures reached the central query reporter.
+        captureRequestFailure(error, { operation: "schedule.student_context", kind: "query" });
+        if (!cancelled) toast.error(error instanceof Error ? error.message : t("Bölüm bilgisi alınamadı.", "Department could not be loaded."));
+      })
       .finally(() => { if (!cancelled) setDepartmentBusy(false); });
     return () => { cancelled = true; };
   // The student context is stable for the lifetime of this page.
@@ -251,19 +257,37 @@ export function SchedulePlanner() {
       const courses = parseCourses(response.data).filter((course) => belongsToDepartment(course, department.trim()));
       setCatalogCourses(courses);
       if (!courses.length) toast.error(t("Bu bölüm ve dönem için ders bulunamadı.", "No courses were found for this department and term."));
-    } catch (error) { toast.error(t(`Ders listesi alınamadı: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `Course list failed: ${error instanceof Error ? error.message : "Unknown error"}`)); }
+    } catch (error) {
+      captureRequestFailure(error, { operation: "schedule.courses", kind: "query" });
+      toast.error(t(`Ders listesi alınamadı: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `Course list failed: ${error instanceof Error ? error.message : "Unknown error"}`));
+    }
     finally { setCatalogBusy(false); setActiveStep(null); }
   }
 
   async function requestAiPlan(courses: CatalogCourse[]) {
-    const response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; source?: string }>("/api/schedule/ai-plan", {
-      method: "POST",
-      body: {
-        department: department.trim(),
-        semester: term,
-        courses: courses.map((course) => ({ code: course.rawCode })),
-      },
-    });
+    // The slowest thing a student waits on in this app, and the only one
+    // backed by the agent. Its outcome was previously visible only as a toast.
+    const startedAt = Date.now();
+    let response: { courses?: AiPlanCourse[]; warnings?: string[]; source?: string };
+    try {
+      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; source?: string }>("/api/schedule/ai-plan", {
+        method: "POST",
+        body: {
+          department: department.trim(),
+          semester: term,
+          courses: courses.map((course) => ({ code: course.rawCode })),
+        },
+      });
+    } catch (error) {
+      captureProductEvent("schedule_plan_completed", {
+        result: "error",
+        requested_courses: courses.length,
+        returned_courses: 0,
+        warnings: 0,
+        duration_seconds: (Date.now() - startedAt) / 1000,
+      });
+      throw error;
+    }
     const sectionMap: Record<string, CatalogSection[]> = {};
     const verified = (response.courses ?? []).flatMap((item) => {
       const rawCode = String(item.code ?? "").trim();
@@ -274,6 +298,13 @@ export function SchedulePlanner() {
     });
     setAiSections((current) => ({ ...current, ...sectionMap }));
     const warnings = (response.warnings ?? []).filter((warning): warning is string => typeof warning === "string");
+    captureProductEvent("schedule_plan_completed", {
+      result: "success",
+      requested_courses: courses.length,
+      returned_courses: verified.length,
+      warnings: warnings.length,
+      duration_seconds: (Date.now() - startedAt) / 1000,
+    });
     return { courses: verified, warnings, sections: sectionMap };
   }
 
@@ -318,6 +349,7 @@ export function SchedulePlanner() {
         ? t(`${result.courses.length} ders listelendi.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `${result.courses.length} courses listed.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`)
         : t("Bu dönem için kayıtlı zorunlu ders bulunamadı.", "No required courses found for this term."));
     } catch (error) {
+      captureRequestFailure(error, { operation: "schedule.required_courses", kind: "query" });
       toast.error(t(`Alman gereken dersler getirilemedi: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `Required courses failed: ${error instanceof Error ? error.message : "Unknown error"}`));
     } finally { setCatalogBusy(false); setActiveStep(null); }
   }
@@ -335,7 +367,10 @@ export function SchedulePlanner() {
       setAiSections((current) => ({ ...current, [courseIdentity(course.rawCode)]: sections }));
       if (!sections.length) toast.error(t("Bu ders için ODTÜ sisteminde şube bulunamadı.", "No sections were found for this course in METU's system."));
       else if (sections.every((section) => !section.meetings.length)) toast.warning(t(`${course.code} için ${sections.length} şube var; ODTÜ gün ve saatleri henüz yayımlamamış.`, `${sections.length} sections exist for ${course.code}, but METU has not published their days and times yet.`));
-    } catch (error) { toast.error(t(`${course.code} şubeleri alınamadı: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `${course.code} sections failed: ${error instanceof Error ? error.message : "Unknown error"}`)); }
+    } catch (error) {
+      captureRequestFailure(error, { operation: "schedule.sections", kind: "query" });
+      toast.error(t(`${course.code} şubeleri alınamadı: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `${course.code} sections failed: ${error instanceof Error ? error.message : "Unknown error"}`));
+    }
     finally { setCatalogBusy(false); setActiveStep(null); }
   }
 

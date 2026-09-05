@@ -27,7 +27,13 @@ export default personalApiKey && projectId
       sourcemaps: {
         enabled: true,
         deleteAfterUpload: true,
-        releaseVersion: process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA,
+        // The same commit `scripts/deploy-vps.sh` exports as
+        // NEXT_PUBLIC_RELEASE, so a browser exception and the source map that
+        // resolves its stack always name the same build.
+        releaseVersion:
+          process.env.VERCEL_GIT_COMMIT_SHA ??
+          process.env.GIT_COMMIT_SHA ??
+          process.env.NEXT_PUBLIC_RELEASE,
       },
     })
   : nextConfig;

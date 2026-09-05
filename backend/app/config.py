@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     port: int = 8000
     cors_origins: str = "http://localhost:3000"
 
+    # --- Deployment identity ----------------------------------------------
+    # Stamped onto every event, log record and span so a regression can be
+    # attributed to a deploy rather than to a date. ``release`` is normally
+    # left unset here: ``scripts/deploy-vps.sh`` writes the commit to a
+    # ``.release`` marker beside the deployed tree, which
+    # ``app.observability.runtime`` reads when this is empty.
+    environment: str = "development"  # "development" | "staging" | "production"
+    release: str = ""
+
     # Retrieval depends on pgvector, pg_trgm and Postgres full-text search, so
     # there is no second supported engine to fall back to.
     database_url: str = "postgresql+asyncpg://devrimo:devrimo@localhost:5432/devrimo"

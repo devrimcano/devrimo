@@ -38,6 +38,7 @@ from app.db.models import ChatSession
 from app.db.session import SessionLocal, get_db
 from app.logging import get_logger
 from app.observability import llm_turn, new_trace_id
+from app.observability.client import capture, report_exception
 from app.observability.turns import TurnObservation
 from app.schemas import ChatCompletionsRequestIn, ChatConfirmationIn
 
@@ -45,6 +46,97 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 KEEPALIVE_SECONDS = 15
+
+# Turns whose stream was abandoned still have to release a lock and report an
+# outcome, and the task doing that must outlive the request it came from. A
+# strong reference is kept because asyncio only holds a weak one, and a
+# garbage-collected cleanup task is a turn lock held until the lease expires.
+_DETACHED_CLEANUPS: set[asyncio.Task] = set()
+
+
+def _reject(reason: str, user_id, *, kind: str, **properties) -> None:
+    """Record a turn the broker declined to start.
+
+    A busy agent and an empty message are the product working as designed, so
+    they are events rather than issues — but they were previously nothing at
+    all, which made "how often does a student hit a busy agent?" unanswerable.
+    """
+    capture(
+        "chat_turn_rejected",
+        distinct_id=str(user_id),
+        reason=reason,
+        turn_kind=kind,
+        **properties,
+    )
+
+
+class _TurnCleanup:
+    """Report a turn and release its resources exactly once.
+
+    Both halves used to live in the streaming generator's ``finally``, after a
+    ``yield``. That ordering has a failure mode the audit found: when a student
+    closes the tab, the ``yield`` raises, and the turn is never reported and the
+    heartbeat is never stopped. An ``await`` in that same ``finally`` is no
+    safer, because the enclosing task is already being cancelled.
+
+    So reporting is synchronous and happens first — it cannot raise, and a turn
+    that is not observed is worse than a lock released a moment later — and the
+    asynchronous release runs in its own task, which the normal path awaits and
+    the abandoned path simply lets finish.
+    """
+
+    def __init__(self, observation, heartbeat, heartbeat_stop, finalize, user_id) -> None:
+        self.observation = observation
+        self.heartbeat = heartbeat
+        self.heartbeat_stop = heartbeat_stop
+        self.finalize = finalize
+        self.user_id = str(user_id)
+        self._started = False
+
+    def _begin(self) -> bool:
+        if self._started:
+            return False
+        self._started = True
+        self.heartbeat_stop.set()
+        self.observation.finish()
+        return True
+
+    async def run(self) -> None:
+        """The normal path: wait for the release, but never block on it forever."""
+        if not self._begin():
+            return
+        # Shielded, so a disconnect arriving mid-cleanup cancels the waiting,
+        # not the cleanup: the turn lock is released either way.
+        await asyncio.shield(self._spawn())
+
+    def detach(self) -> None:
+        """The abandoned path: nothing here may await, so hand it to a task."""
+        if not self._begin():
+            return
+        self._spawn()
+
+    def _spawn(self) -> asyncio.Task:
+        task = asyncio.create_task(self._release())
+        _DETACHED_CLEANUPS.add(task)
+        task.add_done_callback(_DETACHED_CLEANUPS.discard)
+        return task
+
+    async def _release(self) -> None:
+        try:
+            await self.heartbeat
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            # A heartbeat that died mid-turn means the lease was not renewed.
+            # It used to propagate out of the ``finally`` and take the rest of
+            # the cleanup with it.
+            logger.warning("turn_heartbeat_failed", user_id=self.user_id, error=str(exc))
+            report_exception(exc, distinct_id=self.user_id, handler="turn_heartbeat")
+        try:
+            await self.finalize()
+        except Exception as exc:
+            logger.error("turn_finalize_failed", user_id=self.user_id, error=str(exc))
+            report_exception(exc, distinct_id=self.user_id, handler="turn_finalize")
 
 
 def _chunk(model: str, *, delta: dict | None = None, extension: dict | None = None, finish: str | None = None) -> bytes:
@@ -168,7 +260,7 @@ async def _serialize_events(
             observation.metrics = getattr(event, "metrics", None)
 
         elif name == RunEvent.run_cancelled.value:
-            observation.outcome = "cancelled"
+            observation.cancelled("run_cancelled")
 
         elif name == RunEvent.run_error.value:
             detail = getattr(event, "content", None) or "The agent could not complete this turn."
@@ -274,10 +366,12 @@ async def chat_completions(
         None,
     )
     if not latest_user_message:
+        _reject("empty_message", user.id, kind="chat_turn")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No user message to respond to")
 
     lock_owner = str(uuid4())
     if not await manager.acquire_turn_lock(db, agent, lock_owner):
+        _reject("agent_busy", user.id, kind="chat_turn", chat_session_id=body.session_id)
         raise HTTPException(status.HTTP_409_CONFLICT, "Agent is busy with another message")
 
     lease = None
@@ -287,7 +381,20 @@ async def chat_completions(
         from app.agents.scholar.context import build_run_dependencies
 
         dependencies = await build_run_dependencies(db, user.id, lease.resident)
-    except Exception:
+    except HTTPException as exc:
+        # A session that belongs to someone else, for instance: expected, and
+        # the turn still never started.
+        _reject("setup_rejected", user.id, kind="chat_turn", status_code=exc.status_code)
+        if lease is not None:
+            await lease.release()
+        await manager.release_turn_lock(db, agent, lock_owner)
+        raise
+    except Exception as exc:
+        # Building the run context reaches the database and the campus layer.
+        # This path released the lock correctly and reported nothing at all.
+        logger.error("chat_turn_setup_failed", user_id=str(user.id), error=str(exc))
+        report_exception(exc, distinct_id=str(user.id), handler="chat_turn_setup")
+        _reject("setup_failed", user.id, kind="chat_turn", error_type=exc.__class__.__name__)
         if lease is not None:
             await lease.release()
         await manager.release_turn_lock(db, agent, lock_owner)
@@ -310,35 +417,50 @@ async def chat_completions(
             session_id=chat_session_id,
             kind="chat_turn",
         )
+        cleanup = _TurnCleanup(
+            observation,
+            heartbeat,
+            heartbeat_stop,
+            lambda: _finalize_turn(user_id, chat_session_id, lock_owner, latest_user_message, lease=lease),
+            user_id,
+        )
         # Scopes every model call Agno makes for this turn — the answer, the
         # tool-loop follow-ups, compression and learning — into one trace.
-        with llm_turn(trace_id, chat_session_id):
-            try:
-                source = _serialize_run(
-                    agno_agent,
-                    latest_user_message,
-                    agno_session_id,
-                    str(user_id),
-                    model,
-                    dependencies,
-                    observation,
-                )
-                async for chunk in _with_keepalive(source):
-                    yield chunk
-            except Exception as exc:  # never let a broken stream leave the lock held
-                logger.error("chat_stream_failed", user_id=str(user_id), error=str(exc))
-                observation.stream_failed(exc)
-                yield _chunk(
-                    model,
-                    extension={"type": "error", "code": "stream_failed", "message": "Chat stream failed"},
-                    finish="stop",
-                )
-            finally:
-                heartbeat_stop.set()
-                await heartbeat
+        try:
+            with llm_turn(trace_id, chat_session_id):
+                try:
+                    source = _serialize_run(
+                        agno_agent,
+                        latest_user_message,
+                        agno_session_id,
+                        str(user_id),
+                        model,
+                        dependencies,
+                        observation,
+                    )
+                    async for chunk in _with_keepalive(source):
+                        yield chunk
+                except Exception as exc:  # never let a broken stream leave the lock held
+                    logger.error("chat_stream_failed", user_id=str(user_id), error=str(exc))
+                    observation.stream_failed(exc)
+                    yield _chunk(
+                        model,
+                        extension={"type": "error", "code": "stream_failed", "message": "Chat stream failed"},
+                        finish="stop",
+                    )
                 yield b"data: [DONE]\n\n"
-                observation.finish()
-                await _finalize_turn(user_id, chat_session_id, lock_owner, latest_user_message, lease=lease)
+                # Inside the trace scope, and before the generator can be closed
+                # by anything downstream, so the turn is reported even when the
+                # response body never reaches the student.
+                await cleanup.run()
+        except (asyncio.CancelledError, GeneratorExit):
+            # The student closed the tab or the connection dropped. Neither is
+            # an error, and both used to end the turn reporting nothing.
+            observation.cancelled("client_disconnected")
+            cleanup.detach()
+            raise
+        finally:
+            cleanup.detach()
 
     return StreamingResponse(
         stream(),
@@ -364,10 +486,12 @@ async def confirm_tool_call(
     )
     chat_session = result.scalar_one_or_none()
     if chat_session is None:
+        _reject("session_not_found", user.id, kind="confirmation_turn", chat_session_id=body.session_id)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found")
 
     lock_owner = str(uuid4())
     if not await manager.acquire_turn_lock(db, agent, lock_owner):
+        _reject("agent_busy", user.id, kind="confirmation_turn", chat_session_id=body.session_id)
         raise HTTPException(status.HTTP_409_CONFLICT, "Agent is busy with another message")
     try:
         lease = await manager.lease_for(db, agent)
@@ -375,9 +499,17 @@ async def confirm_tool_call(
         agno_session_id = chat_session.agno_session_id or chat_session.id
         run_output = agno_agent.get_run_output(body.run_id, session_id=agno_session_id, user_id=str(user.id))
         if run_output is None or not run_output.is_paused:
+            _reject("paused_run_not_found", user.id, kind="confirmation_turn", chat_session_id=chat_session.id)
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Paused run not found")
         active_confirmations = [item for item in run_output.active_requirements if item.needs_confirmation]
         if len(active_confirmations) != 1:
+            _reject(
+                "batched_actions_blocked",
+                user.id,
+                kind="confirmation_turn",
+                chat_session_id=chat_session.id,
+                pending_confirmations=len(active_confirmations),
+            )
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 "Batched external actions are blocked; ask the agent to perform one action at a time",
@@ -387,6 +519,7 @@ async def confirm_tool_call(
             None,
         )
         if requirement is None or not requirement.needs_confirmation:
+            _reject("confirmation_not_pending", user.id, kind="confirmation_turn", chat_session_id=chat_session.id)
             raise HTTPException(status.HTTP_409_CONFLICT, "Confirmation is no longer pending")
         if body.approved:
             requirement.confirm()
@@ -406,7 +539,15 @@ async def confirm_tool_call(
         from app.agents.scholar.context import build_run_dependencies
 
         dependencies = await build_run_dependencies(db, user.id, lease.resident)
-    except Exception:
+    except HTTPException:
+        if "lease" in locals():
+            await lease.release()
+        await manager.release_turn_lock(db, agent, lock_owner)
+        raise
+    except Exception as exc:
+        logger.error("confirmation_setup_failed", user_id=str(user.id), error=str(exc))
+        report_exception(exc, distinct_id=str(user.id), handler="confirmation_setup")
+        _reject("setup_failed", user.id, kind="confirmation_turn", error_type=exc.__class__.__name__)
         if "lease" in locals():
             await lease.release()
         await manager.release_turn_lock(db, agent, lock_owner)
@@ -426,37 +567,47 @@ async def confirm_tool_call(
             session_id=chat_session_id,
             kind="confirmation_turn",
         )
-        with llm_turn(trace_id, chat_session_id):
-            try:
-                events = agno_agent.acontinue_run(
-                    # Resume from the persisted run id. Passing the separately
-                    # loaded RunOutput here makes Agno treat it as an in-memory
-                    # continuation and can skip rebinding the approved tool to its
-                    # live callable after a process/request boundary.
-                    run_id=body.run_id,
-                    requirements=run_output.requirements,
-                    stream=True,
-                    stream_events=True,
-                    user_id=str(user.id),
-                    session_id=agno_session_id,
-                    dependencies=dependencies,
-                )
-                async for chunk in _with_keepalive(_serialize_events(events, model, str(user.id), observation)):
-                    yield chunk
-            except Exception as exc:
-                logger.error("confirmation_stream_failed", user_id=str(user.id), error=str(exc))
-                observation.stream_failed(exc)
-                yield _chunk(
-                    model,
-                    extension={"type": "error", "code": "confirmation_failed", "message": "Confirmation failed"},
-                    finish="stop",
-                )
-            finally:
-                heartbeat_stop.set()
-                await heartbeat
+        cleanup = _TurnCleanup(
+            observation,
+            heartbeat,
+            heartbeat_stop,
+            lambda: _finalize_turn(user.id, chat_session_id, lock_owner, None, lease=lease, increment=False),
+            user.id,
+        )
+        try:
+            with llm_turn(trace_id, chat_session_id):
+                try:
+                    events = agno_agent.acontinue_run(
+                        # Resume from the persisted run id. Passing the separately
+                        # loaded RunOutput here makes Agno treat it as an in-memory
+                        # continuation and can skip rebinding the approved tool to its
+                        # live callable after a process/request boundary.
+                        run_id=body.run_id,
+                        requirements=run_output.requirements,
+                        stream=True,
+                        stream_events=True,
+                        user_id=str(user.id),
+                        session_id=agno_session_id,
+                        dependencies=dependencies,
+                    )
+                    async for chunk in _with_keepalive(_serialize_events(events, model, str(user.id), observation)):
+                        yield chunk
+                except Exception as exc:
+                    logger.error("confirmation_stream_failed", user_id=str(user.id), error=str(exc))
+                    observation.stream_failed(exc)
+                    yield _chunk(
+                        model,
+                        extension={"type": "error", "code": "confirmation_failed", "message": "Confirmation failed"},
+                        finish="stop",
+                    )
                 yield b"data: [DONE]\n\n"
-                observation.finish()
-                await _finalize_turn(user.id, chat_session_id, lock_owner, None, lease=lease, increment=False)
+                await cleanup.run()
+        except (asyncio.CancelledError, GeneratorExit):
+            observation.cancelled("client_disconnected")
+            cleanup.detach()
+            raise
+        finally:
+            cleanup.detach()
 
     return StreamingResponse(
         stream(),

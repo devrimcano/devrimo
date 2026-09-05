@@ -21,9 +21,10 @@ import {
   AlertDialogMedia,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { captureError, captureProductEvent } from "@/components/posthog-analytics";
+import { captureError, captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import type { ChatConfirmation, ChatStreamError, ChatToolEvent } from "@/lib/api/chat";
 import { jsonFetch } from "@/lib/api/fetcher";
+import { REQUEST_ID_HEADER, newRequestId } from "@/lib/telemetry";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -66,6 +67,7 @@ function toUiMessages(sessionId: string, messages: { role: string; content: stri
 class ChatTelemetry {
   private requestStartedAt: number | null = null;
   private streamError: ChatStreamError | null = null;
+  private requestId: string | null = null;
 
   readonly transport: AssistantChatTransport<UIMessage>;
 
@@ -81,15 +83,25 @@ class ChatTelemetry {
         const attachmentCount = latestMessage?.parts.filter((part) => part.type === "file").length ?? 0;
         this.requestStartedAt = Date.now();
         this.streamError = null;
+        // The AI SDK transport does not go through `jsonFetch`, so the
+        // correlation id every other request in this app carries has to be
+        // minted here. PostHog's own tracing headers ride along automatically.
+        this.requestId = newRequestId();
         captureProductEvent("chat_message_sent", {
           conversation_type: id ? "existing" : "new",
           message_position: messages.length,
           text_length: textLength,
           attachment_count: attachmentCount,
+          request_id: this.requestId,
         });
-        return { body: { id, messages } };
+        return { body: { id, messages }, headers: { [REQUEST_ID_HEADER]: this.requestId } };
       },
     });
+  }
+
+  /** The correlation id of the turn in flight, for the events that report it. */
+  currentRequestId() {
+    return this.requestId;
   }
 
   finishDuration() {
@@ -136,6 +148,7 @@ function AssistantThread({
       if (isError) return;
       captureProductEvent("chat_response_completed", {
         duration_seconds: telemetry.finishDuration() ?? 0,
+        request_id: telemetry.currentRequestId(),
       });
     },
     onData: (part: DataUIPart<Record<string, unknown>>) => {
@@ -177,8 +190,13 @@ function AssistantThread({
         status: busy ? 409 : null,
         error_code: streamError?.code ?? null,
         duration_seconds: telemetry.finishDuration(),
+        request_id: telemetry.currentRequestId(),
       });
-      captureError(error, { source: "chat_stream", error_code: streamError?.code ?? null });
+      captureError(error, {
+        source: "chat_stream",
+        error_code: streamError?.code ?? null,
+        request_id: telemetry.currentRequestId(),
+      });
       toast.error(
         busy
           ? pick({ tr: "Asistan şu anda önceki yanıtını hazırlıyor. Lütfen bekle.", en: "Your assistant is still responding to the previous message. Please wait." })
@@ -218,8 +236,20 @@ function AssistantThread({
         });
       }
       setPendingConfirmation(payload.confirmation ?? null);
-      captureProductEvent("agent_action_confirmation", { approved, tool: requirement.tool });
+      captureProductEvent("agent_action_confirmation", {
+        approved,
+        tool: requirement.tool,
+        result: "completed",
+        awaiting_confirmation: Boolean(payload.confirmation),
+      });
     } catch (error) {
+      captureProductEvent("agent_action_confirmation", {
+        approved,
+        tool: requirement.tool,
+        result: "failed",
+        awaiting_confirmation: false,
+      });
+      captureRequestFailure(error, { operation: "chat.confirm", kind: "mutation" });
       captureError(error, { source: "chat_confirmation" });
       toast.error(error instanceof Error ? error.message : "Confirmation failed");
     } finally {

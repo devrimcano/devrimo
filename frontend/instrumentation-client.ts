@@ -12,6 +12,7 @@
 
 import posthog from "posthog-js";
 import { getPostHogHost, getPostHogKey, getTracingHostnames } from "@/lib/env";
+import { serviceProperties } from "@/lib/telemetry";
 
 const key = getPostHogKey();
 
@@ -78,6 +79,12 @@ if (key) {
         return event;
       },
     });
+
+    // Service, environment and release on every browser event, matching the
+    // labels the broker and the knowledge worker report. Without the release a
+    // spike in browser exceptions cannot be attributed to a deploy, and the
+    // source maps uploaded at build time are keyed by the same commit.
+    posthog.register(serviceProperties("devrimo-web"));
   } catch (error) {
     console.error("PostHog initialisation failed", error);
   }

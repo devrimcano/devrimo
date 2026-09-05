@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
 import { applyCampusConnection } from "@/lib/api/campus";
-import { apiErrorResponse, requireAuth } from "@/lib/api/route-utils";
+import { apiErrorResponse, authenticatedRoute } from "@/lib/api/route-utils";
 
-export async function POST() {
-  const result = await requireAuth();
-  if ("error" in result) return result.error;
-
+export const POST = authenticatedRoute("/api/campus/apply", async (context) => {
   try {
-    return NextResponse.json(await applyCampusConnection(result.auth.accessToken));
+    return NextResponse.json(await applyCampusConnection(context.auth.accessToken));
   } catch (error) {
-    return apiErrorResponse(error);
+    return apiErrorResponse(error, context);
   }
-}
+});

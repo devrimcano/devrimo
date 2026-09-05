@@ -14,6 +14,8 @@ from app.config import get_settings
 from app.core.crypto import decrypt_secret
 from app.db.models import CampusKnowledgeRecord, KnowledgeEmbeddingSettings
 from app.logging import get_logger
+from app.observability.client import report_exception
+from app.observability.llm import EVENT_AI_EMBEDDING, observed_ai_operation
 
 SUPPORTED_VECTOR_DIMENSIONS = (384, 768, 1536)
 logger = get_logger(__name__)
@@ -95,6 +97,23 @@ async def get_embedding_config(db: AsyncSession, organization_id: UUID) -> Embed
     )
 
 
+def _reported_usage(payload: Any) -> tuple[int | None, int | None]:
+    """Token counts as the provider reported them, or ``None`` when it did not.
+
+    Absence is meaningful: a provider that omits ``usage`` has told us nothing
+    about cost, which is not the same as having cost nothing.
+    """
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None, None
+
+    def _count(key: str) -> int | None:
+        value = usage.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    return _count("prompt_tokens"), _count("total_tokens")
+
+
 async def _request_embeddings(config: EmbeddingConfig, texts: Sequence[str]) -> list[list[float]]:
     if not config.base_url:
         raise ValueError("Embedding endpoint is not configured")
@@ -104,14 +123,28 @@ async def _request_embeddings(config: EmbeddingConfig, texts: Sequence[str]) -> 
     # output width and reject the OpenAI-specific dimensions parameter.
     if config.provider == "remote":
         body["dimensions"] = config.dimensions
-    response = await _embedding_client().post(
-        f"{config.base_url.rstrip('/')}/embeddings",
-        headers=headers,
-        json=body,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return _response_vectors(payload, len(texts))
+    # Agno's model client is instrumented, but embeddings never go through it —
+    # they are a plain httpx call, and were the one model provider this service
+    # talks to that produced no AI telemetry at all.
+    with observed_ai_operation(
+        "knowledge_embedding",
+        provider=config.provider,
+        model=config.model,
+        event=EVENT_AI_EMBEDDING,
+        batch_size=len(texts),
+        dimensions=config.dimensions,
+    ) as call:
+        response = await _embedding_client().post(
+            f"{config.base_url.rstrip('/')}/embeddings",
+            headers=headers,
+            json=body,
+        )
+        call.http_status = response.status_code
+        response.raise_for_status()
+        payload = response.json()
+        prompt_tokens, total_tokens = _reported_usage(payload)
+        call.usage(input_tokens=prompt_tokens, total_tokens=total_tokens)
+        return _response_vectors(payload, len(texts))
 
 
 def _response_vectors(payload: Any, expected_count: int) -> list[list[float]]:
@@ -207,6 +240,16 @@ async def embed_texts(
             batch_size=len(texts),
             error=str(exc),
         )
+        # A provider that cannot pair its own outputs to our inputs is a real
+        # defect on their side, and the per-item retry hides it completely.
+        report_exception(
+            exc,
+            handler="knowledge_embedding_batch",
+            provider=resolved.provider,
+            model=resolved.model,
+            batch_size=len(texts),
+            fallback="per_item_retry",
+        )
         vectors = []
         for text in texts:
             vectors.extend(await _request_embeddings(resolved, [text]))
@@ -228,6 +271,16 @@ async def embed_query(
         return vectors[0]
     except (httpx.HTTPError, ValueError) as exc:
         # Search remains available through full-text/keyword ranking when an
-        # embedding endpoint is temporarily unavailable.
+        # embedding endpoint is temporarily unavailable — which is precisely
+        # why this needs reporting: retrieval quietly degrades to lexical-only
+        # and every result still looks like a successful search.
         logger.warning("knowledge_query_embedding_failed", provider=resolved.provider, error=str(exc))
+        report_exception(
+            exc,
+            handler="knowledge_query_embedding",
+            provider=resolved.provider,
+            model=resolved.model,
+            dependency="embedding_provider",
+            degraded_to="lexical_only",
+        )
         return None

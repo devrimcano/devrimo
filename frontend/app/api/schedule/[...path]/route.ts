@@ -1,8 +1,6 @@
-import type { NextRequest } from "next/server";
-import { proxyAuthenticatedRequest, type ProxyContext } from "@/lib/api/authenticated-proxy";
+import { proxyRoute } from "@/lib/api/authenticated-proxy";
 
-const proxy = (request: NextRequest, context: ProxyContext) =>
-  proxyAuthenticatedRequest(request, context, "schedule");
+const proxy = proxyRoute("schedule");
 
 export const GET = proxy;
 export const POST = proxy;

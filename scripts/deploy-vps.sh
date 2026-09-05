@@ -43,6 +43,7 @@ tar -czf "$BACKUP_DIR/source-$stamp.tar.gz" \
   --exclude='./.backups' \
   --exclude='./.deploy.lock' \
   --exclude='./.deployed-sha' \
+  --exclude='./.release-sha' \
   -C "$DEPLOY_DIR" .
 chmod 600 "$BACKUP_DIR/source-$stamp.tar.gz"
 
@@ -78,9 +79,20 @@ bash -lc "
   .venv/bin/python -m pip install -r requirements.txt
 "
 
+# The running services learn which commit they are, so every event, log line
+# and exception can be attributed to a deploy rather than to a date. Written
+# before the restarts below, and outside both rsync targets so `--delete` in
+# the step above cannot remove it.
+printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.release-sha"
+
 bash -lc "
   set -e
   export PATH='$NODE_BIN':\$PATH
+  # GIT_COMMIT_SHA names the release the browser source maps are uploaded
+  # under; NEXT_PUBLIC_RELEASE is the same value baked into the bundle, so a
+  # browser exception and its source map agree on which build they came from.
+  export GIT_COMMIT_SHA='$DEPLOY_SHA'
+  export NEXT_PUBLIC_RELEASE='$DEPLOY_SHA'
   cd '$DEPLOY_DIR/frontend'
   rm -rf .next
   npm ci

@@ -27,17 +27,35 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.logging import get_logger
-from app.observability.client import capture, capture_exception
+from app.observability.client import capture, report_exception
+from app.observability.context import (
+    OUTCOME_CANCELLED as RESULT_CANCELLED,
+)
+from app.observability.context import (
+    OUTCOME_SUCCESS as RESULT_SUCCESS,
+)
+from app.observability.context import (
+    OUTCOME_UNEXPECTED_FAILURE as RESULT_UNEXPECTED_FAILURE,
+)
 
-logger = get_logger(__name__)
-
-# Turn outcomes, in the order of severity we care about.
+# Turn outcomes, in the order of severity we care about. Every started turn ends
+# on exactly one of these — including the ones that end because the student
+# closed the tab, which previously ended on none of them.
 OUTCOME_COMPLETED = "completed"
 OUTCOME_PAUSED = "paused"
 OUTCOME_RUN_ERROR = "run_error"
 OUTCOME_STREAM_ERROR = "stream_error"
 OUTCOME_CANCELLED = "cancelled"
+
+# How each turn outcome maps onto the vocabulary every other surface reports in,
+# so one query spans chat turns, API requests and background jobs.
+_RESULTS = {
+    OUTCOME_COMPLETED: RESULT_SUCCESS,
+    OUTCOME_PAUSED: RESULT_SUCCESS,
+    OUTCOME_CANCELLED: RESULT_CANCELLED,
+    OUTCOME_RUN_ERROR: RESULT_UNEXPECTED_FAILURE,
+    OUTCOME_STREAM_ERROR: RESULT_UNEXPECTED_FAILURE,
+}
 
 
 def _token_totals(metrics: Any) -> dict[str, Any]:
@@ -102,6 +120,11 @@ class TurnObservation:
     error_message: str | None = None
     error_type: str | None = None
     metrics: Any = None
+    # Tools that failed and were recovered from. Kept separately from the turn
+    # outcome: the agent retrying a failed campus call and then answering
+    # correctly is a successful turn that contains a failure, and flattening
+    # the two loses whichever one you flatten.
+    recovered_tool_errors: list[str] = field(default_factory=list)
     _finished: bool = False
 
     @property
@@ -112,6 +135,10 @@ class TurnObservation:
     def failed(self) -> bool:
         return self.outcome in (OUTCOME_RUN_ERROR, OUTCOME_STREAM_ERROR)
 
+    @property
+    def result(self) -> str:
+        return _RESULTS.get(self.outcome, RESULT_UNEXPECTED_FAILURE)
+
     def tool_started(self, tool: str | None) -> None:
         self.tool_calls += 1
         if tool and tool not in self.tools_used:
@@ -121,6 +148,8 @@ class TurnObservation:
         self.tool_errors += 1
         if tool and tool not in self.tools_used:
             self.tools_used.append(tool)
+        if tool and tool not in self.recovered_tool_errors:
+            self.recovered_tool_errors.append(tool)
         # A tool error is not necessarily a turn error — the agent may recover
         # — so it is reported on its own rather than by setting `outcome`.
         capture(
@@ -128,6 +157,7 @@ class TurnObservation:
             distinct_id=self.user_id,
             tool=tool,
             detail=detail,
+            turn_kind=self.kind,
             **{"$ai_trace_id": self.trace_id, "$ai_session_id": self.session_id},
         )
 
@@ -136,11 +166,24 @@ class TurnObservation:
         self.error_message = detail
         self.error_type = error_type
 
+    def cancelled(self, reason: str | None = None) -> None:
+        """The turn stopped without finishing and without failing.
+
+        A student closing the tab cancels the ASGI task, and the turn used to
+        end reporting nothing at all — the outcome constant existed and was
+        never reached from the disconnect path. An abandoned turn is a real
+        product signal, and it is not an error.
+        """
+        if self.failed:
+            return
+        self.outcome = OUTCOME_CANCELLED
+        self.error_message = reason
+
     def stream_failed(self, exc: BaseException) -> None:
         self.outcome = OUTCOME_STREAM_ERROR
         self.error_message = str(exc)
         self.error_type = exc.__class__.__name__
-        capture_exception(
+        report_exception(
             exc,
             distinct_id=self.user_id,
             turn_kind=self.kind,
@@ -153,7 +196,7 @@ class TurnObservation:
             return
         self._finished = True
         try:
-            if self.paused and not self.failed:
+            if self.paused and self.outcome == OUTCOME_COMPLETED:
                 self.outcome = OUTCOME_PAUSED
 
             shared = {
@@ -177,11 +220,16 @@ class TurnObservation:
                 tool_calls=self.tool_calls,
                 tool_errors=self.tool_errors,
                 tools_used=self.tools_used,
+                recovered_tool_errors=self.recovered_tool_errors,
                 paused_for_confirmation=self.paused,
                 error_type=self.error_type,
+                error_message=self.error_message,
+                result=self.result,
                 trace_id=self.trace_id,
                 chat_session_id=self.session_id,
                 **_token_totals(self.metrics),
             )
         except Exception as exc:  # pragma: no cover - observation must not break a turn
-            logger.warning("turn_observation_failed", error=exc.__class__.__name__)
+            from app.observability.diagnostics import report_local
+
+            report_local("turn_observation_failed", error=exc.__class__.__name__)

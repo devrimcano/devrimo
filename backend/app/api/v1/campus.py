@@ -20,6 +20,7 @@ from app.db.models import AgentStatus
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability import capture_exception
+from app.observability.client import report_exception
 from app.planning.mcp_bridge import sync_student_context_from_sais
 from app.schemas import (
     CampusConnectionIn,
@@ -150,6 +151,10 @@ async def _reconfigure_agent_if_running(db: AsyncSession, user_id) -> None:
         await manager.apply_campus_config(db, agent)
     except Exception as exc:
         logger.warning("campus_apply_failed", user_id=str(user_id), error=str(exc))
+        # The save still succeeds, so nothing surfaces to the student and
+        # nothing surfaced to us either: a campus config that silently never
+        # reached the running agent looked identical to one that did.
+        report_exception(exc, distinct_id=str(user_id), handler="campus_apply", operation="apply_campus_config")
         # The save succeeded and config_dirty stays set, so the student can
         # retry — but a rebuild that fails every time needs to be visible.
         capture_exception(
@@ -173,6 +178,13 @@ async def _sync_student_context(user_id, *, verified: bool) -> None:
         await sync_student_context_from_sais(user_id)
     except Exception as exc:
         logger.warning("student_context_sync_failed", user_id=str(user_id), error=str(exc))
+        report_exception(
+            exc,
+            distinct_id=str(user_id),
+            handler="campus_connect",
+            operation="sync_student_context_from_sais",
+            dependency="sais",
+        )
         capture_exception(
             exc,
             distinct_id=str(user_id),
