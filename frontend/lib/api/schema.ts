@@ -258,6 +258,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/student-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Student Context */
+        get: operations["student_context_api_v1_schedule_student_context_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/departments/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search Departments */
+        get: operations["search_departments_api_v1_schedule_departments_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/courses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Courses */
+        get: operations["courses_api_v1_schedule_courses_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/courses/{course_code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Course Sections */
+        get: operations["course_sections_api_v1_schedule_courses__course_code__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/ai-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ai Schedule Plan
+         * @description Use one bounded agent run to fill gaps left by direct catalog calls.
+         */
+        post: operations["ai_schedule_plan_api_v1_schedule_ai_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/memories": {
         parameters: {
             query?: never;
@@ -271,6 +359,41 @@ export interface paths {
         post?: never;
         /** Delete Memories */
         delete: operations["delete_memories_api_v1_memories_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/student/academic-data": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Academic Data Get */
+        get: operations["academic_data_get_api_v1_student_academic_data_get"];
+        put?: never;
+        post?: never;
+        /** Academic Data Delete */
+        delete: operations["academic_data_delete_api_v1_student_academic_data_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/student/academic-data/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Academic Data Sync */
+        post: operations["academic_data_sync_api_v1_student_academic_data_sync_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1075,6 +1198,16 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** AcademicSyncIn */
+        AcademicSyncIn: {
+            /** Term */
+            term: string;
+            /**
+             * Force
+             * @default false
+             */
+            force?: boolean;
+        };
         /**
          * AccountStatus
          * @enum {string}
@@ -1118,6 +1251,20 @@ export interface components {
          * @enum {string}
          */
         AgentStatus: "provisioning" | "running" | "stopped" | "error" | "destroying";
+        /** AiScheduleCourse */
+        AiScheduleCourse: {
+            /** Code */
+            code: string;
+        };
+        /** AiScheduleRequest */
+        AiScheduleRequest: {
+            /** Department */
+            department: string;
+            /** Semester */
+            semester: string;
+            /** Courses */
+            courses?: components["schemas"]["AiScheduleCourse"][];
+        };
         /** CampusConnectionIn */
         CampusConnectionIn: {
             /** Metu Username */
@@ -2151,6 +2298,156 @@ export interface operations {
             };
         };
     };
+    student_context_api_v1_schedule_student_context_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    search_departments_api_v1_schedule_departments_search_get: {
+        parameters: {
+            query: {
+                query: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    courses_api_v1_schedule_courses_get: {
+        parameters: {
+            query: {
+                department: string;
+                semester: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    course_sections_api_v1_schedule_courses__course_code__get: {
+        parameters: {
+            query: {
+                department: string;
+                semester: string;
+            };
+            header?: never;
+            path: {
+                course_code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ai_schedule_plan_api_v1_schedule_ai_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_memories_api_v1_memories_get: {
         parameters: {
             query?: never;
@@ -2187,6 +2484,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MemoryListOut"];
+                };
+            };
+        };
+    };
+    academic_data_get_api_v1_student_academic_data_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    academic_data_delete_api_v1_student_academic_data_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    academic_data_sync_api_v1_student_academic_data_sync_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcademicSyncIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -13,3 +13,7 @@ ignore = ["B008"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/conftest.py" = ["E402"]
+# A model prompt is content, and its line breaks are part of what the model
+# reads. That module holds the prompt text and nothing else, so exempting it
+# from the line-length rule cannot excuse a long line of real code.
+"app/api/v1/schedule_prompt.py" = ["E501"]
