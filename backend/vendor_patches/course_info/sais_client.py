@@ -14,6 +14,8 @@ from .models import (
     CourseSummary,
     CourseSection,
     CourseDetails,
+    SectionConstraint,
+    SectionConstraints,
     ScheduleEntry,
     CoursePrerequisite,
     CourseReplacement,
@@ -329,6 +331,88 @@ class SAISClient:
                             )
 
         return courses
+
+    async def get_section_constraints(
+        self, department_code: str, semester_code: str, course_code: str, section: str
+    ) -> SectionConstraints:
+        """Who may register for one section: the eligibility table behind its number.
+
+        The section number on the course page is a submit button, not a link,
+        so this page is one POST deeper than everything else here and is the
+        only place METU states the restriction in a structured form. The
+        free-text "critical info" box beside it is almost always empty; the
+        real rules — admitted departments, surname ranges, CGPA and year
+        bounds — live here.
+
+        The form's hidden fields are read back from the course page and resent
+        rather than hard-coded: this old interface identifies where a POST came
+        from with a ``hidden_redir`` token that differs per page, and guessing
+        it returns the previous page instead of an error.
+        """
+        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
+
+        resp = await self._client.post(
+            action_url,
+            data={
+                "text_course_code": str(course_code).strip(),
+                "SubmitCourseInfo": "Submit",
+                "hidden_redir": "Course_List",
+            },
+            headers={"Referer": action_url},
+        )
+        course_soup = BeautifulSoup(self._decode_html(resp), "html.parser")
+
+        post_data: Dict[str, str] = {}
+        for hidden in course_soup.find_all("input", {"type": "hidden"}):
+            name = hidden.get("name")
+            if name:
+                post_data[name] = hidden.get("value", "")
+        post_data["submit_section"] = str(section).strip()
+
+        resp = await self._client.post(
+            action_url,
+            data=post_data,
+            headers={"Referer": action_url},
+        )
+        soup = BeautifulSoup(self._decode_html(resp), "html.parser")
+
+        rows: List[SectionConstraint] = []
+        for table in soup.find_all("table"):
+            trs = table.find_all("tr")
+            if not trs:
+                continue
+            headers = [clean_text(td.get_text(" ", strip=True)).lower() for td in trs[0].find_all(["td", "th"])]
+            # Identified by its columns, not its position: this page carries
+            # several unlabelled layout tables and the eligibility one is the
+            # only table naming a department alongside a character range.
+            if not (any("dept" in h for h in headers) and any("char" in h for h in headers)):
+                continue
+            for tr in trs[1:]:
+                cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
+                if len(cells) < 9 or not cells[0]:
+                    continue
+                rows.append(
+                    SectionConstraint(
+                        given_dept=cells[0],
+                        start_char=cells[1],
+                        end_char=cells[2],
+                        min_cgpa=cells[3],
+                        max_cgpa=cells[4],
+                        min_year=cells[5],
+                        max_year=cells[6],
+                        start_grade=cells[7],
+                        end_grade=cells[8],
+                    )
+                )
+            break
+
+        return SectionConstraints(
+            department=str(department_code),
+            semester=str(semester_code),
+            course_code=str(course_code).strip(),
+            section=str(section).strip(),
+            constraints=rows,
+        )
 
     async def get_course_info(
         self, department_code: str, semester_code: str, course_code: str

@@ -85,9 +85,12 @@ RUN set -eux; \
         uv venv --python 3.11 "/opt/mcp/${slug}/.venv"; \
     done
 
-# Upstream currently skips a meeting table when it is nested in the same row as
-# the section button. The correction is applied to the pinned source before its
-# wheel is built.
+# Two corrections to the pinned source, applied before its wheel is built.
+# Upstream skips a meeting table when it is nested in the same row as the
+# section button; and it never opens the page behind that section button, which
+# is the only place METU states who may register for a section — the departments
+# admitted and their surname, CGPA and year ranges. Adding the latter touches
+# three modules, so the whole patch directory is copied rather than one file.
 #
 # Two things this must not do quietly. It must not silently no-op: `COPY` to a
 # path creates missing parents, so if upstream ever moves the module the patch
@@ -97,14 +100,16 @@ RUN set -eux; \
 # this?", and an image carrying an undeclared source change no longer matches
 # the commit it names, so the patch gets its own manifest line (slug, content
 # hash, origin) and is reported by GET /health alongside the pins.
-COPY vendor_patches/course_info/sais_client.py /tmp/course_info_sais_client.py
+COPY vendor_patches/course_info/ /tmp/course_info_patch/
 RUN set -eux; \
-    target=/opt/mcp/course-info/src/metu_course_info_mcp/sais_client.py; \
-    test -f "${target}"; \
-    cp /tmp/course_info_sais_client.py "${target}"; \
-    rm /tmp/course_info_sais_client.py; \
-    printf 'course-info-patch %s vendor_patches/course_info/sais_client.py\n' \
-        "$(sha256sum "${target}" | cut -d" " -f1)" >> /opt/mcp/MANIFEST
+    dir=/opt/mcp/course-info/src/metu_course_info_mcp; \
+    for name in sais_client.py models.py server.py; do \
+        test -f "${dir}/${name}"; \
+        cp "/tmp/course_info_patch/${name}" "${dir}/${name}"; \
+        printf 'course-info-patch %s vendor_patches/course_info/%s\n' \
+            "$(sha256sum "${dir}/${name}" | cut -d" " -f1)" "${name}" >> /opt/mcp/MANIFEST; \
+    done; \
+    rm -rf /tmp/course_info_patch
 
 # Installed as a built wheel, not `-e`, so nothing at runtime depends on the
 # source tree layout surviving. metu-odtuclass-mcp ships loose modules and a

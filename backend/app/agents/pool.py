@@ -30,7 +30,7 @@ from agno.tools.mcp import MCPTools
 
 from app.agents.builders import build_agent
 from app.agents.runtime import AgentRuntimeConfig, default_runtime_config
-from app.agents.toolset import build_toolkits, close_toolkits, connect_toolkits
+from app.agents.toolset import close_toolkits, connect_campus_toolkits
 from app.campus.mcp_config import CampusServerSpec
 from app.config import get_settings
 from app.logging import get_logger
@@ -167,8 +167,7 @@ class AgentPool:
         runtime: AgentRuntimeConfig,
     ) -> ResidentAgent:
         settings = get_settings()
-        toolkits = build_toolkits(specs, timeout_seconds=settings.campus_mcp_timeout_seconds)
-        connected = await connect_toolkits(toolkits)
+        connected = await connect_campus_toolkits(specs, timeout_seconds=settings.campus_mcp_timeout_seconds)
 
         agent = build_agent(user_id, connected, runtime)
         logger.info(

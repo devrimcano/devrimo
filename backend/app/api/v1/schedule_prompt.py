@@ -31,6 +31,7 @@ Rules:
 - Use each course's full seven-digit METU code as its identity. Its first three digits identify the department that owns that course. Never rewrite an external course with the student's home-department prefix.
 - Compare completed and recommended courses by their full course codes. Do not treat courses from different departments that share the same last three digits as the same course.
 - Course codes must be full seven-digit METU codes when available.
+- The compulsory history and Turkish courses come in variants by citizenship. A Turkish citizen takes HIST2201 and HIST2202 (2402201, 2402202) and TURK103/TURK104; the other variants are for international students. Recommend the 2201/2202 pair unless the student's record says they are not a Turkish citizen.
 - Section and meeting data must come from tools. Never invent a day, time, room, section, credit, or offering status.
 - If a course is verified but its meeting times are unavailable, include the course with an empty sections array and add a short warning.
 - Do not include prose, Markdown, citations, or reasoning outside the JSON."""

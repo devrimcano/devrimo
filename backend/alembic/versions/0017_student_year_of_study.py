@@ -10,7 +10,6 @@ Revises: 0016_confirm_verified_context
 """
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0017_student_year_of_study"

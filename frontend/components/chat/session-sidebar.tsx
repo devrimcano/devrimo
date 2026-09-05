@@ -21,6 +21,7 @@ export function SessionSidebar({
   onNewChat,
   onSelect,
   onDelete,
+  onDeleteAll,
   className,
   collapsed = false,
   onToggleCollapse,
@@ -30,6 +31,7 @@ export function SessionSidebar({
   onNewChat: () => void;
   onSelect: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onDeleteAll?: () => void;
   className?: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -107,9 +109,24 @@ export function SessionSidebar({
         </nav>
       </ScrollArea> : <div className="flex-1" />}
       {!collapsed ? (
-        <p className="border-t px-4 py-3 text-[11px] leading-4 text-muted-foreground">
-          {pick({ tr: "Sohbet geçmişin yalnızca hesabına bağlıdır.", en: "Your chat history belongs only to your account." })}
-        </p>
+        <div className="border-t px-4 py-3">
+          {/* Only offered when there is something to delete, so the sidebar of
+              a student with no history is not led by a destructive action. */}
+          {onDeleteAll && sessions.length ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mb-2 h-8 w-full justify-start px-2 text-xs text-muted-foreground hover:text-destructive"
+              onClick={onDeleteAll}
+            >
+              <Trash2Icon className="size-3.5" />
+              {pick({ tr: "Tüm sohbetleri sil", en: "Delete all chats" })}
+            </Button>
+          ) : null}
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            {pick({ tr: "Sohbet geçmişin yalnızca hesabına bağlıdır.", en: "Your chat history belongs only to your account." })}
+          </p>
+        </div>
       ) : null}
     </aside>
   );

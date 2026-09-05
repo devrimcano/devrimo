@@ -55,6 +55,10 @@ export function deleteChatSession(token: string, sessionId: string) {
   return apiFetch<void>(`/chat/sessions/${sessionId}`, { method: "DELETE", token });
 }
 
+export function deleteAllChatSessions(token: string) {
+  return apiFetch<{ deleted: number }>("/chat/sessions", { method: "DELETE", token });
+}
+
 const TOOL_EVENT_STATUS: Record<string, ChatToolEvent["status"]> = {
   tool_call_started: "started",
   tool_call_completed: "completed",

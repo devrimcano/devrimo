@@ -13,6 +13,7 @@ from app.campus.manifest import commits_by_slug
 from app.config import get_settings
 from app.db.session import SessionLocal
 from app.knowledge.embeddings import close_embedding_client
+from app.knowledge.retention import sweep_expired_schedule_cache
 from app.logging import configure_logging, get_logger
 from app.observability import ObservabilityMiddleware
 from app.observability.client import initialize as posthog_initialize
@@ -51,6 +52,30 @@ async def _run_directory_sync_loop(stop_event: asyncio.Event) -> None:
             pass
 
 
+async def _run_retention_loop(stop_event: asyncio.Event) -> None:
+    """Reclaim expired ``schedule_data_cache`` rows.
+
+    Nothing else does. The read path drops a row it finds expired, which only
+    ever covers keys somebody asks for a second time — and a plan key includes
+    the course pool, so every pool a student tries once mints a row no read
+    will return to. ``ix_schedule_data_cache_expires`` existed for this sweep
+    before there was one.
+    """
+    settings = get_settings()
+    while not stop_event.is_set():
+        try:
+            async with SessionLocal() as db:
+                removed = await sweep_expired_schedule_cache(db)
+            if removed:
+                logger.info("schedule_cache_swept", rows=removed)
+        except Exception as exc:
+            logger.warning("schedule_cache_sweep_failed", error=str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=settings.schedule_cache_sweep_seconds)
+        except TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -68,6 +93,7 @@ async def lifespan(app: FastAPI):
     stop_event = asyncio.Event()
     reconciler_task = asyncio.create_task(run_reconciler_loop(stop_event))
     directory_sync_task = asyncio.create_task(_run_directory_sync_loop(stop_event))
+    retention_task = asyncio.create_task(_run_retention_loop(stop_event))
     logger.info("startup_complete")
     try:
         yield
@@ -75,6 +101,7 @@ async def lifespan(app: FastAPI):
         stop_event.set()
         await reconciler_task
         await directory_sync_task
+        await retention_task
         # Every resident agent is holding MCP subprocesses that have a
         # student's METU credentials in their environment; leaving them
         # parented to a dead broker is not acceptable.

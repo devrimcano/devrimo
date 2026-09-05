@@ -506,12 +506,47 @@ class StudentContext(Base):
 
     user_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     department: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Only the first two letters, because that is the whole of what a section's
+    # eligibility range compares: METU writes those bounds as two characters
+    # ("AA"-"İZ"), so the rest of the surname is personal data the feature has
+    # no use for. Read from the same SAIS student card the department comes from.
+    surname_prefix: Mapped[str | None] = mapped_column(String(8), nullable=True)
     degree_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Year of study, 1-9. A section's eligibility row carries a min/max year
+    # band, and that band is compared against this — the registrar's own number
+    # from the SAIS student card, not the number of years since enrolment.
+    year_of_study: Mapped[int | None] = mapped_column(Integer, nullable=True)
     program_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     campus: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class StudentTimetable(Base):
+    """The timetable a student built in the planner, so chat can talk about it.
+
+    Not the schedule SAIS holds — that is what they are *registered* for, and
+    it answers a different question. This is the week they are putting
+    together for the term ahead, which is the thing they actually ask about,
+    and it lived only in one browser's localStorage until now.
+
+    Stored as a compact projection rather than the planner's whole state: the
+    courses, their sections and when they meet. The pool, the alternatives and
+    the cached section lists are working state, are far larger, and would be
+    injected into every chat turn for nothing.
+    """
+
+    __tablename__ = "student_timetables"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    term: Mapped[str] = mapped_column(String(32), nullable=False)
+    # {"courses": [{code, name, section, credits, instructor, meetings: [...]}],
+    #  "busy_blocks": [{name, meetings: [...]}]}
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -566,6 +601,25 @@ class StudentAcademicSnapshot(Base):
     current_grade_points: Mapped[float] = mapped_column(Numeric(10, 3), default=0, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="sais", nullable=False)
+
+
+class ScheduleDataCache(Base):
+    """Expiring schedule result cache. Keys and owners are one-way hashes."""
+
+    __tablename__ = "schedule_data_cache"
+    __table_args__ = (
+        Index("ix_schedule_data_cache_expires", "expires_at"),
+        Index("ix_schedule_data_cache_owner", "owner_hash"),
+    )
+
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class CourseOffering(Base):

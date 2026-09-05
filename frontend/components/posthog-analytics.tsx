@@ -24,6 +24,7 @@ type ProductEventProperties = {
   chat_opened: { source: "history" };
   chat_delete_requested: { was_active: boolean };
   chat_deleted: { was_active: boolean };
+  chat_deleted_all: { count: number };
   // `request_id` is the correlation id this turn was sent with. The broker
   // tags its own events, logs and issues with the same value, so a student's
   // failed turn is one query rather than a timestamp comparison.

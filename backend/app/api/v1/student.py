@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
 from app.campus.course_info import forget_user
+from app.campus.eligibility import tr_upper
 from app.db.models import StudentAcademicSnapshot, StudentContext, UserPreference, UserUpdateState
 from app.db.session import get_db
 from app.logging import get_logger
@@ -18,6 +19,7 @@ from app.planning.groups import get_course_group
 from app.planning.mcp_bridge import sync_planning_snapshot_from_sais, sync_student_context_from_sais
 from app.planning.service import SemesterPlanRequest, plan_semester
 from app.student import service
+from app.student.purge import purge_academic_data
 from app.student.updates import get_updates
 
 router = APIRouter()
@@ -26,10 +28,11 @@ logger = get_logger(__name__)
 
 class ContextIn(BaseModel):
     department: str | None = Field(default=None, max_length=255)
+    surname_prefix: str | None = Field(default=None, max_length=8)
     degree_level: Literal["undergraduate", "masters", "doctoral", "exchange", "other"] | None = None
+    year_of_study: int | None = Field(default=None, ge=1, le=9)
     program_code: str | None = Field(default=None, max_length=32)
     campus: str | None = Field(default=None, max_length=255)
-    confirm_verified: bool = False
 
 
 class PreferenceIn(BaseModel):
@@ -50,13 +53,17 @@ class AcademicSyncIn(BaseModel):
 def _context_out(context: StudentContext) -> dict:
     return {
         "department": context.department,
+        # Two letters only - see StudentContext.surname_prefix. Enough to
+        # answer a section's surname range, not enough to be a name.
+        "surname_prefix": context.surname_prefix,
         "degree_level": context.degree_level,
+        # Compared against a section's min/max year band.
+        "year_of_study": context.year_of_study,
         "program_code": context.program_code,
         "campus": context.campus,
         "source": context.source,
         "verified_at": context.verified_at,
         "confirmed_at": context.confirmed_at,
-        "needs_confirmation": context.verified_at is not None and context.confirmed_at is None,
     }
 
 
@@ -99,7 +106,17 @@ async def _academic_data_out(db: AsyncSession, user_id: UUID) -> dict:
             for snapshot in snapshots
         ],
         "has_cached_data": bool(
-            snapshots or (context and (context.department or context.program_code or context.degree_level))
+            snapshots
+            or (
+                context
+                and (
+                    context.department
+                    or context.program_code
+                    or context.degree_level
+                    or context.surname_prefix
+                    or context.year_of_study
+                )
+            )
         ),
     }
 
@@ -159,12 +176,8 @@ async def academic_data_sync(
 async def academic_data_delete(
     user: AuthenticatedUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> dict:
-    await db.execute(delete(StudentAcademicSnapshot).where(StudentAcademicSnapshot.user_id == user.id))
-    await db.execute(delete(StudentContext).where(StudentContext.user_id == user.id))
+    await purge_academic_data(db, user.id)
     await db.commit()
-    # Removing the rows is not enough on its own: the catalog cache still holds
-    # answers derived from this student's department until they expire.
-    forget_user(user.id)
     return {"deleted": True}
 
 
@@ -182,18 +195,39 @@ async def context_put(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     context = await service.get_context(db, user.id)
-    if body.confirm_verified:
-        if context.verified_at is None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "There is no verified SAIS context to confirm")
-        context.confirmed_at = datetime.now(UTC)
-    else:
+    # There is no separate "confirm what SAIS said" call any more: a SAIS read
+    # stores its own confirmation, because a student cannot meaningfully
+    # confirm their own registrar. This endpoint is the correction path.
+    #
+    # A patch, not a replacement. Every field used to be assigned from the body
+    # unconditionally, so any request that omitted one set it to NULL — and a
+    # save from a form that had not finished loading wiped a department SAIS
+    # had just read, silently and unrecoverably. ``model_fields_set`` is the
+    # difference between "the client did not mention this" and "the client
+    # asked to clear it": an omitted key is left alone, an explicit null still
+    # clears.
+    supplied = body.model_fields_set
+    if "department" in supplied:
         context.department = body.department
+    if "surname_prefix" in supplied:
+        # The form may send a whole surname; only the first two letters are
+        # ever stored, because that is all a section's range compares.
+        context.surname_prefix = tr_upper("".join((body.surname_prefix or "").split()))[:2] or None
+    if "degree_level" in supplied:
         context.degree_level = body.degree_level
+    if "year_of_study" in supplied:
+        context.year_of_study = body.year_of_study
+    if "program_code" in supplied:
         context.program_code = body.program_code
+    if "campus" in supplied:
         context.campus = body.campus
-        context.source = "manual"
-        context.verified_at = None
-        context.confirmed_at = datetime.now(UTC)
+    if not supplied:
+        # Nothing was asked for. Saying so beats recording a "manual" edit that
+        # changed nothing and threw away the SAIS provenance on the way.
+        return _context_out(context)
+    context.source = "manual"
+    context.verified_at = None
+    context.confirmed_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(context)
     return _context_out(context)

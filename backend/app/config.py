@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # is evicted past this, so a busy hour can't spawn unbounded subprocesses.
     agent_pool_max_size: int = 64
     reconcile_interval_seconds: int = 60
+    # How often expired schedule_data_cache rows are reclaimed. Nothing else
+    # reclaims them: the read path only drops rows somebody asks for twice.
+    schedule_cache_sweep_seconds: int = 3600
     turn_lock_lease_seconds: int = 180
     turn_lock_heartbeat_seconds: int = 60
 
@@ -91,6 +94,44 @@ class Settings(BaseSettings):
     # their CWD (odtuclass) get a private directory beneath this.
     campus_state_root: str = "/var/lib/devrimo/campus"
     campus_mcp_timeout_seconds: int = 30
+    # SAIS transcript and student-card reads are full scrapes behind a login and
+    # routinely take longer than a chat tool call is allowed to. Sharing one
+    # budget meant every academic refresh died at exactly 30 seconds with
+    # "Timed out while waiting for response", which surfaced to the student as
+    # "SAIS did not answer" — a sentence about SAIS being down for a request we
+    # gave up on ourselves. The batch sync gets its own, longer budget; the
+    # agent's per-turn calls keep the short one.
+    campus_sync_timeout_seconds: int = 120
+    # How long an *optional* SAIS read may take before the sync gives up on it
+    # and returns what it already has. The weekly schedule is the one this
+    # exists for: it is the least useful field and the one METU is slowest to
+    # render, and waiting out the campus server's own thirty-second ceiling on
+    # it made a refresh that was finished in four seconds look like a failure.
+    sais_optional_read_seconds: int = 12
+
+    # --- Catalog pre-warming ----------------------------------------------
+    # Course offerings are published per term and then barely move, so the
+    # cache can be filled before students arrive instead of by whoever opens a
+    # department first. These requests hit METU with a real student's
+    # credentials, so the defaults are deliberately timid: roughly three
+    # requests a minute, only in the small hours, with a daily ceiling well
+    # under the 153 Ankara departments so a full term's warm-up is spread over
+    # several nights rather than done in one visible burst.
+    catalog_warm_enabled: bool = True
+    catalog_warm_interval_seconds: float = 20.0
+    catalog_warm_jitter_seconds: float = 10.0
+    # Enough for the whole Ankara catalog in one night. At one request every
+    # twenty seconds that is under an hour of traffic inside a six-hour
+    # window, once per term — gentler than a student clicking through the
+    # catalog by hand, and the interval above is what actually paces it. The
+    # ceiling exists to bound a runaway, not to spread the work over days:
+    # until a department is cached, searching course titles cannot see it.
+    catalog_warm_daily_limit: int = 200
+    # Per pass, so the worker returns to its other duties between batches.
+    catalog_warm_batch: int = 15
+    # Local hours, as "start-end". Overnight, when METU is quiet.
+    catalog_warm_hours: str = "1-7"
+    catalog_warm_poll_seconds: int = 900
     # Read the student's academic context from SAIS as part of saving a verified
     # campus connection, so their profile is populated before their first turn.
     # Costs one campus server spawn inside that request; turn it off to keep the

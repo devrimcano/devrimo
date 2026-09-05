@@ -125,6 +125,24 @@ def enabled_tool_ids(credential: CampusCredential | None) -> list[str]:
     return normalize_tool_ids(credential.enabled_tools or [])
 
 
+async def users_with_tool(db: AsyncSession, tool_id: str) -> list[UUID]:
+    """Students whose credentials are verified and include ``tool_id``.
+
+    Only verified credentials, and only ones carrying a password: an account
+    that cannot log in would spend the warm-up's budget on failures and get
+    the job stopped for everyone.
+    """
+    rows = (
+        await db.execute(
+            select(CampusCredential).where(
+                CampusCredential.verified_at.is_not(None),
+                CampusCredential.metu_password_enc.is_not(None),
+            )
+        )
+    ).scalars().all()
+    return [row.user_id for row in rows if tool_id in enabled_tool_ids(row)]
+
+
 async def campus_server_specs(db: AsyncSession, user_id: UUID) -> list[CampusServerSpec]:
     """The campus MCP servers this student's agent should be launched with.
 

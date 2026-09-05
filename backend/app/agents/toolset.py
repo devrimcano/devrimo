@@ -86,29 +86,37 @@ def build_toolkits(specs: list[CampusServerSpec], *, timeout_seconds: int) -> li
             # write it into the broker's own cwd — shared by every student.
             logger.warning("campus_server_skipped", server=spec.tool_id, reason="state_dir_unavailable")
             continue
-        toolkits.append(
-            MCPTools(
-                # Named for the tool so a failure is traceable to one server.
-                name=f"campus:{spec.tool_id}",
-                server_params=StdioServerParameters(
-                    command=spec.command,
-                    args=list(spec.args),
-                    env=dict(spec.env),
-                    cwd=spec.cwd,
-                ),
-                transport="stdio",
-                timeout_seconds=timeout_seconds,
-                # The four servers were written independently and several use
-                # generic names (``search``, ``list_courses``); without this a
-                # collision would shadow one server's tool with another's.
-                tool_name_prefix=spec.tool_id,
-                include_tools=list(spec.include_tools) or None,
-                requires_confirmation_tools=list(spec.requires_confirmation_tools),
-                instructions=TOOLKIT_INSTRUCTIONS.get(spec.tool_id),
-                add_instructions=True,
-            )
-        )
+        toolkits.append(build_toolkit(spec, timeout_seconds=timeout_seconds))
     return toolkits
+
+
+def build_toolkit(spec: CampusServerSpec, *, timeout_seconds: int) -> MCPTools:
+    """One unconnected toolkit for one server.
+
+    Separate from :func:`build_toolkits` because a toolkit whose connect failed
+    cannot be reused — the SDK leaves it half-initialised — so a retry has to
+    construct a fresh one from the same spec.
+    """
+    return MCPTools(
+        # Named for the tool so a failure is traceable to one server.
+        name=f"campus:{spec.tool_id}",
+        server_params=StdioServerParameters(
+            command=spec.command,
+            args=list(spec.args),
+            env=dict(spec.env),
+            cwd=spec.cwd,
+        ),
+        transport="stdio",
+        timeout_seconds=timeout_seconds,
+        # The four servers were written independently and several use
+        # generic names (``search``, ``list_courses``); without this a
+        # collision would shadow one server's tool with another's.
+        tool_name_prefix=spec.tool_id,
+        include_tools=list(spec.include_tools) or None,
+        requires_confirmation_tools=list(spec.requires_confirmation_tools),
+        instructions=TOOLKIT_INSTRUCTIONS.get(spec.tool_id),
+        add_instructions=True,
+    )
 
 
 def _is_connected(toolkit: MCPTools) -> bool:
@@ -177,3 +185,40 @@ async def close_toolkits(toolkits: list[MCPTools]) -> None:
                 server=toolkit.name,
                 **{"$exception_fingerprint": ["campus_server_close_failed", str(toolkit.name)]},
             )
+
+
+# One extra attempt, not a loop. The observed failure is a server that
+# handshakes in about a second normally and occasionally does not come up at
+# all during a burst of agent rebuilds — three times in a hundred connects,
+# with no stderr from the process and no exception the SDK will surrender.
+# A single immediate retry costs one second in the rare bad case and turns a
+# student's whole catalog off in none of them. More attempts would start
+# hiding a server that is genuinely down behind a slow agent build.
+CONNECT_ATTEMPTS = 2
+
+
+async def connect_campus_toolkits(
+    specs: list[CampusServerSpec], *, timeout_seconds: int, attempts: int = CONNECT_ATTEMPTS
+) -> list[MCPTools]:
+    """Connect every server, retrying one that fails to come up.
+
+    Returns the toolkits that did connect, in the order their specs were given.
+    A server that fails every attempt is dropped exactly as before: the student
+    keeps the rest of their agent.
+    """
+    connected: list[MCPTools] = []
+    for spec in specs:
+        for attempt in range(1, attempts + 1):
+            toolkits = build_toolkits([spec], timeout_seconds=timeout_seconds)
+            if not toolkits:
+                break  # working directory unavailable; already logged
+            live = await connect_toolkits(toolkits)
+            if live:
+                if attempt > 1:
+                    logger.info("campus_server_connected_on_retry", server=spec.tool_id, attempt=attempt)
+                    capture("campus_server_connected_on_retry", server=spec.tool_id, attempt=attempt)
+                connected.extend(live)
+                break
+            if attempt < attempts:
+                logger.warning("campus_server_retrying", server=spec.tool_id, attempt=attempt)
+    return connected
