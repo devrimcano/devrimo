@@ -92,7 +92,12 @@ def _is_finite_number(value: Any) -> bool:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # JSON can contain integers too large for a float. Reject the metric
+        # without aborting redaction of the rest of the event.
+        return False
 
 
 def _is_usage_metric(key: Any, value: Any) -> bool:
@@ -104,7 +109,7 @@ def _non_negative_number(properties: dict[str, Any], key: str) -> float | None:
     """Return a finite, non-negative numeric PostHog property."""
     try:
         value = float(properties[key])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
     return value if math.isfinite(value) and value >= 0 else None
 
@@ -180,8 +185,16 @@ def _before_send(event: Any) -> Any:
             else:
                 event.properties = scrubbed
             _add_ai_cost_properties(event)
-    except Exception:  # pragma: no cover - defensive; scrubbing must not break capture
-        return event
+    except Exception:
+        # Never upload properties we could not inspect, even if a future
+        # scrubber change introduces another failure mode.
+        if isinstance(event, dict):
+            event["properties"] = {"redaction_failed": True}
+        else:
+            try:
+                event.properties = {"redaction_failed": True}
+            except Exception:  # pragma: no cover - immutable, non-SDK event
+                return None
     return event
 
 
