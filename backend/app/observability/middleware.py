@@ -139,6 +139,8 @@ class ObservabilityMiddleware:
 
         settings = get_settings()
         request_id = _header(scope, REQUEST_ID_HEADER.encode()) or new_request_id()
+        # The outer 500 handler runs after this context has been reset.
+        scope.setdefault("state", {})["request_id"] = request_id
         session_id = _header(scope, b"x-posthog-session-id")
         authenticated_user = _user_from_bearer(scope)
         user_id = str(authenticated_user.id) if authenticated_user else None

@@ -440,6 +440,33 @@ def test_before_send_still_redacts_usage_shaped_keys_holding_non_numbers():
     assert properties["time_to_first_token"] == "[redacted]"
 
 
+def test_oversized_usage_cannot_bypass_credential_redaction():
+    event = {
+        "event": "chat_turn_completed",
+        "properties": {
+            "input_tokens": 10**400,
+            "password": "private-test-value",
+            "nested": {"access_token": "private-test-token"},
+        },
+    }
+
+    properties = ph_client._before_send(event)["properties"]
+
+    assert properties["input_tokens"] == "[redacted]"
+    assert properties["password"] == "[redacted]"
+    assert properties["nested"]["access_token"] == "[redacted]"
+
+
+def test_scrubber_failure_never_returns_uninspected_properties(monkeypatch):
+    def broken_scrubber(*args):
+        raise ValueError("cannot inspect event")
+
+    monkeypatch.setattr(ph_client, "_scrub", broken_scrubber)
+    event = {"event": "chat_turn_completed", "properties": {"password": "private-test-value"}}
+
+    assert ph_client._before_send(event)["properties"] == {"redaction_failed": True}
+
+
 @pytest.mark.parametrize(
     "event",
     [None, "not an event", {"event": "x"}, {"event": "x", "properties": "not a dict"}, {"properties": None}],
@@ -506,6 +533,36 @@ async def test_middleware_reports_route_exceptions_with_request_context(monkeypa
     assert properties["route"] == "/api/v1/sessions/{session_id}"
     assert properties["operation"] == "get_session"
     assert properties["handler"] == "observability_middleware"
+
+
+@pytest.mark.parametrize("request_id", [None, "browser-request-500"])
+async def test_unhandled_response_keeps_the_observed_request_id(monkeypatch, request_id):
+    import httpx
+    from fastapi import FastAPI
+
+    from app.main import unhandled_exception_handler
+    from app.observability.middleware import ObservabilityMiddleware
+
+    events = []
+    monkeypatch.setattr(ph_client, "capture", lambda event, **kw: events.append((event, kw)))
+    failing_app = FastAPI()
+    failing_app.add_middleware(ObservabilityMiddleware)
+    failing_app.add_exception_handler(Exception, unhandled_exception_handler)
+
+    @failing_app.get("/failure")
+    async def fail():
+        raise RuntimeError("test route failure")
+
+    transport = httpx.ASGITransport(app=failing_app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/failure", headers={"x-request-id": request_id} if request_id else {})
+
+    outcome = next(kw for event, kw in events if event == "api_request_completed")
+    assert response.status_code == 500
+    assert response.json()["request_id"] == outcome["request_id"]
+    assert response.headers["x-request-id"] == outcome["request_id"]
+    if request_id:
+        assert outcome["request_id"] == request_id
 
 
 # --- one outcome event per request ------------------------------------------

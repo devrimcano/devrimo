@@ -132,7 +132,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     The request id is echoed back so a student's screenshot of an error, a
     browser event, a proxy log and a broker issue all name the same id.
     """
-    request_id = current_request_id.get() or request.headers.get(REQUEST_ID_HEADER)
+    request_id = (
+        getattr(request.state, "request_id", None)
+        or current_request_id.get()
+        or request.headers.get(REQUEST_ID_HEADER)
+    )
     logger.error("unhandled_exception", path=request.url.path, error=str(exc), request_id=request_id)
     reported = report_exception(
         exc,
