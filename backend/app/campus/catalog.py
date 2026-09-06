@@ -92,6 +92,11 @@ CAMPUS_TOOLS: tuple[CampusTool, ...] = (
             "SAIS_USERNAME": "{metu_username}",
             "SAIS_PASSWORD": "{metu_password}",
             "LOCALE": "{locale}",
+            # The vendored client holds the SAIS app-proxy session for ten
+            # minutes instead of rebuilding it on every call. Switchable from
+            # the broker's settings so backing it out is a config change and a
+            # restart rather than an image rebuild.
+            "COURSE_INFO_SESSION_CACHE": "{course_info_session_cache}",
         },
         state_slug="course-info",
         include_tools=(

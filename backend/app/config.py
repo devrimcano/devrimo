@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     # to succeed. Deliberately generous: this is a budget for a queue, and the
     # point of the queue is that everyone in it eventually gets served.
     campus_catalog_timeout_seconds: int = 120
+    # Whether the Course Info server holds its SAIS app-proxy session between
+    # calls. On by default: without it two thirds of every catalog read is
+    # re-establishing a session the process already has. Here rather than only
+    # in the image so it can be turned off without a rebuild.
+    course_info_session_cache: bool = True
 
     # --- Catalog pre-warming ----------------------------------------------
     # Course offerings are published per term and then barely move, so the
@@ -136,6 +141,12 @@ class Settings(BaseSettings):
     # until a department is cached, searching course titles cannot see it.
     catalog_warm_daily_limit: int = 200
     # Per pass, so the worker returns to its other duties between batches.
+    # How many *courses* one pass may walk, on top of the department listings.
+    # A course is one page plus one per section, so three of them is roughly
+    # twenty requests — about what a student browsing the catalog would do in
+    # the same six hours. Deliberately small: this shares the daily ceiling with
+    # the department listings and must never crowd them out.
+    catalog_warm_courses_per_pass: int = 3
     catalog_warm_batch: int = 15
     # Local hours, as "start-end". Overnight, when METU is quiet.
     catalog_warm_hours: str = "1-7"

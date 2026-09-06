@@ -50,6 +50,12 @@ const HOURS = Array.from({ length: 10 }, (_, index) => index + 8);
 // the rules were drawn 39px apart. Two hours then covered three and a half
 // rows. With the minimum on the track, cell and row are the same box again.
 const ROW_MIN_PX = 34;
+// How many courses one constraints request covers. Chunked rather than sent
+// whole so the red flags appear as they are decided instead of after minutes of
+// nothing, and no single request is long enough to be cut off. Six rather than
+// the original three because the broker now holds its SAIS session between
+// reads, which halved what a cold section costs.
+const CONSTRAINT_CHUNK = 6;
 // Eight hues rather than five, and stronger than before: a fourteen percent
 // wash read as "some tinted boxes" rather than as one colour per course,
 // which is the whole job of the colour. The solid left edge is what the eye
@@ -781,6 +787,31 @@ export function SchedulePlanner() {
   }, [department, term]);
 
   /**
+   * Sections for a whole pool in one request.
+   *
+   * Generating a schedule needs every course's sections, and asking for them
+   * one at a time meant fifteen round trips for a fifteen-course pool, each
+   * able to open its own catalog connection. The broker reads them over one
+   * connection and answers whatever it could, so a course it cannot read costs
+   * that course and not the batch.
+   */
+  const fetchPoolSections = useCallback(async (courses: CatalogCourse[], known: SectionMap): Promise<SectionMap> => {
+    const wanted = courses.filter((course) => !known[courseIdentity(course.rawCode)]?.length);
+    if (!wanted.length) return known;
+    const response = await jsonFetch<{ courses?: Record<string, { data?: unknown; error?: string }> }>(
+      "/api/schedule/sections",
+      { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: wanted.map((course) => course.rawCode) } },
+    );
+    const found: SectionMap = {};
+    for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
+      if (payload?.error !== undefined) continue;
+      found[courseIdentity(rawCode)] = parseSections(payload?.data);
+    }
+    setSectionsByCourse((current) => ({ ...current, ...found }));
+    return { ...known, ...found };
+  }, [department, term]);
+
+  /**
    * Verdicts for a whole pool of courses in one request.
    *
    * Restrictions differ from section to section, which is the normal case
@@ -799,8 +830,8 @@ export function SchedulePlanner() {
     // Chunked, the red flags appear as they are decided, and no single
     // request is long enough to be cut off.
     try {
-      for (let index = 0; index < wanted.length; index += 3) {
-        const chunk = wanted.slice(index, index + 3);
+      for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
+        const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
         try {
           const response = await jsonFetch<{ courses?: Record<string, { sections?: Record<string, SectionVerdict> }> }>(
             "/api/schedule/constraints",
@@ -973,9 +1004,19 @@ export function SchedulePlanner() {
       const blocked: string[] = [];
       const restricted: string[] = [];
       const placeable: CourseOptions[] = [];
+      // One request for everything still missing, rather than one per course
+      // inside the loop below. A pool the catalog has already seen this week
+      // costs a single call that touches no campus page at all.
       let known = sectionsByCourse;
+      try {
+        known = await fetchPoolSections(catalogCourses, known);
+      } catch (error) {
+        // Not fatal: the per-course path below still runs, so a failed batch
+        // costs speed rather than the whole attempt.
+        captureRequestFailure(error, { operation: "schedule.pool_sections", kind: "query" });
+      }
       for (const [index, course] of catalogCourses.entries()) {
-        setGenerateProgress({ done: index, total: catalogCourses.length });
+        setGenerateProgress({ done: index + 1, total: catalogCourses.length });
         let sections: CatalogSection[] = [];
         try {
           sections = await fetchSections(course, known);

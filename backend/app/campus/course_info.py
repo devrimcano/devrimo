@@ -153,6 +153,34 @@ async def prefetch(pairs: Iterable[tuple[str, dict[str, str]]]) -> None:
         _catalog.set(wanted[key_hash], payload)
 
 
+def section_numbers(payload: Any) -> list[str]:
+    """Every section number in a ``get_course_info`` payload, in order.
+
+    Lives here rather than in the HTTP layer because the overnight warmer needs
+    it too, and a background job importing an API module is the wrong direction
+    for that dependency to run.
+    """
+    found: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+            return
+        if not isinstance(item, dict):
+            return
+        for key, value in item.items():
+            if re.sub(r"[^a-z]", "", str(key).lower()) == "section" and isinstance(value, (str, int)):
+                number = str(value).strip()
+                if number and number not in found:
+                    found.append(number)
+        for child in item.values():
+            visit(child)
+
+    visit(payload)
+    return found
+
+
 def forget_user(user_id: UUID) -> None:
     """Drop every cached catalog answer belonging to one student."""
     prefix = str(user_id)

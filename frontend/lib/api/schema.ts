@@ -401,6 +401,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Course Sections
+         * @description Section lists for several courses at once.
+         *
+         *     Building a schedule needs the sections of every course in the pool, and the
+         *     browser fetched them one request at a time — fifteen courses meant fifteen
+         *     round trips, each able to spawn its own catalog connection. They share one
+         *     here, exactly as ``/constraints`` already does.
+         *
+         *     Two phases. Everything already cached is answered from one database read
+         *     with no campus contact at all, which for a pool the warmer has seen is the
+         *     whole batch. What is left is fetched one at a time over the shared session:
+         *     concurrent calls on it would interleave on the same stateful SAIS page, and
+         *     a stubbed toolkit in a test would not show it.
+         *
+         *     A course that cannot be read is reported with its error rather than failing
+         *     the batch, and keyed by the code the client sent so the caller can match the
+         *     answer to what it asked for.
+         */
+        post: operations["bulk_course_sections_api_v1_schedule_sections_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/constraints": {
         parameters: {
             query?: never;
@@ -1432,6 +1467,15 @@ export interface components {
         };
         /** BulkConstraintsRequest */
         BulkConstraintsRequest: {
+            /** Semester */
+            semester: string;
+            /** Courses */
+            courses: string[];
+            /** Department */
+            department?: string | null;
+        };
+        /** BulkSectionsRequest */
+        BulkSectionsRequest: {
             /** Semester */
             semester: string;
             /** Courses */
@@ -2746,6 +2790,39 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_course_sections_api_v1_schedule_sections_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkSectionsRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
