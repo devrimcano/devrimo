@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -25,13 +26,14 @@ from app.auth.jwt import AuthenticatedUser
 from app.campus import departments
 from app.campus.eligibility import course_candidates, evaluate, prior_grade
 from app.campus.course_info import (
-    CATALOG_NAMESPACE,
     CatalogSession,
     call_course_info,
+    catalog_key,
     catalog_session,
     department_for_course,
     department_options,
     json_value,
+    prefetch,
     resolve_department,
 )
 from app.core.digest import owner_digest, stable_digest
@@ -412,34 +414,35 @@ async def search_courses(
         return {"courses": courses[:40], "searched_departments": 1, "scope": owner.abbreviation or owner.code}
 
     # A title search, across whatever the cache already holds.
-    listings = await _cached_listings(semester)
-    if home is not None and home.code not in listings:
+    indexed, covered = await _search_index(semester)
+    extra: list[tuple[str, dict]] = []
+    if home is not None and home.code not in covered:
         async with catalog_session(db, user.id) as catalog:
-            listings[home.code] = await call_course_info(
+            payload = await call_course_info(
                 db, user.id, "list_program_courses",
                 {"department": home.code, "semester": semester},
                 session=catalog,
             )
-    courses: list[dict] = []
-    # Every cached department is scanned rather than stopping at the first
-    # sixty hits: breaking early ordered results by department id, so a match
-    # in a late department was invisible while an unrelated one filled the box.
-    for code, payload in listings.items():
-        owner = departments.by_code(code)
-        if owner is None:
-            continue
-        courses.extend(_match_courses(payload, owner, digits="", title=typed))
+        extra = _index_rows(payload, home)
+    wanted = _search_fold(typed)
+    # Every department is scanned rather than stopping at the first sixty hits:
+    # breaking early ordered results by department id, so a match in a late
+    # department was invisible while an unrelated one filled the box.
+    courses = [course for haystack, course in (*indexed, *extra) if wanted in haystack]
     # The student's own department first: an elective search is usually still
     # anchored to what they are studying.
     if home is not None:
         courses.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
-    return {"courses": courses[:40], "searched_departments": len(listings), "scope": "catalog"}
+    return {
+        "courses": courses[:40],
+        "searched_departments": len(covered) + (1 if extra else 0),
+        "scope": "catalog",
+    }
 
 
 def _listing_key(department_code: str, semester: str) -> str:
     """The cache key ``call_course_info`` stores a department listing under."""
-    identity = ("list_program_courses", f"department={department_code}", f"semester={semester}")
-    return stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})
+    return catalog_key("list_program_courses", {"department": department_code, "semester": semester})[1]
 
 
 async def _cached_listings(semester: str) -> dict[str, Any]:
@@ -449,29 +452,74 @@ async def _cached_listings(semester: str) -> dict[str, Any]:
     return {wanted[key]: payload for key, payload in found.items()}
 
 
-def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list[dict]:
-    """Rows of one department's listing that answer the query."""
-    wanted_title = _search_fold(title)
-    matches: list[dict] = []
+# The whole term's catalog, shaped and folded once. A title search used to pull
+# 153 department listings out of Postgres and re-fold every course title in all
+# of them, synchronously, on every keystroke of a 300 ms debounce. Ten minutes
+# is short next to the thirty-day lifetime of the listings underneath, so the
+# staleness this can introduce is a department the warmer added tonight not
+# being searchable until the top of the hour.
+_SEARCH_INDEX = TTLCache(ttl_seconds=10 * 60, max_entries=4)
+
+
+def _index_rows(payload: Any, owner: Any) -> list[tuple[str, dict]]:
+    """One department's listing as (folded haystack, course) pairs.
+
+    The haystack carries the short code as well as the title, so "PHYS213"
+    pasted whole still lands when it arrives through the title path.
+    """
+    rows: list[tuple[str, dict]] = []
     for row in _catalog_rows(payload):
         full_code = str(row.get("course_code") or "").strip()
         if not full_code:
             continue
         name = " ".join(str(row.get("name") or "").split())
         short = _short_code(full_code, owner.abbreviation)
-        if digits and not re.sub(r"[^0-9]", "", short).startswith(digits):
+        rows.append((
+            _search_fold(f"{short} {name}"),
+            {
+                "code": short,
+                "full_code": full_code,
+                "name": name,
+                "credits": _credit_value(row.get("credit")),
+                "department": owner.abbreviation or owner.code,
+            },
+        ))
+    return rows
+
+
+async def _search_index(semester: str) -> tuple[list[tuple[str, dict]], set[str]]:
+    """Every cached department's courses for one term, and which departments those were.
+
+    The course dicts are shared with every request that searches this term, so
+    callers read them and never mutate them; the endpoint only ever puts them
+    in a response.
+    """
+
+    async def build() -> tuple[list[tuple[str, dict]], set[str]]:
+        listings = await _cached_listings(semester)
+        rows: list[tuple[str, dict]] = []
+        for code, payload in listings.items():
+            owner = departments.by_code(code)
+            if owner is None:
+                continue
+            rows.extend(_index_rows(payload, owner))
+        return rows, set(listings)
+
+    # Single-flighted, so a burst of keystrokes past the debounce builds it
+    # once and the rest wait on that build rather than starting their own.
+    return await _SEARCH_INDEX.run(semester, build)
+
+
+def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list[dict]:
+    """Rows of one department's listing that answer the query."""
+    wanted_title = _search_fold(title)
+    matches: list[dict] = []
+    for haystack, course in _index_rows(payload, owner):
+        if digits and not re.sub(r"[^0-9]", "", course["code"]).startswith(digits):
             continue
-        # The code is searched too, so "PHYS213" pasted whole still lands even
-        # when it arrives through the title path.
-        if wanted_title and wanted_title not in _search_fold(f"{short} {name}"):
+        if wanted_title and wanted_title not in haystack:
             continue
-        matches.append({
-            "code": short,
-            "full_code": full_code,
-            "name": name,
-            "credits": _credit_value(row.get("credit")),
-            "department": owner.abbreviation or owner.code,
-        })
+        matches.append(course)
     return matches
 
 
@@ -560,14 +608,32 @@ async def bulk_constraints(
     the batch: the rest of the curriculum is still worth answering.
     """
     results: dict[str, Any] = {}
+    profile = await _student_profile(db, user)
     async with catalog_session(db, user.id) as catalog:
+        # Resolve every code first. This is a local directory lookup for all but
+        # an unrecognised prefix, and doing it up front is what lets the course
+        # pages below be looked up in the cache together.
+        expanded: dict[str, tuple[str, str]] = {}
         for raw in dict.fromkeys(code.strip() for code in body.courses if code.strip()):
             try:
-                compact_course, lookup_department = await _expand_course(
+                expanded[raw] = await _expand_course(
                     db, user.id, raw, body.department or "", session=catalog
                 )
+            except HTTPException as exc:
+                logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
+                results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
+
+        # One database read for every course page in the batch, instead of one
+        # per course each opening its own session.
+        await prefetch(
+            ("get_course_info", {"department": owner, "semester": body.semester, "course": course})
+            for course, owner in expanded.values()
+        )
+
+        for raw, (compact_course, lookup_department) in expanded.items():
+            try:
                 results[raw] = await _constraints_for(
-                    db, user, catalog, raw, compact_course, lookup_department, body.semester
+                    db, user, catalog, raw, compact_course, lookup_department, body.semester, profile
                 )
             except HTTPException as exc:
                 logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
@@ -593,13 +659,51 @@ async def course_section_constraints(
     """
     # One connection for the department lookup, the course page and every
     # section's table below. Opened only if something misses the cache.
+    profile = await _student_profile(db, user)
     async with catalog_session(db, user.id) as catalog:
         compact_course, lookup_department = await _expand_course(
             db, user.id, course_code, department, session=catalog
         )
         return await _constraints_for(
-            db, user, catalog, course_code, compact_course, lookup_department, semester
+            db, user, catalog, course_code, compact_course, lookup_department, semester, profile
         )
+
+
+@dataclass(frozen=True)
+class _StudentProfile:
+    """Everything an eligibility verdict needs about the student, read once.
+
+    These four values are the same for every course and every section in a
+    request, but they used to be read per course inside the loop below: a
+    forty-course batch issued a hundred and twenty queries — a context row, a
+    department resolution that can itself reach the campus, and a transcript
+    scan — to answer with the same four values every time.
+    """
+
+    context: StudentContext | None
+    department: Any
+    cgpa: float | None
+    completed: list[dict]
+
+
+async def _student_profile(db: AsyncSession, user: AuthenticatedUser) -> _StudentProfile:
+    context = await db.get(StudentContext, user.id)
+    query, code = await _student_department(db, user.id, context)
+    snapshot = await db.scalar(
+        select(StudentAcademicSnapshot)
+        .where(StudentAcademicSnapshot.user_id == user.id)
+        .order_by(StudentAcademicSnapshot.fetched_at.desc())
+        .limit(1)
+    )
+    cgpa = None
+    if snapshot and snapshot.current_credits:
+        cgpa = float(snapshot.current_grade_points) / float(snapshot.current_credits)
+    return _StudentProfile(
+        context=context,
+        department=departments.resolve(code or query),
+        cgpa=cgpa,
+        completed=list(snapshot.completed_courses) if snapshot else [],
+    )
 
 
 async def _constraints_for(
@@ -610,6 +714,7 @@ async def _constraints_for(
     compact_course: str,
     lookup_department: str,
     semester: str,
+    profile: _StudentProfile,
 ) -> dict:
     info = await call_course_info(
         db,
@@ -619,18 +724,6 @@ async def _constraints_for(
         session=catalog,
     )
 
-    context = await db.get(StudentContext, user.id)
-    query, code = await _student_department(db, user.id, context)
-    student_department = departments.resolve(code or query)
-    snapshot = await db.scalar(
-        select(StudentAcademicSnapshot)
-        .where(StudentAcademicSnapshot.user_id == user.id)
-        .order_by(StudentAcademicSnapshot.fetched_at.desc())
-        .limit(1)
-    )
-    cgpa = None
-    if snapshot and snapshot.current_credits:
-        cgpa = float(snapshot.current_grade_points) / float(snapshot.current_credits)
     # A section reserved for students who still need the course is closed to
     # one who has already passed it, and only the transcript knows which.
     # The course's *owner* department, not the student's: the candidates are
@@ -639,7 +732,7 @@ async def _constraints_for(
     # "EE213", a course that does not exist.
     course_owner = departments.by_code(lookup_department)
     held = prior_grade(
-        snapshot.completed_courses if snapshot else [],
+        profile.completed,
         course_candidates(course_code, course_owner, compact_course),
     )
 
@@ -666,10 +759,10 @@ async def _constraints_for(
         rows = _constraint_rows(payload)
         verdict = evaluate(
             rows,
-            department=student_department.abbreviation if student_department else None,
-            surname=context.surname_prefix if context else None,
-            cgpa=cgpa,
-            year=context.year_of_study if context else None,
+            department=profile.department.abbreviation if profile.department else None,
+            surname=profile.context.surname_prefix if profile.context else None,
+            cgpa=profile.cgpa,
+            year=profile.context.year_of_study if profile.context else None,
             prior_grade=held,
         )
         sections[number] = {
@@ -681,7 +774,7 @@ async def _constraints_for(
     return {
         "course": compact_course,
         "department": lookup_department,
-        "student_department": student_department.abbreviation if student_department else None,
+        "student_department": profile.department.abbreviation if profile.department else None,
         "your_grade_in_this_course": held,
         "sections": sections,
     }

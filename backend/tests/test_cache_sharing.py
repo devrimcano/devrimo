@@ -9,9 +9,53 @@ change, and the tools whose names begin "get_student_" return one person's
 curriculum.
 """
 
-import inspect
+import uuid
+
+import pytest
 
 from app.campus import course_info
+
+SHARED_VALUES = {"department": "236", "semester": "20252"}
+
+
+@pytest.fixture(autouse=True)
+def _empty_catalog():
+    """The in-process cache is module state, so a test must not inherit one."""
+    course_info._catalog.purge(lambda key: True)
+    yield
+    course_info._catalog.purge(lambda key: True)
+
+
+class _Layers:
+    """Stands in for the two cache layers and the campus, and records the traffic.
+
+    These used to be assertions about the *text* of ``call_course_info``, which
+    meant a refactor that preserved every property they care about still failed
+    them. What matters is where an answer goes, so that is what is checked.
+    """
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.reads: list[str] = []
+        self.writes: list[tuple[str, dict]] = []
+        self.campus_calls = 0
+
+    def install(self, monkeypatch):
+        async def read_cached(key_hash):
+            self.reads.append(key_hash)
+            return None
+
+        async def write_cached(key_hash, value, **kwargs):
+            self.writes.append((key_hash, kwargs))
+
+        async def invoke(db, user_id, tool_suffix, values, session=None):
+            self.campus_calls += 1
+            return self.answer
+
+        monkeypatch.setattr(course_info, "read_cached", read_cached)
+        monkeypatch.setattr(course_info, "write_cached", write_cached)
+        monkeypatch.setattr(course_info, "_invoke", invoke)
+        return self
 
 
 def test_no_student_scoped_tool_is_ever_shared():
@@ -42,24 +86,59 @@ def test_the_allowlist_is_exactly_what_is_reviewed():
 
 def test_a_shared_key_does_not_depend_on_who_asked():
     """Two students must land on the same row, or nobody is sharing anything."""
-    source = inspect.getsource(course_info.call_course_info)
-    assert "memory_key = identity if shared_ttl else (str(user_id), *identity)" in source
-    # And the persistent key is built from `identity` alone.
-    assert 'stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})' in source
+    first = course_info.catalog_key("list_program_courses", {"department": "236", "semester": "20252"})
+    # The same values, built the other way round. The identity is sorted, so the
+    # order a caller happened to assemble its dict in cannot split the row in two.
+    second = course_info.catalog_key("list_program_courses", {"semester": "20252", "department": "236"})
+    assert first == second
+    # And nothing in it names a student: the function is not even given one.
+    identity, _ = first
+    assert "user" not in " ".join(identity)
 
 
-def test_a_student_scoped_answer_never_reaches_the_persistent_layer():
-    """No shared TTL means no write_cached call at all, not a private row."""
-    source = inspect.getsource(course_info.call_course_info)
-    before, _, after = source.partition("if shared_ttl is None:")
-    assert after, "the student-scoped branch disappeared"
-    # The early return happens before any cache write in that branch.
-    student_branch = after.split("key_hash =")[0]
-    assert "write_cached" not in student_branch
+async def test_the_second_student_is_served_the_first_student_answer(monkeypatch):
+    """The point of sharing: one fetch, and the row is keyed the same both times."""
+    layers = _Layers(["a course"]).install(monkeypatch)
+
+    answer = await course_info.call_course_info(
+        None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES)
+    )
+    assert answer == ["a course"]
+    assert layers.campus_calls == 1
+
+    # In memory it is already shared, so a second student costs nothing at all.
+    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
+    assert layers.campus_calls == 1
+
+    # And past the process cache they still meet on one persistent row, which is
+    # what survives a restart and what makes the sharing worth anything.
+    course_info._catalog.purge(lambda key: True)
+    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
+    assert len(set(layers.reads)) == 1
+    assert len({key for key, _ in layers.writes}) == 1
 
 
-def test_catalog_rows_are_written_unowned():
+async def test_a_student_scoped_answer_never_reaches_the_persistent_layer(monkeypatch):
+    """No shared TTL means no persistent traffic at all, not a private row."""
+    layers = _Layers({"course_categories": [{"id": "1-236"}]}).install(monkeypatch)
+
+    await course_info.call_course_info(None, uuid.uuid4(), "get_student_course_categories", {})
+    assert layers.reads == []
+    assert layers.writes == []
+
+    # Nor may one student's curriculum be answered from another's memory entry.
+    await course_info.call_course_info(None, uuid.uuid4(), "get_student_course_categories", {})
+    assert layers.campus_calls == 2
+
+
+async def test_catalog_rows_are_written_unowned(monkeypatch):
     """owner_hash None is what stops one student's erasure deleting the catalog."""
-    source = inspect.getsource(course_info.call_course_info)
-    assert "await write_cached(key_hash, value, namespace=CATALOG_NAMESPACE, ttl_seconds=shared_ttl)" in source
-    assert "owner_hash" not in source.split("await write_cached")[1].split(")")[0]
+    layers = _Layers(["a course"]).install(monkeypatch)
+
+    await course_info.call_course_info(
+        None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES)
+    )
+    assert layers.writes
+    for _, kwargs in layers.writes:
+        assert kwargs["namespace"] == course_info.CATALOG_NAMESPACE
+        assert kwargs.get("owner_hash") is None

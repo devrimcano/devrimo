@@ -14,7 +14,8 @@ from a dict inside a request handler.
 
 import inspect
 import re
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 from uuid import UUID
@@ -29,10 +30,17 @@ from app.campus import service as campus_service
 from app.campus.mcp_results import mcp_payload, parse_json_document
 from app.config import get_settings
 from app.core.digest import stable_digest
-from app.core.persistent_cache import read_cached, write_cached
+from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 TOOLKIT_NAME = "campus:course_info"
+
+# Distinguishable from any value a cache could legitimately hold, including
+# None -- a tool that answers null is not a miss.
+_UNCACHED = object()
 
 # Catalog data changes when the registrar publishes, not between page loads, so
 # a quarter hour is generous; the bound exists so a long-lived worker's cache
@@ -82,6 +90,42 @@ _ARGUMENT_ALIASES = {
     "query": ("query", "keyword", "search", "name"),
     "category": ("category", "category_id", "category_code", "code", "id", "name"),
 }
+
+
+def catalog_key(tool_suffix: str, values: dict[str, str]) -> tuple[tuple[str, ...], str]:
+    """The identity and digest a shared catalog answer is stored under.
+
+    One formula, in one place. It used to be spelled out independently in three
+    modules — here, the overnight warmer, and the search endpoint — all of which
+    have to agree exactly or the warmer fills a cache nobody reads.
+    """
+    identity = (tool_suffix, *(f"{key}={value}" for key, value in sorted(values.items())))
+    return identity, stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})
+
+
+async def prefetch(pairs: Iterable[tuple[str, dict[str, str]]]) -> None:
+    """Seed the in-process cache for many shared answers from one database read.
+
+    A batch endpoint otherwise probes the persistent layer once per course, and
+    each probe opens its own session: forty courses meant forty connection
+    checkouts before a single campus call. Answers already in memory are left
+    alone, and a miss here is simply a miss — the caller fetches it as usual.
+
+    Silent by design about anything not shared: a per-student tool has no
+    business in a cache keyed without the student.
+    """
+    wanted: dict[str, tuple[str, ...]] = {}
+    for tool_suffix, values in pairs:
+        if tool_suffix not in _SHARED_TOOL_TTLS:
+            continue
+        identity, key_hash = catalog_key(tool_suffix, values)
+        if _catalog.get(identity, _UNCACHED) is not _UNCACHED:
+            continue
+        wanted[key_hash] = identity
+    if not wanted:
+        return
+    for key_hash, payload in (await read_many_cached(list(wanted))).items():
+        _catalog.set(wanted[key_hash], payload)
 
 
 def forget_user(user_id: UUID) -> None:
@@ -169,18 +213,27 @@ async def call_course_info(
     one connection instead of spawning a campus server each.
     """
     shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
-    identity = (tool_suffix, *(f"{key}={value}" for key, value in sorted(values.items())))
+    identity, key_hash = catalog_key(tool_suffix, values)
     # A shared answer must not be keyed by the student who happened to ask for
     # it first, or every account would still pay for its own copy.
     memory_key = identity if shared_ttl else (str(user_id), *identity)
 
+    # Which layer answered. Read here rather than set from inside ``load``,
+    # because a caller that joins a fill already in flight never runs ``load``
+    # at all and would otherwise be recorded as a memory hit when it in fact
+    # waited on the campus.
+    source = "memory" if _catalog.get(memory_key, _UNCACHED) is not _UNCACHED else "flight"
+
     async def load() -> Any:
+        nonlocal source
         if shared_ttl is None:
+            source = "campus"
             return await _invoke(db, user_id, tool_suffix, values, session)
-        key_hash = stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})
         cached = await read_cached(key_hash)
         if cached is not None:
+            source = "database"
             return cached
+        source = "campus"
         value = await _invoke(db, user_id, tool_suffix, values, session)
         # owner_hash stays None: this row belongs to the catalog, not to the
         # student who triggered the fetch, so erasing their data must not
@@ -188,7 +241,23 @@ async def call_course_info(
         await write_cached(key_hash, value, namespace=CATALOG_NAMESPACE, ttl_seconds=shared_ttl)
         return value
 
-    return await _catalog.run(memory_key, load)
+    started = time.monotonic()
+    try:
+        return await _catalog.run(memory_key, load)
+    finally:
+        # ``tool`` and ``duration_ms`` deliberately carry the same names as
+        # ``agent_tool_completed``: the catalog is being taken off the agent's
+        # tool path, and one journald query has to span both sides of that
+        # change for the before and after to be comparable at all. Argument
+        # *values* are never logged -- a course code is fine, but these dicts
+        # also carry the student's own programme and category ids.
+        logger.info(
+            "catalog_tool_completed",
+            tool=tool_suffix,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            source=source,
+            shared=shared_ttl is not None,
+        )
 
 
 @asynccontextmanager
