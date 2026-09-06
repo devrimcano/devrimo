@@ -250,3 +250,42 @@ async def test_two_calls_on_one_client_never_overlap(sais):
 
 async def _answer(html: str) -> _Response:
     return _Response(html)
+
+
+# --- the request count, which is the whole claim ------------------------------
+
+
+async def test_each_call_reports_how_many_requests_it_made(sais, capsys):
+    """Holding the session is worth a request count and nothing else.
+
+    So the count has to be observable from outside, or the saving is a claim
+    rather than a measurement.
+    """
+    client = _client(sais)
+    _track_opens(client, sais)
+    _post_returning(client, [EMPTY_PAGE])
+
+    await client.get_departments_and_semesters()
+
+    line = capsys.readouterr().err
+    assert "sais_call" in line
+    assert "tool=get_departments_and_semesters" in line
+    assert "requests=" in line and "ms=" in line
+
+
+async def test_the_report_never_carries_a_url(sais, capsys):
+    """`pkg` and `hidden_creds` are session tokens, and this line is shared.
+
+    Asserted on what is emitted rather than on the source, because the source
+    also contains the sentence explaining why there is no URL in it.
+    """
+    client = _client(sais)
+    _track_opens(client, sais)
+    _post_returning(client, [EMPTY_PAGE])
+
+    await client.get_departments_and_semesters()
+
+    line = capsys.readouterr().err
+    assert "sais_call" in line
+    for secret in ("http", "pkg=", "hidden_creds", "CREDS", "token"):
+        assert secret not in line, f"{secret!r} must never reach a shared log"
