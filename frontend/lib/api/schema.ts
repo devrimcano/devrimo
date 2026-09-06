@@ -154,7 +154,17 @@ export interface paths {
         get: operations["list_sessions_api_v1_chat_sessions_get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete All Sessions
+         * @description Soft-delete every one of this student's conversations.
+         *
+         *     The same two steps as deleting one, done in a loop: drop the Agno session
+         *     that holds the messages, then mark our index row deleted. A failure on the
+         *     Agno side does not stop the pass — the student asked for all of them to go,
+         *     and an orphaned session they can no longer reach is a cleanup problem
+         *     rather than a reason to leave the rest of their history on screen.
+         */
+        delete: operations["delete_all_sessions_api_v1_chat_sessions_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -275,6 +285,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/timetable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Timetable */
+        get: operations["read_timetable_api_v1_schedule_timetable_get"];
+        /**
+         * Save Timetable
+         * @description Store the week the student is building, so chat can answer about it.
+         *
+         *     The planner keeps its full working state in the browser; only this
+         *     projection is sent. Replacing the row outright rather than merging is
+         *     deliberate: the browser holds the truth, and a merge would resurrect a
+         *     course the student had just deleted.
+         */
+        put: operations["save_timetable_api_v1_schedule_timetable_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/departments/search": {
         parameters: {
             query?: never;
@@ -309,6 +345,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/courses/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Courses
+         * @description Courses matching a code or a title, for the add-course box.
+         *
+         *     Adding an elective used to require already knowing the exact code: the box
+         *     put whatever was typed straight into the pool, so "I want a history
+         *     elective" had no path through the screen.
+         *
+         *     Two things students actually type, and both are supported:
+         *
+         *     * a course code — "PHYS213", "MATH119", "HIST". The letters name the
+         *       department, so this is one cached read of that department's listing.
+         *     * a course title — "termodinamik", "signals", "differential". Titles are
+         *       searched across every department already in the shared cache, in a
+         *       single query, plus the student's own department fetched live if it is
+         *       not cached yet.
+         *
+         *     Titles cannot be searched across departments that have never been fetched:
+         *     doing that live would be one campus round trip per department, which is
+         *     the traffic the nightly warm-up exists to avoid making all at once. The
+         *     reply says how many departments were actually searched so the caller can
+         *     be honest about it rather than implying the whole catalog was.
+         */
+        get: operations["search_courses_api_v1_schedule_courses_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/courses/{course_code}": {
         parameters: {
             query?: never;
@@ -318,6 +393,62 @@ export interface paths {
         };
         /** Course Sections */
         get: operations["course_sections_api_v1_schedule_courses__course_code__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/constraints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Constraints
+         * @description Eligibility verdicts for every section of several courses at once.
+         *
+         *     A section's restrictions differ from section to section — that is the
+         *     normal case at METU, not the exception — so a student cannot be told
+         *     whether a course is open to them without reading every section's table.
+         *     Doing that from the browser meant one request per course, each opening its
+         *     own catalog connection; here they share one, and the shared cache means a
+         *     course any student has opened this week costs nothing.
+         *
+         *     A course that cannot be read is reported with its error rather than failing
+         *     the batch: the rest of the curriculum is still worth answering.
+         */
+        post: operations["bulk_constraints_api_v1_schedule_constraints_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/courses/{course_code}/constraints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Course Section Constraints
+         * @description Who may register for each section of this course, and whether this student may.
+         *
+         *     One SAIS page per section, so this is deliberately a second request rather
+         *     than folded into ``/courses/{code}``: a course with eight sections would
+         *     otherwise make opening it eight times slower for a student who only wanted
+         *     to see the meeting times. Both layers of cache apply, so the cost is paid
+         *     once per course per week across every student.
+         */
+        get: operations["course_section_constraints_api_v1_schedule_courses__course_code__constraints_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1259,11 +1390,20 @@ export interface components {
         /** AiScheduleRequest */
         AiScheduleRequest: {
             /** Department */
-            department: string;
+            department?: string | null;
             /** Semester */
             semester: string;
             /** Courses */
             courses?: components["schemas"]["AiScheduleCourse"][];
+        };
+        /** BulkConstraintsRequest */
+        BulkConstraintsRequest: {
+            /** Semester */
+            semester: string;
+            /** Courses */
+            courses: string[];
+            /** Department */
+            department?: string | null;
         };
         /** CampusConnectionIn */
         CampusConnectionIn: {
@@ -1476,17 +1616,16 @@ export interface components {
         ContextIn: {
             /** Department */
             department?: string | null;
+            /** Surname Prefix */
+            surname_prefix?: string | null;
             /** Degree Level */
             degree_level?: ("undergraduate" | "masters" | "doctoral" | "exchange" | "other") | null;
+            /** Year Of Study */
+            year_of_study?: number | null;
             /** Program Code */
             program_code?: string | null;
             /** Campus */
             campus?: string | null;
-            /**
-             * Confirm Verified
-             * @default false
-             */
-            confirm_verified?: boolean;
         };
         /** DeleteUserIn */
         DeleteUserIn: {
@@ -1744,7 +1883,7 @@ export interface components {
         /** SemesterPlanRequest */
         SemesterPlanRequest: {
             /** Term */
-            term: string;
+            term?: string;
             /** Required Courses */
             required_courses?: string[];
             /** Preferred Courses */
@@ -1826,6 +1965,72 @@ export interface components {
             config?: {
                 [key: string]: unknown;
             };
+        };
+        /** TimetableBlock */
+        TimetableBlock: {
+            /**
+             * Name
+             * @default
+             */
+            name?: string;
+            /** Meetings */
+            meetings?: components["schemas"]["TimetableMeeting"][];
+        };
+        /** TimetableCourse */
+        TimetableCourse: {
+            /** Code */
+            code: string;
+            /**
+             * Name
+             * @default
+             */
+            name?: string;
+            /**
+             * Section
+             * @default
+             */
+            section?: string;
+            /**
+             * Credits
+             * @default 0
+             */
+            credits?: number;
+            /**
+             * Instructor
+             * @default
+             */
+            instructor?: string;
+            /** Meetings */
+            meetings?: components["schemas"]["TimetableMeeting"][];
+        };
+        /** TimetableIn */
+        TimetableIn: {
+            /** Term */
+            term: string;
+            /** Courses */
+            courses?: components["schemas"]["TimetableCourse"][];
+            /** Busy Blocks */
+            busy_blocks?: components["schemas"]["TimetableBlock"][];
+        };
+        /** TimetableMeeting */
+        TimetableMeeting: {
+            /**
+             * Day
+             * @enum {string}
+             */
+            day: "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
+            /** Start */
+            start: number;
+            /**
+             * Duration
+             * @default 1
+             */
+            duration?: number;
+            /**
+             * Room
+             * @default
+             */
+            room?: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -2051,6 +2256,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChatSessionListOut"];
+                };
+            };
+        };
+    };
+    delete_all_sessions_api_v1_chat_sessions_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -2318,6 +2545,63 @@ export interface operations {
             };
         };
     };
+    read_timetable_api_v1_schedule_timetable_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    save_timetable_api_v1_schedule_timetable_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimetableIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     search_departments_api_v1_schedule_departments_search_get: {
         parameters: {
             query: {
@@ -2381,7 +2665,108 @@ export interface operations {
             };
         };
     };
+    search_courses_api_v1_schedule_courses_search_get: {
+        parameters: {
+            query: {
+                query: string;
+                semester: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     course_sections_api_v1_schedule_courses__course_code__get: {
+        parameters: {
+            query: {
+                department: string;
+                semester: string;
+            };
+            header?: never;
+            path: {
+                course_code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_constraints_api_v1_schedule_constraints_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkConstraintsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    course_section_constraints_api_v1_schedule_courses__course_code__constraints_get: {
         parameters: {
             query: {
                 department: string;
