@@ -187,6 +187,10 @@ async def test_a_single_attempt_is_not_retried(monkeypatch):
         # No code on the left, so the whole field is the name — never a code.
         ("Electrical and Electronics Engineering", (None, "Electrical and Electronics Engineering")),
         ("MAJOR", (None, "MAJOR")),
+        # Nothing but a code, and no name to go with it. Read as a name it
+        # would be stored as the student's department.
+        ("571", ("571", None)),
+        ("5710101", ("5710101", None)),
         ("", (None, None)),
     ],
 )
@@ -222,6 +226,29 @@ async def test_program_type_is_never_mistaken_for_the_programme(monkeypatch):
     # Decoy first, so a loose match would bind to it.
     await _apply_student_info(None, "user", {"Program Type": "MAJOR", **ENGLISH_CARD})
     assert captured["department"] == "Electrical and Electronics Engineering"
+
+
+async def test_a_plainly_labelled_programme_field_is_read(monkeypatch):
+    """Some cards label it "program" and nothing more.
+
+    That label is a prefix of the "Program Type" decoy, so it is matched
+    exactly and never as a substring. The decoy is listed first here, where a
+    loose match would reach it.
+    """
+    captured = {}
+
+    async def fake_apply(db, user_id, **fields):
+        captured.update(fields)
+
+    monkeypatch.setattr("app.planning.mcp_bridge.apply_verified_context", fake_apply)
+    await _apply_student_info(
+        None,
+        "user",
+        {"Program Type": "MAJOR", "bolum": "Computer Engineering", "program": "571"},
+    )
+
+    assert captured["program_code"] == "571"
+    assert captured["department"] == "Computer Engineering"
 
 
 class _SlowFunction:

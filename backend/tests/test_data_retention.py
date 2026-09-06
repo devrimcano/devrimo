@@ -20,7 +20,7 @@ from app.db.models import (
     UserPreference,
 )
 from app.db.session import SessionLocal
-from app.knowledge.retention import sweep_expired_schedule_cache
+from app.knowledge.retention import STALE_GRACE, sweep_expired_schedule_cache
 from app.student.purge import purge_academic_data, purge_student_data
 
 
@@ -157,28 +157,35 @@ def _cache_row(key: str, *, expires_in: timedelta) -> ScheduleDataCache:
 
 
 async def test_sweep_removes_only_expired_rows():
-    """The rows nothing else reclaims.
+    """The rows nothing else reclaims, and only once the grace window has run.
 
     A plan key includes the requested course pool, so a student who tries five
     pools leaves four rows that no read will return to — the read path can only
-    drop a row somebody asks for a second time.
+    drop a row somebody asks for a second time. But it no longer drops even
+    those: an expired row is answered as a miss and kept, so that a refresh
+    which comes back empty still has something to fall back on. That fallback
+    is what ``STALE_GRACE`` protects, which is why the hour-old row below has
+    to survive a sweep that takes the older two.
     """
     async with SessionLocal() as db:
-        db.add(_cache_row("stale-1", expires_in=-timedelta(hours=1)))
-        db.add(_cache_row("stale-2", expires_in=-timedelta(days=3)))
+        db.add(_cache_row("stale-1", expires_in=-STALE_GRACE - timedelta(hours=1)))
+        db.add(_cache_row("stale-2", expires_in=-STALE_GRACE - timedelta(days=4)))
+        db.add(_cache_row("just-expired", expires_in=-timedelta(hours=1)))
         db.add(_cache_row("live", expires_in=timedelta(hours=6)))
         await db.commit()
 
         assert await sweep_expired_schedule_cache(db) == 2
         remaining = (await db.execute(select(ScheduleDataCache))).scalars().all()
-    assert [row.key_hash for row in remaining] == [stable_digest("live")]
+    assert sorted(row.key_hash for row in remaining) == sorted(
+        [stable_digest("just-expired"), stable_digest("live")]
+    )
 
 
 async def test_sweep_is_bounded_and_repeatable():
     """Batched so one pass cannot hold a long lock on a table the page reads."""
     async with SessionLocal() as db:
         for index in range(5):
-            db.add(_cache_row(f"stale-{index}", expires_in=-timedelta(hours=1)))
+            db.add(_cache_row(f"stale-{index}", expires_in=-STALE_GRACE - timedelta(hours=index + 1)))
         await db.commit()
 
         assert await sweep_expired_schedule_cache(db, batch_size=2) == 2
