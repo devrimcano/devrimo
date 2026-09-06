@@ -457,6 +457,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/curriculum": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Curriculum Plan
+         * @description The courses this student still has to take, offered this term.
+         *
+         *     Read from their own curriculum listing and this term's department catalogs.
+         *     This used to be an agent run: a median of 95.8 seconds in production, of
+         *     which about 88 were model round trips between tool calls that themselves
+         *     took eight. Matching a code list against a department listing is not a
+         *     judgement, so there is nothing here for a model to do.
+         *
+         *     ``sections`` is always empty, as it was before: the planner loads a course's
+         *     times when the student opens it, and fetching them for a whole curriculum
+         *     would be dozens of campus pages nobody asked for.
+         */
+        post: operations["curriculum_plan_api_v1_schedule_curriculum_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/ai-plan": {
         parameters: {
             query?: never;
@@ -468,7 +498,11 @@ export interface paths {
         put?: never;
         /**
          * Ai Schedule Plan
-         * @description Use one bounded agent run to fill gaps left by direct catalog calls.
+         * @description The previous name for :func:`curriculum_plan`.
+         *
+         *     Kept for one release. A browser holding a cached bundle still calls this
+         *     route by name, and deleting it in the same deploy that adds the new one
+         *     breaks every tab that was already open.
          */
         post: operations["ai_schedule_plan_api_v1_schedule_ai_plan_post"];
         delete?: never;
@@ -2779,6 +2813,39 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    curriculum_plan_api_v1_schedule_curriculum_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiScheduleRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

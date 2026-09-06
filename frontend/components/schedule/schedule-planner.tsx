@@ -442,7 +442,6 @@ export function SchedulePlanner() {
   const [constraintsBusy, setConstraintsBusy] = useState(false);
   const [alternatives, setAlternatives] = useState<Entry[][]>([]);
   const [alternativeIndex, setAlternativeIndex] = useState(0);
-  const [waitSeconds, setWaitSeconds] = useState(0);
   const [curriculumNotice, setCurriculumNotice] = useState("");
   const [poolQuery, setPoolQuery] = useState("");
   const [suggestions, setSuggestions] = useState<CatalogCourse[]>([]);
@@ -538,12 +537,6 @@ export function SchedulePlanner() {
     }, 2500);
     return () => window.clearTimeout(timer);
   }, [hydrated, entries, term]);
-
-  useEffect(() => {
-    if (!planBusy) return;
-    const timer = window.setInterval(() => setWaitSeconds((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [planBusy]);
 
   useEffect(() => {
     let cancelled = false;
@@ -872,13 +865,15 @@ export function SchedulePlanner() {
     return { allowed: surnameEligible(section, surname), reason: "" };
   }, [constraints, surname]);
 
-  async function requestAiPlan(courses: CatalogCourse[]) {
-    // The slowest thing a student waits on in this app, and the only one
-    // backed by the agent. Its outcome was previously visible only as a toast.
+  async function requestCurriculum(courses: CatalogCourse[]) {
+    // This was the slowest thing a student waited on in the whole app — a
+    // median of 95.8 seconds — because it ran an agent that called one catalog
+    // tool per department with a model turn between each. It now reads the
+    // curriculum directly and answers in about two.
     const startedAt = Date.now();
     let response: { courses?: AiPlanCourse[]; warnings?: string[]; cache_hit?: boolean; duration_ms?: number };
     try {
-      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/ai-plan", {
+      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/curriculum", {
         method: "POST",
         // Omitted rather than sent empty: the broker reads the department from
         // the stored campus context when the client has none, so a page whose
@@ -918,10 +913,9 @@ export function SchedulePlanner() {
     // No department gate any more. The broker resolves it from the stored
     // campus context when the request omits it, and answers with a specific
     // 422 when it genuinely has none — which is more than this check knew.
-    setWaitSeconds(0);
     setPlanBusy(true); setCurriculumNotice(""); setExpandedCourse(null);
     try {
-      const result = await requestAiPlan([]);
+      const result = await requestCurriculum([]);
       setCatalogCourses(result.courses);
       // Every course the curriculum names, checked now rather than when the
       // student happens to expand one: the red flags have to be visible while
@@ -930,8 +924,8 @@ export function SchedulePlanner() {
       const timing = typeof result.durationMs === "number" ? ` (${(result.durationMs / 1000).toFixed(1)} sn)` : "";
       const cacheLabel = result.cacheHit ? t(" · kalıcı önbellekten", " · from persistent cache") : "";
       setCurriculumNotice(result.courses.length
-        ? t(`${result.courses.length} ders AI ajanı tarafından MCP verileriyle doğrulandı${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `${result.courses.length} courses were verified by the AI agent using MCP data${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`)
-        : t("AI ajanı bu dönem için doğrulanmış zorunlu ders bulamadı.", "The AI agent found no verified required courses for this term."));
+        ? t(`Müfredatından bu dönem açılan ${result.courses.length} ders bulundu${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `${result.courses.length} courses from your curriculum are offered this term${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`)
+        : t(`Müfredatında bu dönem açılan, henüz almadığın bir ders bulunamadı.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `No course from your curriculum that you still need is offered this term.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`));
     } catch (error) {
       captureRequestFailure(error, { operation: "schedule.required_courses", kind: "query" });
       toast.error(t(`Alman gereken dersler getirilemedi: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `Required courses failed: ${error instanceof Error ? error.message : "Unknown error"}`));
@@ -1237,7 +1231,7 @@ export function SchedulePlanner() {
 
             <Card data-tour="pool"><CardHeader className="pb-3"><CardTitle className="text-base">{t("Dönem dersleri", "Semester courses")}</CardTitle></CardHeader><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3">
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
-              {planBusy ? <div className="overflow-hidden rounded-xl border bg-primary/5 p-3" role="status" aria-live="polite"><div className="flex items-center gap-3"><span className="relative flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10"><span className="absolute inset-0 animate-ping rounded-full bg-primary/10" /><Loader2Icon className="relative size-5 animate-spin text-primary" /></span><div className="min-w-0 flex-1"><p className="text-sm font-medium">{t("Ders listen hazırlanıyor", "Preparing your course list")}</p><p className="mt-0.5 text-xs text-muted-foreground">{waitSeconds < 15 ? t("Transcript ve öğrenci bilgileri kontrol ediliyor…", "Checking transcript and student information…") : waitSeconds < 40 ? t("Tamamlanmamış müfredat gereklilikleri eşleştiriliyor…", "Matching unmet curriculum requirements…") : t("Bu dönem açılan dersler doğrulanıyor…", "Verifying the courses offered this term…")}</p></div><span className="text-xs tabular-nums text-muted-foreground">{waitSeconds} sn</span></div><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-[width] duration-1000 ease-out" style={{ width: `${Math.min(92, 10 + waitSeconds * 1.35)}%` }} /></div><p className="mt-2 text-[11px] text-muted-foreground">{t("Sayfayı açık bırak; sonuç hazır olduğunda liste otomatik görünecek.", "Keep this page open; the list will appear automatically when ready.")}</p></div> : null}
+              {planBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite"><Loader2Icon className="size-3.5 animate-spin" />{t("Müfredatın okunuyor…", "Reading your curriculum…")}</p> : null}
               {curriculumNotice ? <p className="rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground">{curriculumNotice}</p> : null}
               {constraintsBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"><Loader2Icon className="size-3.5 shrink-0 animate-spin" />{t("Şube kısıtları ODTÜ'den okunuyor; kırmızı işaretler geldikçe belirecek.", "Reading section restrictions from METU; red flags will appear as they arrive.")}</p> : null}
               <div className="space-y-2" data-tour="search">
