@@ -110,6 +110,10 @@ _ARGUMENT_ALIASES = {
     "section": ("section", "section_number", "section_no", "sec"),
     "query": ("query", "keyword", "search", "name"),
     "category": ("category", "category_id", "category_code", "code", "id", "name"),
+    # Never a bare "program": that word is already a spelling of *department*
+    # above, and a tool schema carrying both would bind the department's value
+    # to the programme type or the other way round.
+    "program_type": ("program_type", "programType", "program_type_id"),
 }
 
 
@@ -384,7 +388,17 @@ def _tool_arguments(function, values: dict[str, str]) -> dict[str, str]:
     properties = (function.parameters or {}).get("properties", {})
     arguments: dict[str, str] = {}
     for value_name, value in values.items():
-        for candidate in _ARGUMENT_ALIASES[value_name]:
+        aliases = _ARGUMENT_ALIASES.get(value_name)
+        if aliases is None:
+            # Asking for an argument with no spelling table is a mistake in this
+            # repository, not a campus failure. It used to be a bare KeyError
+            # raised inside the handler: a 500 whose message named neither the
+            # argument nor this function.
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"No Course Info argument alias is defined for {value_name!r}",
+            )
+        for candidate in aliases:
             if candidate in properties:
                 arguments[candidate] = value
                 break

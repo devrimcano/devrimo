@@ -1,29 +1,28 @@
 """Course catalog access for the visual schedule builder.
 
-The catalog reads go straight to the connected Course Info MCP server through
+Every read here goes straight to the connected Course Info MCP server through
 :mod:`app.campus.course_info` — no Agent run, language model, prompt, memory or
-learning pass is involved, and they cost no tokens. Only ``/ai-plan`` starts an
-agent, and it holds the same turn lock a chat turn does.
+learning pass is involved anywhere in this module, and none of it costs tokens.
+
+``/curriculum`` was the exception until it stopped being one. It ran a bounded
+agent and held the same turn lock a chat turn does, which cost a median of 95.8
+seconds in production and made opening the planner during a chat turn fail with
+a 409. It now reads the student's own curriculum listing directly.
 """
 
-import asyncio
-import json
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import manager
-from app.api.v1.schedule_prompt import PLANNER_PROMPT
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
-from app.campus import departments
+from app.campus import curriculum, departments
 from app.campus.eligibility import course_candidates, evaluate, prior_grade
 from app.campus.course_info import (
     CatalogSession,
@@ -32,7 +31,6 @@ from app.campus.course_info import (
     catalog_session,
     department_for_course,
     department_options,
-    json_value,
     prefetch,
     resolve_department,
 )
@@ -54,7 +52,6 @@ logger = get_logger(__name__)
 # would otherwise pay for four subprocess launches on every page view.
 _context_syncs = TTLCache(ttl_seconds=5 * 60, max_entries=1024)
 
-_AGENT_RUN_TIMEOUT_SECONDS = 180
 _PLAN_CACHE_SECONDS = 6 * 60 * 60
 
 
@@ -74,21 +71,6 @@ class AiScheduleRequest(BaseModel):
     courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
 
 
-def _plan_cache_key(
-    user_id, department: str, body: AiScheduleRequest, snapshot: StudentAcademicSnapshot | None
-) -> tuple[str, str]:
-    owner_hash = owner_digest(user_id)
-    identity = {
-        "owner": owner_hash,
-        # The *resolved* department, never the request's: two calls that differ
-        # only in whether the client bothered to send it are the same plan and
-        # must share a cache entry.
-        "department": department,
-        "semester": body.semester.strip(),
-        "courses": [item.code.strip().upper() for item in body.courses],
-        "snapshot": snapshot.fetched_at.isoformat() if snapshot else None,
-    }
-    return stable_digest(identity), owner_hash
 
 
 async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
@@ -126,16 +108,6 @@ async def _cached_plan(key_hash: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-async def _store_plan(key_hash: str, owner_hash: str, payload: dict[str, Any]) -> None:
-    # owner_hash is what lets DELETE /student/academic-data find this row again,
-    # so a plan built from one student's transcript stays erasable.
-    await write_cached(
-        key_hash,
-        payload,
-        namespace="schedule-plan",
-        ttl_seconds=_PLAN_CACHE_SECONDS,
-        owner_hash=owner_hash,
-    )
 
 
 async def _student_department(
@@ -791,61 +763,191 @@ def _constraint_rows(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _json_from_agent(value: Any) -> dict[str, Any]:
-    content = getattr(value, "content", value)
-    if not isinstance(content, str):
-        content = json.dumps(json_value(content), ensure_ascii=False)
-    text = content.strip()
-    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
-            raise HTTPException(
-                status.HTTP_502_BAD_GATEWAY, "Schedule assistant returned an invalid response"
-            ) from None
+_CURRICULUM_NAMESPACE = "schedule-curriculum"
+# Bumped when the shape of a stored answer changes, so a deploy cannot spend six
+# hours serving results built by the previous version of this code.
+_CURRICULUM_VERSION = 1
+
+
+def _curriculum_cache_key(
+    user_id, department: str, body: AiScheduleRequest, snapshot: StudentAcademicSnapshot | None
+) -> tuple[str, str]:
+    owner_hash = owner_digest(user_id)
+    identity = {
+        "version": _CURRICULUM_VERSION,
+        "owner": owner_hash,
+        "department": department,
+        "semester": body.semester.strip(),
+        "snapshot": snapshot.fetched_at.isoformat() if snapshot else None,
+    }
+    return stable_digest(identity), owner_hash
+
+
+def _curriculum_year(value: Any) -> int:
+    """The curriculum year a row is scheduled for; unknown sorts last."""
+    digits = re.sub(r"[^0-9]", "", str(value or ""))[:1]
+    year = int(digits) if digits else 0
+    return year if 1 <= year <= 8 else 9
+
+
+async def _category_rows(
+    db: AsyncSession, user: AuthenticatedUser, catalog: CatalogSession, department: str
+) -> tuple[list[dict], list[str]]:
+    """The student's curriculum rows, and anything SAIS said instead of rows."""
+    overview = await call_course_info(
+        db, user.id, "get_student_course_categories", {}, session=catalog
+    )
+    program_type, categories = curriculum.select_program(overview, department)
+    rows: list[dict] = []
+    warnings: list[str] = []
+    for rank, category in enumerate(categories):
+        category_id = str(category.get("id") or "").strip()
+        if not category_id:
+            continue
+        values = {"category": category_id}
+        if program_type:
+            values["program_type"] = program_type
+        result = await call_course_info(
+            db, user.id, "get_student_courses_by_category", values, session=catalog
+        )
+        if not isinstance(result, dict):
+            continue
+        # SAIS answers an empty category with prose rather than an empty table.
+        # Surfacing it is the difference between "you have no electives left"
+        # and "we could not read your electives".
+        message = result.get("message")
+        if isinstance(message, str) and message.strip() and not result.get("courses"):
+            warnings.append(f"{category.get('name') or category_id}: {message.strip()}")
+        for row in result.get("courses") or []:
+            if isinstance(row, dict):
+                rows.append({**row, "_rank": rank})
+    return rows, warnings
+
+
+async def _offered_courses(
+    db: AsyncSession,
+    user: AuthenticatedUser,
+    catalog: CatalogSession,
+    candidates: dict[str, dict],
+    semester: str,
+) -> tuple[dict[str, dict], list[str]]:
+    """The candidates this term's catalog actually publishes, with its own names.
+
+    One listing per owning department, which is the tool the overnight warmer
+    fills for all 153 of them — so a curriculum spanning eight departments
+    usually costs nothing at all here.
+    """
+    by_owner: dict[str, list[str]] = {}
+    for code in candidates:
+        by_owner.setdefault(code[:3], []).append(code)
+
+    offered: dict[str, dict] = {}
+    warnings: list[str] = []
+    for owner_code, codes in by_owner.items():
         try:
-            parsed = json.loads(text[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Schedule assistant returned invalid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Schedule assistant response must be an object")
-    return parsed
+            payload = await call_course_info(
+                db,
+                user.id,
+                "list_program_courses",
+                {"department": owner_code, "semester": semester},
+                session=catalog,
+            )
+        except HTTPException as exc:
+            owner = departments.by_code(owner_code)
+            label = (owner.abbreviation or owner_code) if owner else owner_code
+            # Dropped rather than kept: recommending a course without checking
+            # it is offered is the one thing this endpoint must not do.
+            warnings.append(
+                f"{label}: this term's course list could not be read ({exc.detail}), "
+                "so its courses were left out rather than recommended unverified."
+            )
+            continue
+        published: dict[str, dict] = {}
+        for row in _catalog_rows(payload):
+            full = re.sub(r"[^0-9]", "", str(row.get("course_code") or ""))
+            if len(full) == 7:
+                published[full] = row
+        for code in codes:
+            row = published.get(code)
+            if row is None:
+                continue
+            course = candidates[code]
+            name = " ".join(str(row.get("name") or "").split())
+            offered[code] = {
+                **course,
+                "name": name or course["name"],
+                "credits": _credit_value(row.get("credit")) or course["credits"],
+            }
+    return offered, warnings
 
 
-def _completed_codes(snapshot: StudentAcademicSnapshot | None) -> list[str]:
-    codes: list[str] = []
-    for item in snapshot.completed_courses if snapshot else []:
-        if isinstance(item, str) and item.strip():
-            codes.append(item.strip())
-        elif isinstance(item, dict):
-            for key in ("course_code", "courseCode", "code", "course", "ders_kodu"):
-                value = item.get(key)
-                if isinstance(value, (str, int)) and str(value).strip():
-                    codes.append(str(value).strip())
-                    break
-    return codes
+async def _curriculum_courses(
+    db: AsyncSession,
+    user: AuthenticatedUser,
+    catalog: CatalogSession,
+    department: str,
+    semester: str,
+    completed: list[dict],
+) -> tuple[list[dict], list[str]]:
+    rows, warnings = await _category_rows(db, user, catalog, department)
 
+    candidates: dict[str, dict] = {}
+    for row in rows:
+        code = curriculum.normalise_code(row.get("course_code"))
+        if code is None:
+            label = " ".join(str(row.get("course_code") or "").split())
+            if label:
+                warnings.append(f"{label}: this code names no department we know, so it was left out.")
+            continue
+        if not curriculum.still_needed(code, completed):
+            continue
+        candidates.setdefault(
+            code,
+            {
+                "code": code,
+                "name": " ".join(str(row.get("course_name") or "").split()),
+                "credits": _credit_value(row.get("credit")),
+                "sections": [],
+                "_rank": row.get("_rank", 0),
+                "_year": _curriculum_year(row.get("year_or_ects")),
+            },
+        )
 
-def _prompt(department: str, semester: str, requested: list[str], completed: list[str]) -> str:
-    return PLANNER_PROMPT.format(
-        department=department,
-        semester=semester,
-        requested=json.dumps(requested, ensure_ascii=False),
-        completed=json.dumps(completed, ensure_ascii=False),
+    offered, offer_warnings = await _offered_courses(db, user, catalog, candidates, semester)
+    warnings.extend(offer_warnings)
+
+    kept, variant_warnings = curriculum.resolve_citizenship_variants(
+        list(offered.values()), completed
+    )
+    warnings.extend(variant_warnings)
+    kept.sort(key=lambda course: (course["_year"], course["_rank"], course["code"]))
+    return (
+        [
+            {key: value for key, value in course.items() if not key.startswith("_")}
+            for course in kept[: curriculum.MAX_COURSES]
+        ],
+        warnings,
     )
 
 
-@router.post("/ai-plan")
-async def ai_schedule_plan(
+@router.post("/curriculum")
+async def curriculum_plan(
     body: AiScheduleRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Use one bounded agent run to fill gaps left by direct catalog calls."""
+    """The courses this student still has to take, offered this term.
+
+    Read from their own curriculum listing and this term's department catalogs.
+    This used to be an agent run: a median of 95.8 seconds in production, of
+    which about 88 were model round trips between tool calls that themselves
+    took eight. Matching a code list against a department listing is not a
+    judgement, so there is nothing here for a model to do.
+
+    ``sections`` is always empty, as it was before: the planner loads a course's
+    times when the student opens it, and fetching them for a whole curriculum
+    would be dozens of campus pages nobody asked for.
+    """
     started_at = time.monotonic()
     snapshot = await db.scalar(
         select(StudentAcademicSnapshot)
@@ -854,7 +956,7 @@ async def ai_schedule_plan(
         .limit(1)
     )
     department = await _resolve_department(db, user.id, body.department)
-    cache_key, owner_hash = _plan_cache_key(user.id, department, body, snapshot)
+    cache_key, owner_hash = _curriculum_cache_key(user.id, department, body, snapshot)
     cached = await _cached_plan(cache_key)
     if cached is not None:
         return {
@@ -862,83 +964,58 @@ async def ai_schedule_plan(
             "cache_hit": True,
             "duration_ms": round((time.monotonic() - started_at) * 1000),
         }
-    agent_record = await manager.get_agent_or_404(db, user.id)
-    lock_owner = f"schedule-{uuid4()}"
-    if not await manager.acquire_turn_lock(db, agent_record, lock_owner):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Agent is busy with another message")
-    lease = None
-    try:
-        # The lock's lease is shorter than this run is allowed to take, so it
-        # has to be renewed for as long as the run holds it — otherwise it
-        # expires mid-run and a chat turn is free to drive the same agent.
-        async with manager.turn_lock_held(agent_record.id, lock_owner):
-            lease = await manager.lease_for(db, agent_record)
-            from app.agents.scholar.context import build_run_dependencies
 
-            dependencies = await build_run_dependencies(db, user.id, lease.resident)
-            # Only course identifiers enter the instruction. Display names can
-            # be user-authored, so keeping them out prevents prompt-shaped names
-            # from changing the planner contract.
-            result = await asyncio.wait_for(
-                lease.agent.arun(
-                    input=_prompt(
-                        department,
-                        body.semester,
-                        [item.code for item in body.courses],
-                        _completed_codes(snapshot),
-                    ),
-                    session_id=f"schedule-{uuid4()}",
-                    user_id=str(user.id),
-                    dependencies=dependencies,
-                    stream=False,
-                ),
-                timeout=_AGENT_RUN_TIMEOUT_SECONDS,
+    completed = list(snapshot.completed_courses) if snapshot else []
+    try:
+        async with catalog_session(db, user.id) as catalog:
+            courses, warnings = await _curriculum_courses(
+                db, user, catalog, department, body.semester.strip(), completed
             )
-        payload = _json_from_agent(result)
-        # The shape is instructed, not enforced: a model that answers with a
-        # null or an object where a list belongs must not become a 502.
-        raw_warnings = payload.get("warnings")
-        raw_courses = payload.get("courses")
-        warnings = [
-            warning
-            for warning in (raw_warnings if isinstance(raw_warnings, list) else [])
-            if isinstance(warning, str)
-            and not re.search(r"section|meeting time|şube|ders saat", warning, re.IGNORECASE)
-        ]
-        response = {
-            "courses": [
-                course
-                for course in (raw_courses if isinstance(raw_courses, list) else [])
-                if isinstance(course, dict)
-            ],
-            "warnings": warnings,
-            "source": "ai_verified",
+    except HTTPException as exc:
+        # Deliberately not a 502. Loading the curriculum is one of several ways
+        # to fill the pool, and failing the request takes down a screen where
+        # the student could still search for courses by hand.
+        logger.info("curriculum_plan_unavailable", user_id=str(user.id), detail=str(exc.detail))
+        return {
+            "courses": [],
+            "warnings": [f"Your curriculum could not be read from METU: {exc.detail}"],
+            "source": "curriculum",
             "cache_hit": False,
             "duration_ms": round((time.monotonic() - started_at) * 1000),
         }
-        # Only a result worth reusing. An empty course list means the run
-        # failed — the catalog tools timed out, the model gave up — and caching
-        # that turned a transient failure into a permanent one: every later
-        # click returned "no verified courses" instantly, from cache, without
-        # ever asking again. A six-hour-old outage is not an answer.
-        if response["courses"]:
-            await _store_plan(cache_key, owner_hash, response)
-        return response
-    except TimeoutError as exc:
-        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "Course recommendation timed out; try again") from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("schedule_agent_failed", user_id=str(user.id), error=str(exc))
-        report_exception(exc, distinct_id=str(user.id), handler="schedule_recommendation", dependency="agent")
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "The course recommendation service failed. Department and term were not changed; try this step again.",
-        ) from exc
-    finally:
-        if lease is not None:
-            await lease.release()
-        # A failed run can leave the request's session mid-transaction, and the
-        # lock must come off even then: releasing it on a fresh session keeps a
-        # broken transaction from stranding the agent for the whole lease.
-        await manager.release_turn_lock_isolated(agent_record.id, lock_owner)
+
+    response = {
+        "courses": courses,
+        "warnings": warnings,
+        "source": "curriculum",
+        "cache_hit": False,
+        "duration_ms": round((time.monotonic() - started_at) * 1000),
+    }
+    # Only a result worth reusing. An empty list means something upstream gave
+    # us nothing, and caching that turns one bad minute into six bad hours.
+    if courses:
+        await write_cached(
+            cache_key,
+            response,
+            namespace=_CURRICULUM_NAMESPACE,
+            ttl_seconds=_PLAN_CACHE_SECONDS,
+            owner_hash=owner_hash,
+        )
+    return response
+
+
+@router.post("/ai-plan")
+async def ai_schedule_plan(
+    body: AiScheduleRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The previous name for :func:`curriculum_plan`.
+
+    Kept for one release. A browser holding a cached bundle still calls this
+    route by name, and deleting it in the same deploy that adds the new one
+    breaks every tab that was already open.
+    """
+    return await curriculum_plan(body, user, db)
+
+
