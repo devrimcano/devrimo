@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     # render, and waiting out the campus server's own thirty-second ceiling on
     # it made a refresh that was finished in four seconds look like a failure.
     sais_optional_read_seconds: int = 12
+    # Catalog reads are serialised per student, because the Course Info server
+    # keeps one stateful SAIS session and two concurrent calls land on each
+    # other's page. That queue did not exist before, and the agent's per-turn
+    # ceiling would fall on whoever is *waiting* rather than on the slow call —
+    # cutting a read short and reporting a timeout for a request that was going
+    # to succeed. Deliberately generous: this is a budget for a queue, and the
+    # point of the queue is that everyone in it eventually gets served.
+    campus_catalog_timeout_seconds: int = 120
 
     # --- Catalog pre-warming ----------------------------------------------
     # Course offerings are published per term and then barely move, so the

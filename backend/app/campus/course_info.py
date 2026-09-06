@@ -12,6 +12,7 @@ their stored data to be removed should not keep being served their department
 from a dict inside a request handler.
 """
 
+import asyncio
 import inspect
 import re
 import time
@@ -41,6 +42,26 @@ TOOLKIT_NAME = "campus:course_info"
 # Distinguishable from any value a cache could legitimately hold, including
 # None -- a tool that answers null is not a miss.
 _UNCACHED = object()
+
+# One catalog call at a time per student.
+#
+# The Course Info server keeps a single SAIS client with a single cookie jar,
+# and SAIS's course-listing flow is stateful on its side: the tokens for the
+# next request are read out of the previous response, and which page you are
+# "on" lives in the PHP session. Two calls in flight on one student therefore
+# land on each other's pages — and the failure is silent, because a wrong token
+# returns the *previous* page rather than an error. Two browser tabs, or a chat
+# turn overlapping a planner request, was enough.
+#
+# Cache hits never reach here, so this serialises campus traffic only, and it
+# bounds a student to one request against METU at a time by construction.
+_campus_locks: dict[UUID, asyncio.Lock] = {}
+_lock_registry = asyncio.Lock()
+
+
+async def _campus_lock(user_id: UUID) -> asyncio.Lock:
+    async with _lock_registry:
+        return _campus_locks.setdefault(user_id, asyncio.Lock())
 
 # Catalog data changes when the registrar publishes, not between page loads, so
 # a quarter hour is generous; the bound exists so a long-lived worker's cache
@@ -132,6 +153,11 @@ def forget_user(user_id: UUID) -> None:
     """Drop every cached catalog answer belonging to one student."""
     prefix = str(user_id)
     _catalog.purge(lambda key: isinstance(key, tuple) and bool(key) and key[0] == prefix)
+    # The registry holds one small lock per student who has ever read the
+    # catalog, so it grows with the roll rather than with what they browsed.
+    # Dropped here anyway: a student who asked to be forgotten should not leave
+    # an object behind with their id as its key.
+    _campus_locks.pop(user_id, None)
 
 
 def json_value(value: Any) -> Any:
@@ -291,7 +317,9 @@ async def _catalog_toolkit(db: AsyncSession, user_id: UUID) -> AsyncIterator[Any
         yield None
         return
     settings = get_settings()
-    connected = await connect_campus_toolkits(specs, timeout_seconds=settings.campus_mcp_timeout_seconds)
+    connected = await connect_campus_toolkits(
+        specs, timeout_seconds=settings.campus_catalog_timeout_seconds
+    )
     try:
         yield next((item for item in connected if item.name == TOOLKIT_NAME), None)
     finally:
@@ -305,10 +333,19 @@ async def _invoke(
     values: dict[str, str],
     session: CatalogSession | None = None,
 ) -> Any:
-    if session is not None:
-        return await _call_toolkit(db, user_id, await session.toolkit(), tool_suffix, values)
-    async with _catalog_toolkit(db, user_id) as toolkit:
-        return await _call_toolkit(db, user_id, toolkit, tool_suffix, values)
+    """One call into the student's Course Info server, and never two at once.
+
+    The lock is taken *here*, inside the single-flight factory, and never around
+    ``_catalog.run``. The order is always flight-then-lock: callers waiting on
+    one fill share it and only the leader ever holds the lock. Inverting that —
+    taking the lock before entering the flight — deadlocks the whole catalog,
+    and nothing in the type system says so, which is why it is written here.
+    """
+    async with await _campus_lock(user_id):
+        if session is not None:
+            return await _call_toolkit(db, user_id, await session.toolkit(), tool_suffix, values)
+        async with _catalog_toolkit(db, user_id) as toolkit:
+            return await _call_toolkit(db, user_id, toolkit, tool_suffix, values)
 
 
 async def _call_toolkit(

@@ -7,6 +7,9 @@ first attempt gave every read its own connection and made a five-section course
 connection brought it to 6.5s, and opening it lazily kept a warm page free.
 """
 
+import asyncio
+import uuid
+
 import app.campus.course_info as course_info
 from app.campus.course_info import CatalogSession, catalog_session
 
@@ -62,3 +65,58 @@ async def test_the_connection_is_closed_even_when_the_caller_raises(monkeypatch)
     assert opened == [1]
     # Closed: the stack is released, so a later use would open a fresh one.
     assert session_seen[0]._stack is None
+
+
+
+async def test_two_catalog_reads_for_one_student_never_overlap(monkeypatch):
+    """The Course Info server holds one stateful SAIS session per student.
+
+    Its course-listing flow reads the tokens for the next request out of the
+    previous response, and which page the session is "on" lives server-side. Two
+    calls in flight at once therefore land on each other's pages — and a wrong
+    token returns the *previous* page rather than an error, so the symptom is a
+    plausible-looking wrong answer rather than a failure anyone would notice.
+    Two browser tabs, or a chat turn overlapping a planner request, was enough.
+
+    Four different cache keys, deliberately: the single flight already collapses
+    two reads of the *same* key and would hide the absence of a lock.
+    """
+    _count_connections(monkeypatch)
+    course_info._catalog.purge(lambda key: True)
+    depth = [0]
+    peak = [0]
+
+    async def call_toolkit(db, user_id, toolkit, tool_suffix, values):
+        depth[0] += 1
+        peak[0] = max(peak[0], depth[0])
+        try:
+            # A real call awaits the subprocess; this is the point at which two
+            # of them would interleave if nothing held them apart.
+            await asyncio.sleep(0)
+            return [values["course"]]
+        finally:
+            depth[0] -= 1
+
+    async def read_cached(key_hash):
+        return None
+
+    async def write_cached(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(course_info, "_call_toolkit", call_toolkit)
+    monkeypatch.setattr(course_info, "read_cached", read_cached)
+    monkeypatch.setattr(course_info, "write_cached", write_cached)
+
+    user_id = uuid.uuid4()
+    async with catalog_session(None, user_id) as session:
+        await asyncio.gather(*[
+            course_info.call_course_info(
+                None,
+                user_id,
+                "get_course_info",
+                {"department": "236", "semester": "20252", "course": code},
+                session=session,
+            )
+            for code in ("2360111", "2360122", "2360133", "2360144")
+        ])
+    assert peak == [1], "two catalog calls for one student were in flight at once"
