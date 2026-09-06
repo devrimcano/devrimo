@@ -181,7 +181,7 @@ def _match_value(value: Any, wanted: set[str], exact: bool) -> Any:
     return None
 
 
-def _find_value(value: Any, keys: set[str]) -> Any:
+def _find_value(value: Any, keys: set[str], exact_only: set[str] = frozenset()) -> Any:
     """The first value whose label names one of ``keys``.
 
     Two passes. An exact folded match first, so a payload carrying both
@@ -190,11 +190,21 @@ def _find_value(value: Any, keys: set[str]) -> Any:
     Adı", "Program/Bölüm" — and an exact match reads those as absent, which is
     how the department came back empty for every student while the surname
     beside it was found.
+
+    ``exact_only`` joins the first pass and sits out the second. It is for a
+    label that is right on its own but is a prefix of a decoy: "Program" means
+    the programme, while "Program Type" — whose value is "MAJOR" — would answer
+    the substring pass first and store the word MAJOR as the student's
+    department.
     """
     wanted = {_fold_key(key) for key in keys if _fold_key(key)}
-    if not wanted:
+    strict = wanted | {_fold_key(key) for key in exact_only if _fold_key(key)}
+    if not strict:
         return None
-    return _match_value(value, wanted, exact=True) or _match_value(value, wanted, exact=False)
+    found = _match_value(value, strict, exact=True)
+    if found not in (None, ""):
+        return found
+    return _match_value(value, wanted, exact=False) if wanted else None
 
 
 # The weekly schedule packs the course code, the section and the room into a
@@ -314,6 +324,10 @@ _DEGREE_KEYS = {"degree_level", "level", "program_level", "derece", "seviye", "o
 # folds to something no decoy label contains. If SAIS renames the field, the
 # sais_student_info_labels line says so on the next refresh.
 _PROGRAM_KEYS = {"program code / name", "program_code", "program kodu", "program kodu / adı"}
+# Matched exactly and never as a substring — see ``_find_value``. A card whose
+# only programme field is labelled plainly is read, without "Program Type"
+# being read along with it.
+_PROGRAM_EXACT_KEYS = {"program", "programme", "programı"}
 _CAMPUS_KEYS = {"campus", "yerleşke", "yerleske", "kampüs", "kampus"}
 # "Adı Soyadı" is as common a label as "Soyadı", and folds to a superstring of
 # it, so both land here and _surname_prefix takes the last token of whichever
@@ -386,7 +400,12 @@ def _program_code_and_department(value: Any) -> tuple[str | None, str | None]:
         return None, None
     code, separator, name = text.partition("/")
     code, name = code.strip(), name.strip()
-    if not separator or not _PROGRAM_CODE.fullmatch(code):
+    if not separator:
+        # No separator and nothing but digits: a bare programme code. Falling
+        # through would have returned it as the department name, and a student
+        # whose card carries only the code would be stored as studying "571".
+        return (text, None) if _PROGRAM_CODE.fullmatch(text) else (None, text)
+    if not _PROGRAM_CODE.fullmatch(code):
         return None, text
     return (code or None), (name or None)
 
@@ -441,7 +460,7 @@ async def _apply_student_info(db: AsyncSession, user_id: UUID, student_info: Any
     unrecoverable. Guessing it cost four rounds of deploys once already.
     """
     program_code, program_department = _program_code_and_department(
-        _find_value(student_info, _PROGRAM_KEYS)
+        _find_value(student_info, _PROGRAM_KEYS, _PROGRAM_EXACT_KEYS)
     )
     # A department field of its own wins; otherwise the name half of the
     # programme field, which is where the English card keeps it.
