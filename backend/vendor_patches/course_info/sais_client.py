@@ -6,6 +6,7 @@ import functools
 import inspect
 import os
 import re
+import sys
 import time
 import httpx
 from bs4 import BeautifulSoup
@@ -28,6 +29,20 @@ SESSION_CACHE_ENABLED = os.getenv("COURSE_INFO_SESSION_CACHE", "1").strip().lowe
     "off",
 }
 SESSION_TTL_SECONDS = 10 * 60
+
+
+def _report(**fields) -> None:
+    """One line on stderr, which the MCP stdio client forwards to the broker's log.
+
+    Field names only ever carry a tool name, a request count and a duration.
+    Never a URL: the portal's ``pkg`` parameter and ``hidden_creds`` are session
+    tokens, and this line exists to be greppable in a shared journal.
+    """
+    try:
+        body = " ".join(f"{key}={value}" for key, value in fields.items())
+        print(f"sais_call {body}", file=sys.stderr, flush=True)
+    except Exception:
+        pass  # a measurement must never be the thing that fails a read
 from .models import (
     Department,
     Semester,
@@ -96,6 +111,10 @@ class SAISClient:
         self._session: Optional[Tuple[int, float, Tuple[str, str, BeautifulSoup]]] = None
         # Calls on one client must not overlap. See the note on the lock below.
         self._lock = asyncio.Lock()
+        # Every HTTP request this client makes, counted once. The saving from
+        # holding the proxy session is a request count and nothing else, so it
+        # has to be observable from outside to be believed.
+        self._requests = 0
         self._client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
@@ -108,6 +127,15 @@ class SAISClient:
                 "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
             },
         )
+        # Wrapped at ``send`` rather than at each call site, so a request added
+        # anywhere in this file is counted without anyone remembering to.
+        _send = self._client.send
+
+        async def counting_send(*args, **kwargs):
+            self._requests += 1
+            return await _send(*args, **kwargs)
+
+        self._client.send = counting_send
 
     async def aclose(self):
         """Close the underlying HTTP client."""
@@ -870,7 +898,16 @@ def _serialised(method):
     @functools.wraps(method)
     async def guarded(self, *args, **kwargs):
         async with self._lock:
-            return await method(self, *args, **kwargs)
+            before = self._requests
+            started = time.monotonic()
+            try:
+                return await method(self, *args, **kwargs)
+            finally:
+                _report(
+                    tool=method.__name__,
+                    requests=self._requests - before,
+                    ms=round((time.monotonic() - started) * 1000),
+                )
 
     return guarded
 
