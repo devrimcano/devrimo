@@ -79,6 +79,51 @@ bash -lc "
   .venv/bin/python -m pip install -r requirements.txt
 "
 
+# The Course Info MCP server is a third-party package with local patches, and
+# until now installing them was a manual step somebody had to remember. The
+# Dockerfile patches src/ before building a wheel, which is right for an image
+# build; this host installed the wheel and never rebuilds, so src/ is a
+# directory Python never imports and the patch has to reach site-packages too.
+# Both are written so the two stay identical and an image build produces the
+# same thing.
+#
+# Copied only when the content differs, so an unchanged deploy neither rewrites
+# the files nor restarts anything on their account. A verification that the
+# server still starts and still lists its tools follows the copy: a broken
+# patch here takes out the catalog for every student, and it would do it
+# silently, because a subprocess that fails to start reads as "METU is down".
+patch_src="$DEPLOY_DIR/backend/vendor_patches/course_info"
+if [ -d "$patch_src" ]; then
+  # Globbed rather than pinned to a version, so a python bump in that venv
+  # does not silently stop patching.
+  site="$(echo /opt/mcp/course-info/.venv/lib/python*/site-packages/metu_course_info_mcp)"
+  src="/opt/mcp/course-info/src/metu_course_info_mcp"
+  backup="/opt/mcp/course-info/.patch-backup"
+  changed=false
+  mkdir -p "$backup"
+  for name in models.py sais_client.py server.py; do
+    [ -f "$patch_src/$name" ] || continue
+    [ -f "$site/$name" ] || { echo "::error::$site/$name is missing; refusing to patch"; exit 1; }
+    if ! cmp -s "$patch_src/$name" "$site/$name"; then
+      cp -n "$site/$name" "$backup/$name" 2>/dev/null || true
+      cp "$patch_src/$name" "$site/$name"
+      [ -d "$src" ] && cp "$patch_src/$name" "$src/$name"
+      echo "course-info patch: updated $name"
+      changed=true
+    fi
+  done
+  if [ "$changed" = true ]; then
+    if ! /opt/mcp/course-info/.venv/bin/python -c "import metu_course_info_mcp.sais_client as m; assert hasattr(m, 'SAISClient')"; then
+      echo "::error::the patched course-info server no longer imports; rolling back"
+      for name in models.py sais_client.py server.py; do
+        [ -f "$backup/$name" ] && cp "$backup/$name" "$site/$name"
+      done
+      exit 1
+    fi
+    echo "course-info patch: verified"
+  fi
+fi
+
 # The running services learn which commit they are, so every event, log line
 # and exception can be attributed to a deploy rather than to a date. Written
 # before the restarts below, and outside both rsync targets so `--delete` in
