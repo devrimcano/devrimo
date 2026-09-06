@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from app.campus import departments as department_directory
 from app.campus import service as campus_service
-from app.campus.course_info import CATALOG_NAMESPACE, call_course_info, catalog_session
+from app.campus.course_info import call_course_info, catalog_key, catalog_session
 from app.config import get_settings
 from app.core.digest import stable_digest
 from app.core.persistent_cache import read_cached, write_cached
@@ -80,13 +80,14 @@ def _within_hours(now: datetime, window: str) -> bool:
 
 
 def _cache_key(department: str, semester: str) -> str:
-    """The key ``call_course_info`` would store this answer under.
+    """The key ``call_course_info`` stores this answer under.
 
-    Mirrors that function's own identity construction, so a warmed entry is the
-    one the schedule page reads rather than a parallel copy.
+    Shares that function's own formula rather than restating it, so a warmed
+    entry is the one the schedule page reads and not a parallel copy. The test
+    that recomputes this digest by hand is deliberately left doing so: it is
+    the only thing that would notice the two drifting apart again.
     """
-    identity = (WARM_TOOL, f"department={department}", f"semester={semester}")
-    return stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})
+    return catalog_key(WARM_TOOL, {"department": department, "semester": semester})[1]
 
 
 async def _warming_user() -> "tuple[object, object] | None":

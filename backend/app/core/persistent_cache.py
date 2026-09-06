@@ -28,6 +28,12 @@ from app.logging import get_logger
 logger = get_logger(__name__)
 
 
+# How long an empty first answer is held. Short on purpose: see the comment at
+# the write site. Long enough that a page opening ten courses at once does not
+# hit the campus ten times for the same failing read.
+EMPTY_FIRST_WRITE_TTL_SECONDS = 15 * 60
+
+
 def _unwrap(payload: Any) -> Any:
     """The stored value, without the object wrapper the JSON column needs."""
     if isinstance(payload, dict) and set(payload) == {"value"}:
@@ -149,6 +155,23 @@ async def write_cached(
                 logger.info("persistent_cache_kept_over_empty", key=key_hash[:12], namespace=namespace)
                 return
             if row is None:
+                if _is_empty(payload):
+                    # Nothing stored yet, and the answer is empty. The guard
+                    # above cannot help — there is no good row to keep — and
+                    # writing this at the caller's lifetime would hold a campus
+                    # read that returned an empty page for up to thirty days.
+                    # Worse, ``read_cached`` would then answer ``[]`` rather
+                    # than a miss, so nothing would ever refetch it: one bad
+                    # minute at METU and a department has no courses until the
+                    # TTL runs out. Kept briefly instead — long enough to
+                    # collapse a burst of identical requests, short enough that
+                    # the next reader tries again.
+                    expires_at = datetime.now(UTC) + timedelta(
+                        seconds=min(ttl_seconds, EMPTY_FIRST_WRITE_TTL_SECONDS)
+                    )
+                    logger.info(
+                        "persistent_cache_empty_first_write", key=key_hash[:12], namespace=namespace
+                    )
                 db.add(
                     ScheduleDataCache(
                         key_hash=key_hash,
