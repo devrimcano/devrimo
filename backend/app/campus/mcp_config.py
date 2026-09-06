@@ -19,6 +19,8 @@ spec is a pure function of the four.
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from app.config import get_settings
+
 from app.campus.catalog import CAMPUS_TOOLS, CampusTool
 from app.campus.credentials import CampusSecrets
 
@@ -83,6 +85,11 @@ def state_dir_for(state_root: str, user_id: UUID, tool: CampusTool) -> str | Non
     return f"{state_root.rstrip('/')}/{user_id}/{tool.state_slug}"
 
 
+def _runtime_flags() -> dict[str, str]:
+    settings = get_settings()
+    return {"course_info_session_cache": "1" if settings.course_info_session_cache else "0"}
+
+
 def build_server_specs(
     user_id: UUID,
     enabled_ids: list[str],
@@ -91,7 +98,10 @@ def build_server_specs(
     mcp_root: str,
     state_root: str,
 ) -> list[CampusServerSpec]:
-    values = secrets.as_template_values() if secrets else {}
+    # Secrets, plus the non-secret switches a server reads from its
+    # environment. Keeping the second kind here is what makes turning one off a
+    # broker config change and a restart rather than an image rebuild.
+    values = {**(secrets.as_template_values() if secrets else {}), **_runtime_flags()}
     root = mcp_root.rstrip("/")
 
     specs: list[CampusServerSpec] = []

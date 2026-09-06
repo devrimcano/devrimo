@@ -2,11 +2,32 @@
 
 from typing import List, Dict, Optional, Tuple, Any
 import asyncio
+import functools
+import inspect
+import os
 import re
+import time
 import httpx
 from bs4 import BeautifulSoup
 
 from .config import settings
+
+# Reaching an app through the SAIS portal costs three HTTP requests before the
+# real one: get_content for a pkg token, content.php for the autologin form, and
+# the autologin POST itself. That was re-done from scratch on every single tool
+# call, so two thirds of all traffic to METU was re-establishing a session this
+# process already had. Holding it for ten minutes turns a cold eight-section
+# course from 53 requests into 26.
+#
+# Switchable from the broker's environment so a rollback is a config change
+# rather than an image build at three in the morning.
+SESSION_CACHE_ENABLED = os.getenv("COURSE_INFO_SESSION_CACHE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SESSION_TTL_SECONDS = 10 * 60
 from .models import (
     Department,
     Semester,
@@ -67,6 +88,14 @@ class SAISClient:
         self.password = password or settings.sais_password
         self.locale = locale or settings.locale or "tr"
         self._token: Optional[str] = None
+        # At most one app's proxy session is held at a time, because the server
+        # keeps exactly one: the cookie jar is shared, and reaching app 178
+        # moves the session away from app 64. Modelling that as a single slot
+        # is what stops a cached app-64 page being replayed after a category
+        # read has quietly moved the session elsewhere.
+        self._session: Optional[Tuple[int, float, Tuple[str, str, BeautifulSoup]]] = None
+        # Calls on one client must not overlap. See the note on the lock below.
+        self._lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
@@ -131,7 +160,35 @@ class SAISClient:
         self._token = token
         return token
 
-    async def _get_app_proxy_session(self, app_code: int) -> Tuple[str, str, BeautifulSoup]:
+    async def _get_app_proxy_session(
+        self, app_code: int, *, refresh: bool = False
+    ) -> Tuple[str, str, BeautifulSoup]:
+        """The app's entry page, reusing the session when we still hold it.
+
+        ``refresh`` forces the three-request preamble. Callers pass it when the
+        page they got back says the session moved — never on a merely empty
+        result, which is a real answer for a department with no courses and
+        would otherwise retry for ever.
+        """
+        if SESSION_CACHE_ENABLED and not refresh and self._session is not None:
+            held_app, opened_at, payload = self._session
+            if held_app == app_code and time.monotonic() - opened_at < SESSION_TTL_SECONDS:
+                return payload
+        payload = await self._open_app_proxy_session(app_code)
+        # Replaces rather than adds: one slot, one live session.
+        self._session = (app_code, time.monotonic(), payload)
+        return payload
+
+    def _session_lost(self, soup: BeautifulSoup) -> bool:
+        """Whether a response is the portal asking us to log in again.
+
+        Positive evidence only. "Nothing parsed" is not evidence: an empty
+        department is a real answer, and treating it as a lost session would
+        turn every genuinely empty page into a retry.
+        """
+        return soup.find("form", id="autologin") is not None
+
+    async def _open_app_proxy_session(self, app_code: int) -> Tuple[str, str, BeautifulSoup]:
         """Navigate through SAIS portal get_content, autologin form, and return initial proxy HTML."""
         token = await self.authenticate()
 
@@ -241,10 +298,10 @@ class SAISClient:
         return DepartmentAndSemesterList(departments=departments, semesters=semesters)
 
     async def _submit_course_list_page(
-        self, department_code: str, semester_code: str
+        self, department_code: str, semester_code: str, *, _retrying: bool = False
     ) -> Tuple[str, str, BeautifulSoup]:
         """Submit the department and semester selection in App 64 to get the course list page."""
-        target_url, _, soup = await self._get_app_proxy_session(64)
+        target_url, _, soup = await self._get_app_proxy_session(64, refresh=_retrying)
 
         form = soup.find("form")
         if not form:
@@ -281,6 +338,14 @@ class SAISClient:
         )
         html = self._decode_html(resp)
         res_soup = BeautifulSoup(html, "html.parser")
+        if self._session_lost(res_soup) and not _retrying:
+            # The held session is no longer the one the server has. Drop it and
+            # take the long way round exactly once; a second failure is a real
+            # failure and belongs to the caller.
+            self._session = None
+            return await self._submit_course_list_page(
+                department_code, semester_code, _retrying=True
+            )
         return action, html, res_soup
 
     async def list_program_courses(
@@ -780,3 +845,38 @@ def get_cached_client(
             _client_cache[key] = (current_loop, client)
         return client
     return cached[1]
+
+
+# One call at a time, per client.
+#
+# This client holds a single cookie jar and SAIS's course-listing flow is
+# stateful on the server: the tokens for the next request are read out of the
+# previous response, and which page the session is "on" lives in the PHP
+# session. Two calls in flight therefore land on each other's pages, and the
+# failure is silent -- a wrong token returns the *previous* page rather than an
+# error. Holding a cached proxy session makes that worse, not better, so the two
+# belong in the same change.
+#
+# The broker serialises its own catalog reads, but the agent reaches these tools
+# through the MCP entrypoint directly and never passes through that code. The
+# lock lives here because here is the level of the thing that is actually shared.
+#
+# Applied to every public coroutine rather than a named list, so a method added
+# by a future upstream release is serialised by default rather than by whoever
+# remembers. Two exclusions, both deliberate:
+#   * ``authenticate`` is called from inside the locked path and would deadlock;
+#   * ``aclose`` is teardown and must not queue behind a call in flight.
+def _serialised(method):
+    @functools.wraps(method)
+    async def guarded(self, *args, **kwargs):
+        async with self._lock:
+            return await method(self, *args, **kwargs)
+
+    return guarded
+
+
+for _name, _member in list(vars(SAISClient).items()):
+    if _name.startswith("_") or _name in {"authenticate", "aclose"}:
+        continue
+    if inspect.iscoroutinefunction(_member):
+        setattr(SAISClient, _name, _serialised(_member))

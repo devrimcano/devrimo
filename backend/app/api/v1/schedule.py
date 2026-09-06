@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
 from app.campus import curriculum, departments
+from app.campus.warmer import record_wanted_courses
 from app.campus.eligibility import course_candidates, evaluate, prior_grade
 from app.campus.course_info import (
     CatalogSession,
@@ -33,6 +34,7 @@ from app.campus.course_info import (
     department_options,
     prefetch,
     resolve_department,
+    section_numbers,
 )
 from app.core.digest import owner_digest, stable_digest
 from app.core.persistent_cache import read_cached, read_many_cached, write_cached
@@ -519,38 +521,19 @@ async def course_sections(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    compact_course, lookup_department = await _expand_course(db, user.id, course_code, department)
-    return {
-        "data": await call_course_info(
-            db,
-            user.id,
-            "get_course_info",
-            {"department": lookup_department, "semester": semester, "course": compact_course},
+    async with catalog_session(db, user.id) as catalog:
+        compact_course, lookup_department = await _expand_course(
+            db, user.id, course_code, department, session=catalog
         )
-    }
-
-
-def _section_numbers(payload: Any) -> list[str]:
-    """Every section number in a ``get_course_info`` payload, in order."""
-    found: list[str] = []
-
-    def visit(item: Any) -> None:
-        if isinstance(item, list):
-            for child in item:
-                visit(child)
-            return
-        if not isinstance(item, dict):
-            return
-        for key, value in item.items():
-            if re.sub(r"[^a-z]", "", str(key).lower()) == "section" and isinstance(value, (str, int)):
-                number = str(value).strip()
-                if number and number not in found:
-                    found.append(number)
-        for child in item.values():
-            visit(child)
-
-    visit(payload)
-    return found
+        return {
+            "data": await call_course_info(
+                db,
+                user.id,
+                "get_course_info",
+                {"department": lookup_department, "semester": semester, "course": compact_course},
+                session=catalog,
+            )
+        }
 
 
 class BulkConstraintsRequest(BaseModel):
@@ -559,6 +542,73 @@ class BulkConstraintsRequest(BaseModel):
     # crafted request cannot turn one HTTP call into hundreds of SAIS fetches.
     courses: list[str] = Field(min_length=1, max_length=40)
     department: str | None = Field(default=None, max_length=20)
+
+
+class BulkSectionsRequest(BaseModel):
+    semester: str = Field(min_length=1, max_length=20)
+    courses: list[str] = Field(min_length=1, max_length=40)
+    department: str | None = Field(default=None, max_length=20)
+
+
+@router.post("/sections")
+async def bulk_course_sections(
+    body: BulkSectionsRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Section lists for several courses at once.
+
+    Building a schedule needs the sections of every course in the pool, and the
+    browser fetched them one request at a time — fifteen courses meant fifteen
+    round trips, each able to spawn its own catalog connection. They share one
+    here, exactly as ``/constraints`` already does.
+
+    Two phases. Everything already cached is answered from one database read
+    with no campus contact at all, which for a pool the warmer has seen is the
+    whole batch. What is left is fetched one at a time over the shared session:
+    concurrent calls on it would interleave on the same stateful SAIS page, and
+    a stubbed toolkit in a test would not show it.
+
+    A course that cannot be read is reported with its error rather than failing
+    the batch, and keyed by the code the client sent so the caller can match the
+    answer to what it asked for.
+    """
+    results: dict[str, Any] = {}
+    async with catalog_session(db, user.id) as catalog:
+        expanded: dict[str, tuple[str, str]] = {}
+        for raw in dict.fromkeys(code.strip() for code in body.courses if code.strip()):
+            try:
+                expanded[raw] = await _expand_course(
+                    db, user.id, raw, body.department or "", session=catalog
+                )
+            except HTTPException as exc:
+                logger.info("bulk_sections_skipped", course=raw, detail=str(exc.detail))
+                results[raw] = {"error": str(exc.detail)}
+
+        await prefetch(
+            ("get_course_info", {"department": owner, "semester": body.semester, "course": course})
+            for course, owner in expanded.values()
+        )
+
+        for raw, (compact_course, lookup_department) in expanded.items():
+            try:
+                results[raw] = {
+                    "data": await call_course_info(
+                        db,
+                        user.id,
+                        "get_course_info",
+                        {
+                            "department": lookup_department,
+                            "semester": body.semester,
+                            "course": compact_course,
+                        },
+                        session=catalog,
+                    )
+                }
+            except HTTPException as exc:
+                logger.info("bulk_sections_skipped", course=raw, detail=str(exc.detail))
+                results[raw] = {"error": str(exc.detail)}
+    return {"courses": results}
 
 
 @router.post("/constraints")
@@ -709,7 +759,7 @@ async def _constraints_for(
     )
 
     sections: dict[str, Any] = {}
-    for number in _section_numbers(info):
+    for number in section_numbers(info):
         try:
             payload = await call_course_info(
                 db,
@@ -994,6 +1044,9 @@ async def curriculum_plan(
     # Only a result worth reusing. An empty list means something upstream gave
     # us nothing, and caching that turns one bad minute into six bad hours.
     if courses:
+        # What a student asked for tonight is what the warmer should have ready
+        # tomorrow. Course codes only, never who wanted them.
+        await record_wanted_courses(body.semester.strip(), [course["code"] for course in courses])
         await write_cached(
             cache_key,
             response,
