@@ -229,7 +229,7 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone render={<div data-slot="aui_composer-shell" className="border-border/60 data-[dragging=true]:border-ring focus-within:border-primary/35 focus-within:shadow-[0_0_0_4px_rgb(227_24_55/8%),0_18px_48px_rgb(50_35_25/10%)] dark:border-muted-foreground/15 dark:focus-within:border-primary/45 dark:focus-within:shadow-[0_0_0_4px_rgb(227_24_55/12%),0_20px_54px_rgb(0_0_0/35%)] flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color,box-shadow,transform] duration-300 focus-within:-translate-y-0.5 data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]" />}><ComposerAttachments /><ComposerPrimitive.Input
                       placeholder={pick({ tr: "Dersler, kampüs veya ödevlerin hakkında sor…", en: "Ask about courses, campus, or homework…" })}
-                      className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
+                      className="aui-composer-input caret-primary placeholder:text-muted-foreground max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
                       rows={1}
                       autoFocus={autoFocus}
                       enterKeyHint="send"
