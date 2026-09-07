@@ -1358,6 +1358,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/researchers/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Dashboard */
+        get: operations["dashboard_api_v1_admin_researchers_dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/researchers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Directory */
+        get: operations["directory_api_v1_admin_researchers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/researchers/runs/{run_id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Run Items */
+        get: operations["run_items_api_v1_admin_researchers_runs__run_id__items_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/researchers/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Import */
+        post: operations["start_import_api_v1_admin_researchers_runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/researchers/runs/{run_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Import */
+        post: operations["resume_import_api_v1_admin_researchers_runs__run_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1705,6 +1790,19 @@ export interface components {
             /** Campus */
             campus?: string | null;
         };
+        /** DashboardView */
+        DashboardView: {
+            /** Researchers */
+            researchers: number;
+            /** Sections */
+            sections: number;
+            /** Busy */
+            busy: boolean;
+            /** Proxy Enabled */
+            proxy_enabled: boolean;
+            /** Runs */
+            runs: components["schemas"]["RunView"][];
+        };
         /** DeleteUserIn */
         DeleteUserIn: {
             /** Reason */
@@ -1781,10 +1879,43 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** ImportErrorView */
+        ImportErrorView: {
+            /** Section */
+            section: string;
+            /** Error */
+            error: string;
+        };
         /** InviteIn */
         InviteIn: {
             /** Email */
             email: string;
+        };
+        /** ItemPage */
+        ItemPage: {
+            /** Items */
+            items: components["schemas"]["ItemView"][];
+            /** Total */
+            total: number;
+            /** Offset */
+            offset: number;
+        };
+        /** ItemView */
+        ItemView: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Source Url */
+            source_url: string;
+            /** Status */
+            status: string;
+            /** Outcome */
+            outcome: string | null;
+            /** Completed Sections */
+            completed_sections: number;
+            /** Errors */
+            errors: components["schemas"]["ImportErrorView"][];
         };
         /** MembershipIn */
         MembershipIn: {
@@ -1912,6 +2043,35 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** ResearcherPage */
+        ResearcherPage: {
+            /** Items */
+            items: components["schemas"]["ResearcherView"][];
+            /** Total */
+            total: number;
+            /** Offset */
+            offset: number;
+        };
+        /** ResearcherView */
+        ResearcherView: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Title */
+            title: string | null;
+            /** Affiliation */
+            affiliation: string | null;
+            /** Email */
+            email: string | null;
+            /** Source Url */
+            source_url: string;
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            last_seen_at: string;
+        };
         /** RevisionIn */
         RevisionIn: {
             /** Config */
@@ -1931,6 +2091,39 @@ export interface components {
             exclusions?: string[];
             /** Catalog Url */
             catalog_url?: string | null;
+        };
+        /** RunView */
+        RunView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Status */
+            status: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Selected */
+            selected: number;
+            /** Completed */
+            completed: number;
+            /** Incomplete */
+            incomplete: number;
+            /** Pending */
+            pending: number;
+            /** Running */
+            running: number;
+            /** Discovered */
+            discovered: number | null;
+            /** Limit */
+            limit: number | null;
+            /** Last Error */
+            last_error: string | null;
         };
         /** RuntimeSettingsIn */
         RuntimeSettingsIn: {
@@ -2043,6 +2236,11 @@ export interface components {
             config?: {
                 [key: string]: unknown;
             };
+        };
+        /** StartImport */
+        StartImport: {
+            /** Limit */
+            limit?: number | null;
         };
         /** TimetableBlock */
         TimetableBlock: {
@@ -4663,6 +4861,156 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dashboard_api_v1_admin_researchers_dashboard_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardView"];
+                };
+            };
+        };
+    };
+    directory_api_v1_admin_researchers_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearcherPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_items_api_v1_admin_researchers_runs__run_id__items_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                errors_only?: boolean;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ItemPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_import_api_v1_admin_researchers_runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartImport"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_import_api_v1_admin_researchers_runs__run_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunView"];
                 };
             };
             /** @description Validation Error */

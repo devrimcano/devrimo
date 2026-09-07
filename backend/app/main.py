@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +23,7 @@ from app.observability.context import REQUEST_ID_HEADER, current_request_id
 from app.observability.jobs import observed_job
 from app.observability.logs import shutdown as posthog_logs_shutdown
 from app.observability.runtime import SERVICE_BROKER, configure_service
+from app.researchers.worker import run_admin_import_loop
 
 configure_service(SERVICE_BROKER)
 configure_logging()
@@ -94,11 +95,15 @@ async def lifespan(app: FastAPI):
     reconciler_task = asyncio.create_task(run_reconciler_loop(stop_event))
     directory_sync_task = asyncio.create_task(_run_directory_sync_loop(stop_event))
     retention_task = asyncio.create_task(_run_retention_loop(stop_event))
+    researcher_task = asyncio.create_task(run_admin_import_loop(stop_event))
     logger.info("startup_complete")
     try:
         yield
     finally:
         stop_event.set()
+        researcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await researcher_task
         await reconciler_task
         await directory_sync_task
         await retention_task

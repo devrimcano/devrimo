@@ -76,6 +76,7 @@ async def _send_pinned(
     *,
     headers: dict[str, str] | None = None,
     stream: bool = False,
+    avesis_query: dict | None = None,
 ) -> httpx.Response:
     """Resolve, validate, and connect to that exact address.
 
@@ -86,7 +87,13 @@ async def _send_pinned(
     host, addresses = await _validate_destination(url, policy)
     parsed = urlparse(url)
     request_headers = {"Host": parsed.netloc, **(headers or {})}
-    request = client.build_request("GET", _url_for_address(url, addresses[0]), headers=request_headers)
+    if avesis_query is not None and url != "https://avesis.metu.edu.tr/proxy/search/_search":
+        raise FetchRejected("Search POST is restricted to the AVESIS directory")
+    request = client.build_request(
+        "POST" if avesis_query is not None else "GET",
+        _url_for_address(url, addresses[0]), headers=request_headers,
+        **({"json": avesis_query} if avesis_query is not None else {}),
+    )
     request.extensions["sni_hostname"] = host
     return await client.send(request, stream=stream, follow_redirects=False)
 

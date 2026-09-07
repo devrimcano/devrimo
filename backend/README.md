@@ -337,3 +337,8 @@ Postgres — provision, SSE stream, persistence, session continuity, history
 read-back — with Agno's tables created through the sync `psycopg` URL. What
 that does *not* cover is the same path with a real model or real campus
 servers, which is what the first two entries above are about.
+
+## Public researcher import
+
+The English AVESIS importer supports resumable refreshes and an optional HTTP proxy.
+See [the AVESIS import guide](../docs/avesis-import.md) for setup, commands, data coverage, and verification.

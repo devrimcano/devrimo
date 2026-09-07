@@ -13,6 +13,8 @@ from app.db.session import get_db
 
 
 class AdminPermission(StrEnum):
+    researchers_read = "researchers:read"
+    researchers_write = "researchers:write"
     overview_read = "overview:read"
     users_read = "users:read"
     users_invite = "users:invite"
@@ -38,6 +40,7 @@ class AdminPermission(StrEnum):
 ROLE_PERMISSIONS = {
     AdminRole.super_admin: set(AdminPermission),
     AdminRole.operator: {
+        AdminPermission.researchers_read,
         AdminPermission.overview_read,
         AdminPermission.users_read,
         AdminPermission.users_invite,
@@ -53,6 +56,7 @@ ROLE_PERMISSIONS = {
         AdminPermission.knowledge_read,
     },
     AdminRole.campus_admin: {
+        AdminPermission.researchers_read,
         AdminPermission.overview_read,
         AdminPermission.users_read,
         AdminPermission.agents_read,

@@ -725,3 +725,12 @@ class UserMailFact(Base):
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     message_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# Register the public academic directory with the shared Alembic metadata.
+from app.researchers.models import (  # noqa: E402,F401
+    Researcher,
+    ResearcherImportItem,
+    ResearcherImportRun,
+    ResearcherSection,
+)

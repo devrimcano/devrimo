@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,8 @@ class Settings(BaseSettings):
     # Retrieval depends on pgvector, pg_trgm and Postgres full-text search, so
     # there is no second supported engine to fall back to.
     database_url: str = "postgresql+asyncpg://devrimo:devrimo@localhost:5432/devrimo"
+
+    avesis_proxy_url: SecretStr | None = None
 
     supabase_url: str = ""
     supabase_jwt_secret: str = ""

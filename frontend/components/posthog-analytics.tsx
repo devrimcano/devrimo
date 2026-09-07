@@ -94,6 +94,7 @@ type ProductEventProperties = {
   // --- data fetching ------------------------------------------------------
   // Every TanStack query and mutation failure, reported centrally rather than
   // once per component that remembered to.
+  admin_section_viewed: { section: "researchers" };
   data_request_failed: {
     operation: string;
     kind: "query" | "mutation";

@@ -11,6 +11,7 @@ import {
   ClipboardListIcon,
   DatabaseZapIcon,
   GaugeIcon,
+  GraduationCapIcon,
   MenuIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
@@ -33,6 +34,7 @@ import type { AdminPrincipal } from "@/lib/admin/types";
 import type { Copy } from "@/components/admin/admin-shared";
 import { OverviewPanel } from "@/components/admin/panels/overview-panel";
 import { UsersPanel } from "@/components/admin/panels/users-panel";
+import { ResearchersPanel } from "@/components/admin/panels/researchers-panel";
 import { KnowledgePanel } from "@/components/admin/panels/knowledge-panel";
 import {
   AgentsPanel,
@@ -51,6 +53,7 @@ export type AdminSection =
   | "agents"
   | "integrations"
   | "knowledge"
+  | "researchers"
   | "audit"
   | "access"
   | "runtime"
@@ -71,6 +74,7 @@ const NAV: NavItem[] = [
   { id: "agents", label: { tr: "Ajanlar", en: "Agents" }, description: { tr: "Yerleşik ajanlar ve korumalı işlemler.", en: "Resident agents and guarded operations." }, icon: BotIcon, permission: "agents:read", group: "operate" },
   { id: "integrations", label: { tr: "Entegrasyonlar", en: "Integrations" }, description: { tr: "METU araçlarının benimsenmesi ve doğrulanması.", en: "METU tool adoption and verification." }, icon: Building2Icon, permission: "integrations:read", group: "operate" },
   { id: "knowledge", label: { tr: "Kampüs bilgisi", en: "Campus knowledge" }, description: { tr: "Kaynakları, içe aktarmayı ve korumalı ders gruplarını yönetin.", en: "Manage sources, ingestion, and protected course groups." }, icon: DatabaseZapIcon, permission: "knowledge:read", group: "operate" },
+  { id: "researchers", label: { tr: "Araştırmacılar", en: "Researchers" }, description: { tr: "AVESIS profillerini ve içe aktarma ilerlemesini yönetin.", en: "Manage AVESIS profiles and import progress." }, icon: GraduationCapIcon, permission: "researchers:read", group: "operate" },
   { id: "audit", label: { tr: "Denetim kaydı", en: "Audit log" }, description: { tr: "İçeriksiz yönetici işlemleri ve sonuçları.", en: "Content-free admin operations and results." }, icon: ClipboardListIcon, permission: "audit:read", group: "operate" },
   { id: "access", label: { tr: "Yönetici erişimi", en: "Admin access" }, description: { tr: "Yönetici üyelikleri ve rol atamaları.", en: "Admin memberships and role assignments." }, icon: UserCogIcon, permission: "memberships:manage", group: "configure" },
   { id: "runtime", label: { tr: "Ajan varsayılanları", en: "Agent defaults" }, description: { tr: "Model ve güvenli davranış varsayılanları.", en: "Model and safe-behavior defaults." }, icon: SlidersHorizontalIcon, permission: "runtime:read", group: "configure" },
@@ -226,6 +230,7 @@ function AdminPanel({ section, principal, title, description }: { section: Admin
     case "agents": return <AgentsPanel principal={principal} title={title} description={description} />;
     case "integrations": return <IntegrationsPanel title={title} description={description} />;
     case "knowledge": return <KnowledgePanel principal={principal} title={title} description={description} />;
+    case "researchers": return <ResearchersPanel principal={principal} title={title} description={description} />;
     case "audit": return <AuditPanel principal={principal} title={title} description={description} />;
     case "access": return <AccessPanel principal={principal} title={title} description={description} />;
     case "runtime": return <RuntimePanel title={title} description={description} />;
