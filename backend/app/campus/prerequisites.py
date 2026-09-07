@@ -58,8 +58,14 @@ def _full_code(value: Any) -> str | None:
 
 def display_code(value: str) -> str:
     owner = departments.by_code(value[:3])
-    abbreviation = str(getattr(owner, "abbreviation", "") or "").strip()
-    return f"{abbreviation} {value[-3:]}" if abbreviation else value
+    # A few central service-course departments do not publish an abbreviation
+    # in the catalog directory even though students consistently see one.
+    abbreviation = str(getattr(owner, "abbreviation", "") or "").strip() or {"877": "OHS"}.get(value[:3], "")
+    # METU stores the course number as four digits after the three-digit
+    # department: EE 213 is 5670213, while HIST 2201 is 2402201. Reading only
+    # the final three digits silently turned HIST 2201 into HIST 201.
+    number = value[3:].lstrip("0") or "0"
+    return f"{abbreviation} {number}" if abbreviation else value
 
 
 def unmet_prerequisites(rows: list[dict[str, Any]], completed: list[dict]) -> tuple[str, ...]:

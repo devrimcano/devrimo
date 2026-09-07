@@ -82,6 +82,7 @@ class PrerequisiteRejectionOut(BaseModel):
 
 class CurriculumCourseOut(BaseModel):
     code: str
+    display_code: str
     name: str
     credits: float
     sections: list[Any] = Field(default_factory=list)
@@ -836,7 +837,7 @@ def _constraint_rows(payload: Any) -> list[dict[str, Any]]:
 _CURRICULUM_NAMESPACE = "schedule-curriculum"
 # Bumped when the shape of a stored answer changes, so a deploy cannot spend six
 # hours serving results built by the previous version of this code.
-_CURRICULUM_VERSION = 4
+_CURRICULUM_VERSION = 5
 
 
 def _curriculum_cache_key(
@@ -953,6 +954,7 @@ async def _curriculum_courses(
             code,
             {
                 "code": code,
+                "display_code": prerequisites.display_code(code),
                 "name": " ".join(str(row.get("course_name") or "").split()),
                 "credits": _credit_value(row.get("credit")),
                 "sections": [],
