@@ -189,4 +189,12 @@ def create_mcp_server() -> MCPServer:
             category_id=category_id,
         )
 
+    @server.tool(
+        name="get_student_curriculum",
+        description="Read the student's actual SAIS Student Information Curriculum tab: semester completion checks, required course codes and grades.",
+    )
+    async def get_student_curriculum() -> Dict[str, Any]:
+        client = get_cached_client()
+        return await client.get_student_curriculum()
+
     return server

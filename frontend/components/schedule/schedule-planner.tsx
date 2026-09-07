@@ -8,6 +8,10 @@ import {
 import { toast } from "sonner";
 import { useLocale } from "@/components/locale-provider";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,9 +38,15 @@ type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
 type DepartmentOption = { code: string; name: string };
 type SavedPlan = { entries: Entry[]; department: string; departmentLabel: string; emptyDays: Day[]; avoidConflicts: boolean; ignoreConstraints: boolean; pool: CatalogCourse[]; sections: SectionMap; alternatives: Entry[][]; alternativeIndex: number };
 type AiPlanCourse = { code?: string; name?: string; credits?: number; sections?: unknown };
+type PrerequisiteRejection = {
+  course_code?: string;
+  course_label?: string;
+  prerequisite_course_codes?: string[];
+  prerequisite_course_labels?: string[];
+};
 
 const DAYS: Day[] = ["Mon", "Tue", "Wed", "Thu", "Fri"];
-const HOURS = Array.from({ length: 10 }, (_, index) => index + 8);
+const DEFAULT_HOURS = Array.from({ length: 10 }, (_, index) => index + 8);
 // The shortest a class hour may be drawn. Rows share the height the card
 // actually has, so the week fits a desktop screen without scrolling; this is
 // only the floor for when it genuinely cannot. Ten rows at this floor plus the
@@ -449,6 +459,7 @@ export function SchedulePlanner() {
   const [alternatives, setAlternatives] = useState<Entry[][]>([]);
   const [alternativeIndex, setAlternativeIndex] = useState(0);
   const [curriculumNotice, setCurriculumNotice] = useState("");
+  const [prerequisiteRejections, setPrerequisiteRejections] = useState<PrerequisiteRejection[]>([]);
   const [poolQuery, setPoolQuery] = useState("");
   const [suggestions, setSuggestions] = useState<CatalogCourse[]>([]);
   const [suggestBusy, setSuggestBusy] = useState(false);
@@ -459,6 +470,9 @@ export function SchedulePlanner() {
   // Nothing may be written back to storage until the stored plan has been
   // read, or the empty first render erases the plan it is about to load.
   const [hydrated, setHydrated] = useState(false);
+  const initialConstraintsFetched = useRef(false);
+  const poolRef = useRef<CatalogCourse[]>([]);
+  useEffect(() => { poolRef.current = catalogCourses; }, [catalogCourses]);
   const busy = planBusy || generateProgress !== null;
 
   // --- persistence --------------------------------------------------------
@@ -494,7 +508,10 @@ export function SchedulePlanner() {
       }
       // A shared link is an explicit instruction and outranks the stored plan.
       if (shared) {
-        try { setEntries(JSON.parse(decodeURIComponent(escape(atob(shared)))) as Entry[]); } catch { /* malformed shared plan */ }
+        try {
+          setEntries(JSON.parse(decodeURIComponent(escape(atob(shared)))) as Entry[]);
+          window.history.replaceState(null, "", window.location.pathname);
+        } catch { /* malformed shared plan */ }
       }
       const raw = window.localStorage.getItem(`${STORAGE_KEY}:favorites`);
       if (raw) try { setFavorites(JSON.parse(raw) as Entry[][]); } catch { /* ignore corrupt local draft */ }
@@ -650,6 +667,18 @@ export function SchedulePlanner() {
   // Recomputed only when the timetable changes, not per cell: the grid has
   // fifty cells and this is a whole-week assignment.
   const gridLanes = useMemo(() => laneLayout(entries), [entries]);
+  // Extend the default 08–17 range when entries fall outside it, so every
+  // session on the timetable is actually drawn.
+  const hours = useMemo(() => {
+    let lo = DEFAULT_HOURS[0];
+    let hi = DEFAULT_HOURS[DEFAULT_HOURS.length - 1];
+    for (const entry of entries) {
+      if (entry.start < lo) lo = entry.start;
+      const end = entry.start + entry.duration - 1;
+      if (end > hi) hi = end;
+    }
+    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+  }, [entries]);
   const visibleCourses = catalogCourses.filter((course) => `${course.code} ${course.name}`.toLowerCase().includes(catalogSearch.toLowerCase()));
 
   // --- course pool --------------------------------------------------------
@@ -706,14 +735,21 @@ export function SchedulePlanner() {
    */
   function addPoolCourse(picked?: CatalogCourse) {
     const chosen = picked ?? suggestions[0];
-    const rawCode = (chosen?.rawCode ?? poolQuery).toUpperCase().replace(/[^A-Z0-9]/g, "");
+    // Without a catalog-verified suggestion the typed text becomes a pool
+    // entry with no name, no credits and no sections — which looks like a
+    // bug rather than a feature. Refuse it rather than silently creating a
+    // broken entry the student has to notice and delete.
+    if (!chosen) {
+      if (!poolQuery.trim()) return toast.error(t("Ders kodu gerekli.", "Course code is required."));
+      return toast.error(t("Önce listeden bir ders seç veya aramayı bekle.", "Pick a course from the list or wait for search results."));
+    }
+    const rawCode = chosen.rawCode.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!rawCode) return toast.error(t("Ders kodu gerekli.", "Course code is required."));
     if (catalogCourses.some((course) => courseIdentity(course.rawCode) === courseIdentity(rawCode))) return toast.error(t("Bu ders zaten listede.", "This course is already in the list."));
-    const course: CatalogCourse = chosen ?? { rawCode, code: rawCode, name: rawCode, credits: 0 };
-    setCatalogCourses((current) => [...current, course]);
+    setCatalogCourses((current) => [...current, chosen]);
     setPoolQuery("");
     setSuggestions([]);
-    void fetchAllConstraints([course]);
+    void fetchAllConstraints([chosen]);
   }
 
   // Suggestions as the student types. Debounced because every keystroke would
@@ -837,11 +873,19 @@ export function SchedulePlanner() {
             "/api/schedule/constraints",
             { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
           );
-          const next: Record<string, Record<string, SectionVerdict>> = {};
-          for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
-            next[courseIdentity(rawCode)] = payload?.sections ?? {};
-          }
-          setConstraints((current) => ({ ...current, ...next }));
+          setConstraints((current) => {
+            const updated = { ...current };
+            for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
+              const identity = courseIdentity(rawCode);
+              // Ignore if the course was removed from the pool during the request
+              if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
+              const sections = payload?.sections ?? {};
+              // Never replace verdicts we already hold with an empty answer
+              if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
+              updated[identity] = sections;
+            }
+            return updated;
+          });
         } catch {
           // One failed group must not cost the rest their verdicts. A course
           // with none is treated as unrestricted, exactly as before.
@@ -888,6 +932,13 @@ export function SchedulePlanner() {
     [loadConstraints],
   );
 
+  useEffect(() => {
+    if (hydrated && !initialConstraintsFetched.current && catalogCourses.length) {
+      initialConstraintsFetched.current = true;
+      void fetchAllConstraints(catalogCourses);
+    }
+  }, [hydrated, catalogCourses, fetchAllConstraints]);
+
   /** Whether the student may register, preferring METU's own table. */
   const sectionAllowed = useCallback((course: CatalogCourse, section: CatalogSection) => {
     const verdict = constraints[courseIdentity(course.rawCode)]?.[section.section];
@@ -902,9 +953,9 @@ export function SchedulePlanner() {
     // tool per department with a model turn between each. It now reads the
     // curriculum directly and answers in about two.
     const startedAt = Date.now();
-    let response: { courses?: AiPlanCourse[]; warnings?: string[]; cache_hit?: boolean; duration_ms?: number };
+    let response: { courses?: AiPlanCourse[]; warnings?: string[]; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
     try {
-      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/curriculum", {
+      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/curriculum", {
         method: "POST",
         // Omitted rather than sent empty: the broker reads the department from
         // the stored campus context when the client has none, so a page whose
@@ -937,7 +988,7 @@ export function SchedulePlanner() {
       warnings: warnings.length,
       duration_seconds: (Date.now() - startedAt) / 1000,
     });
-    return { courses: verified, warnings, cacheHit: response.cache_hit, durationMs: response.duration_ms };
+    return { courses: verified, warnings, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
   }
 
   async function loadRequiredCourses() {
@@ -948,6 +999,7 @@ export function SchedulePlanner() {
     try {
       const result = await requestCurriculum([]);
       setCatalogCourses(result.courses);
+      setPrerequisiteRejections(result.prerequisiteRejections);
       // Every course the curriculum names, checked now rather than when the
       // student happens to expand one: the red flags have to be visible while
       // they are choosing, not after.
@@ -968,6 +1020,16 @@ export function SchedulePlanner() {
     if (expandedCourse === identity) return setExpandedCourse(null);
     setExpandedCourse(identity);
     if (sectionsByCourse[identity]?.length) return;
+    // The section fetch needs a department — either derived from a
+    // seven-digit course code or from the student's own department. Without
+    // one the broker returns 422, which is what happened when the student
+    // clicked a course in the first few hundred milliseconds before the
+    // SAIS context had resolved.
+    const derived = owningDepartment(course.rawCode, department);
+    if (!derived) {
+      toast.error(t("Bölüm bilgisi henüz yüklenmedi, bir saniye bekle.", "Department info is still loading, wait a moment."));
+      return;
+    }
     setSectionsBusy(identity);
     try {
       const sections = await fetchSections(course, sectionsByCourse);
@@ -1172,6 +1234,32 @@ export function SchedulePlanner() {
 
   return (
     <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,rgb(227_24_55/8%),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden">
+      <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Ön koşulu eksik dersler", "Courses with unmet prerequisites")}</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2 text-left">
+              {prerequisiteRejections.flatMap((rejection) => {
+                const course = rejection.course_label || rejection.course_code || t("Bu ders", "This course");
+                const prerequisites = rejection.prerequisite_course_labels?.length
+                  ? rejection.prerequisite_course_labels
+                  : rejection.prerequisite_course_codes ?? [];
+                return prerequisites.map((prerequisite) => (
+                  <span key={`${rejection.course_code}-${prerequisite}`} className="block">
+                    {t(
+                      `${course} dersini alabilmek için ${prerequisite} dersinden geçer not (DD ve üstü) almalısınız.`,
+                      `To take ${course}, you must earn a passing grade (DD or higher) in ${prerequisite}.`,
+                    )}
+                  </span>
+                ));
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("Tamam", "OK")}</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <div className="mx-auto w-full max-w-[1500px] space-y-4 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-4 xl:space-y-0">
         <div className="flex flex-wrap items-center justify-between gap-3 xl:shrink-0">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3">
@@ -1281,7 +1369,7 @@ export function SchedulePlanner() {
                   <Input
                     value={poolQuery}
                     onChange={(e) => setPoolQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") addPoolCourse(); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && suggestions.length) addPoolCourse(); }}
                     className="h-11 pl-9 pr-12"
                     placeholder={t("Ders kodu veya adı ara… (PHYS213, termodinamik)", "Search by code or name… (PHYS213, thermodynamics)")}
                     aria-label={t("Ders kodu veya adı ara", "Search by course code or name")}
@@ -1393,7 +1481,7 @@ export function SchedulePlanner() {
               {manualOpen ? <CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 border-t pt-4">
                 <div className="grid grid-cols-2 gap-2"><Field label={t("Kod", "Code")}><Input value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="MATH 260" /></Field><Field label={t("Şube", "Section")}><Input value={draft.section} onChange={(e) => setDraft({ ...draft, section: e.target.value })} /></Field></div>
                 <Field label={t("Ders adı", "Course name")}><Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder={t("Temel Lineer Cebir", "Basic Linear Algebra")} /></Field>
-                <div className="grid grid-cols-3 gap-2"><Field label={t("Gün", "Day")}><select value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value as Day })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{DAYS.map((d) => <option key={d} value={d}>{dayLabel(d)}</option>)}</select></Field><Field label={t("Başlangıç", "Start")}><select value={draft.start} onChange={(e) => setDraft({ ...draft, start: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:40</option>)}</select></Field><Field label={t("Süre", "Hours")}><select value={draft.duration} onChange={(e) => setDraft({ ...draft, duration: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{[1, 2, 3].map((h) => <option key={h}>{h}</option>)}</select></Field></div>
+                <div className="grid grid-cols-3 gap-2"><Field label={t("Gün", "Day")}><select value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value as Day })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{DAYS.map((d) => <option key={d} value={d}>{dayLabel(d)}</option>)}</select></Field><Field label={t("Başlangıç", "Start")}><select value={draft.start} onChange={(e) => setDraft({ ...draft, start: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{hours.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:40</option>)}</select></Field><Field label={t("Süre", "Hours")}><select value={draft.duration} onChange={(e) => setDraft({ ...draft, duration: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{[1, 2, 3].map((h) => <option key={h}>{h}</option>)}</select></Field></div>
                 <div className="grid grid-cols-2 gap-2"><Field label={t("Derslik", "Room")}><Input value={draft.room} onChange={(e) => setDraft({ ...draft, room: e.target.value })} placeholder="M-13" /></Field><Field label={t("Kredi", "Credits")}><Input type="number" min={0} max={10} value={draft.credits} onChange={(e) => setDraft({ ...draft, credits: Number(e.target.value) })} /></Field></div>
                 <Button onClick={() => void addEntry()} disabled={manualBusy}>{manualBusy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}{t("Programa ekle", "Add to schedule")}</Button>
               </CardContent> : null}
@@ -1425,14 +1513,14 @@ export function SchedulePlanner() {
               <CardContent className="overflow-auto p-0 xl:min-h-0 xl:flex-1" data-tour="grid">
                 <div
                   className="grid min-w-[820px] grid-cols-[68px_repeat(5,minmax(130px,1fr))] border-t text-sm xl:h-full"
-                  style={{ gridTemplateRows: `auto repeat(${HOURS.length}, minmax(${ROW_MIN_PX}px, 1fr))` }}
+                  style={{ gridTemplateRows: `auto repeat(${hours.length}, minmax(${ROW_MIN_PX}px, 1fr))` }}
                 >
                   {/* No bottom border: the 08:40 label sits on this line, and a
                       rule through the text is the thing being removed. Sticky
                       with the day names, or the corner slides under them. */}
                   <div className="sticky top-0 z-30 border-r bg-card" />
                   {DAYS.map((d) => <div key={d} className={cn("sticky top-0 z-30 border-b border-r bg-card px-2 py-2 text-center text-sm font-semibold", emptyDays.includes(d) && "bg-primary/10 text-primary")}>{dayLabel(d)}</div>)}
-                  {HOURS.flatMap((hour) => [
+                  {hours.flatMap((hour) => [
                     // One time per line, sitting on the line it names. Writing
                     // both ends inside every row said each boundary twice —
                     // 09:40 closing one row and opening the next — which is the
@@ -1443,10 +1531,10 @@ export function SchedulePlanner() {
                       {/* Centred on the rule it names, except the first: that
                           rule is the sticky day-header's own bottom edge, and a
                           label straddling it is half-hidden behind the header. */}
-                      <span className={cn("absolute right-2 text-[11px] font-medium leading-none tabular-nums text-muted-foreground", hour === HOURS[0] ? "top-1.5" : "top-0 -translate-y-1/2")}>
+                      <span className={cn("absolute right-2 text-[11px] font-medium leading-none tabular-nums text-muted-foreground", hour === hours[0] ? "top-1.5" : "top-0 -translate-y-1/2")}>
                         {String(hour).padStart(2, "0")}:40
                       </span>
-                      {hour === HOURS[HOURS.length - 1] ? (
+                      {hour === hours[hours.length - 1] ? (
                         <span className="absolute bottom-0 right-2 translate-y-1/2 text-[11px] font-medium leading-none tabular-nums text-muted-foreground">
                           {String(hour + 1).padStart(2, "0")}:40
                         </span>

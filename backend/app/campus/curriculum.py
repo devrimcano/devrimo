@@ -24,11 +24,6 @@ from typing import Any
 from app.campus import departments
 from app.campus.eligibility import course_candidates, has_passed, prior_grade
 
-# The order a student meets their requirements in, and the order the pool should
-# arrive in. Matched against the category names SAIS returns, folded, so
-# "MUST COURSE" and "MUST COURSES" are the same rank.
-_CATEGORY_ORDER = ("must", "departmental elective", "nondepartmental elective", "free elective")
-
 # A curriculum is four or five categories. The cap is here so a malformed
 # overview cannot turn one request into an unbounded walk of the campus.
 MAX_CATEGORIES = 6
@@ -55,37 +50,27 @@ def _fold(text: Any) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
-def _category_rank(name: str) -> int:
-    folded = _fold(name)
-    for index, wanted in enumerate(_CATEGORY_ORDER):
-        if folded.startswith(wanted):
-            return index
-    return len(_CATEGORY_ORDER)
-
-
-def select_program(overview: Any, department: str) -> tuple[str | None, list[dict]]:
-    """Which programme's categories to read, and in which order.
-
-    SAIS writes a category id as ``"{category}-{department}"`` — the tool's own
-    description gives ``'1-236'`` and ``'2-236'`` as examples — so a student
-    with a double major is separated by the suffix alone. That is a
-    deterministic tie-break and needs no model: keep the categories belonging to
-    the department this plan is for, and only fall back to all of them when none
-    matches, which is the case where the suffix means something we do not know.
-    """
-    if not isinstance(overview, dict):
-        return None, []
-    wanted = str(department or "").strip()
-
-    types = [row for row in overview.get("program_types") or [] if isinstance(row, dict)]
-    major = next((row for row in types if "major" in _fold(row.get("name"))), None)
-    program_type = str((major or (types[0] if types else {})).get("id") or "").strip() or None
-
-    categories = [row for row in overview.get("course_categories") or [] if isinstance(row, dict)]
-    mine = [row for row in categories if str(row.get("id") or "").rpartition("-")[2].strip() == wanted]
-    chosen = mine or categories
-    chosen.sort(key=lambda row: _category_rank(str(row.get("name") or "")))
-    return program_type, chosen[:MAX_CATEGORIES]
+def next_semester_courses(board: Any) -> list[dict]:
+    """Use SAIS's checkmark and grade cells, never infer a student's semester."""
+    # The live MCP tool wraps its dictionary return value under result.
+    if isinstance(board, dict) and set(board) == {"result"}:
+        board = board["result"]
+    if not isinstance(board, dict) or not isinstance(board.get("semesters"), list) or not board["semesters"]:
+        raise ValueError("SAIS Curriculum semester boxes could not be read")
+    semesters = board["semesters"]
+    for item in semesters:
+        if (not isinstance(item, dict) or type(item.get("semester")) is not int
+                or item["semester"] < 1 or type(item.get("completed")) is not bool
+                or not isinstance(item.get("courses"), list)):
+            raise ValueError("SAIS Curriculum completion markers could not be read")
+    pending = next((item for item in sorted(semesters, key=lambda item: item["semester"])
+                    if not item["completed"]), None)
+    if pending is None:
+        return []
+    rows = pending["courses"]
+    if any(not isinstance(row, dict) or not isinstance(row.get("grade"), str) for row in rows):
+        raise ValueError("SAIS Curriculum course grades could not be read")
+    return [row for row in rows if not row["grade"].strip()]
 
 
 def normalise_code(value: Any) -> str | None:
