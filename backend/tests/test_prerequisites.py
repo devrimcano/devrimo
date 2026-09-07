@@ -23,6 +23,12 @@ def test_dd_or_higher_satisfies_a_prerequisite():
     assert prerequisites.unmet_prerequisites([row("2300213")], completed) == ()
 
 
+def test_display_code_keeps_four_digit_course_numbers():
+    assert prerequisites.display_code("2300213") == "PHYS 213"
+    assert prerequisites.display_code("2402201") == "HIST 2201"
+    assert prerequisites.display_code("8770301") == "OHS 301"
+
+
 def test_failed_or_missing_course_does_not_satisfy_a_prerequisite():
     assert prerequisites.unmet_prerequisites([row("2300213")], []) == ("2300213",)
     completed = [{"course_code": "PHYS213", "grade": "FD"}]

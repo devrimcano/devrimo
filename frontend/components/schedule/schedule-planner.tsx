@@ -16,12 +16,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import { jsonFetch } from "@/lib/api/fetcher";
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
+import { formatMetuCourseCode } from "@/lib/metu-course-code";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
@@ -37,7 +37,7 @@ type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean; reason: string
 type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
 type DepartmentOption = { code: string; name: string };
 type SavedPlan = { entries: Entry[]; department: string; departmentLabel: string; emptyDays: Day[]; avoidConflicts: boolean; ignoreConstraints: boolean; pool: CatalogCourse[]; sections: SectionMap; alternatives: Entry[][]; alternativeIndex: number };
-type AiPlanCourse = { code?: string; name?: string; credits?: number; sections?: unknown };
+type AiPlanCourse = { code?: string; display_code?: string; name?: string; credits?: number; sections?: unknown };
 type PrerequisiteRejection = {
   course_code?: string;
   course_label?: string;
@@ -163,6 +163,64 @@ function laneLayout(entries: Entry[]): Map<string, { lane: number; lanes: number
 
 function courseIdentity(code: string) {
   return code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function cleanCourseName(value: string) {
+  return value
+    .replace(/\(\s*\)/g, "")
+    .replace(/\b[lL]{3}\b/g, "III")
+    .replace(/\s+([,)])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function localizedCourseName(value: string, locale: "tr" | "en") {
+  const cleaned = cleanCourseName(value);
+  const bilingual = cleaned.match(/^(.+?)\s*\(([^()]*)\)$/);
+  if (!bilingual) return cleaned;
+  return (locale === "tr" ? bilingual[2] : bilingual[1]).trim() || cleaned;
+}
+
+function localizedRestrictionReason(
+  value: string,
+  t: (tr: string, en: string) => string,
+) {
+  const reason = value.trim().replace(/[.;]+$/, "");
+  let match = reason.match(/^surnames\s+(.+?)\s+only$/i);
+  if (match) return t(`Soyadın ${match[1]} aralığında değil`, `Your surname is outside the ${match[1]} range`);
+  match = reason.match(/^open only to\s+(.+)$/i);
+  if (match) return t(`Yalnızca ${match[1]} bölümlerine açık`, `Open only to ${match[1]}`);
+  match = reason.match(/^CGPA\s+([\d.]+)\s+or above$/i);
+  if (match) return t(`Genel not ortalaman en az ${match[1]} olmalı`, `Your CGPA must be at least ${match[1]}`);
+  match = reason.match(/^CGPA\s+([\d.]+)\s+or below$/i);
+  if (match) return t(`Genel not ortalaman en fazla ${match[1]} olmalı`, `Your CGPA must be at most ${match[1]}`);
+  match = reason.match(/^year\s+(\d+)\s+and above$/i);
+  if (match) return t(`En az ${match[1]}. sınıfta olmalısın`, `You must be in year ${match[1]} or above`);
+  match = reason.match(/^year\s+(\d+)\s+and below$/i);
+  if (match) return t(`En fazla ${match[1]}. sınıfta olmalısın`, `You must be in year ${match[1]} or below`);
+  match = reason.match(/^for students who have not passed it; you have\s+(.+)$/i);
+  if (match) return t(`Bu şube dersi geçmemiş öğrenciler için; mevcut notun ${match[1]}`, `This section is for students who have not passed the course; your grade is ${match[1]}`);
+  return reason;
+}
+
+function localizedCurriculumWarning(
+  value: string,
+  t: (tr: string, en: string) => string,
+) {
+  const match = value.match(/^(history|language): kept (.+?) — .*?add (.+?) instead\.$/i);
+  if (!match) return value;
+  const label = (codes: string) => codes.split(", ").map((code) => {
+    const course = code.trim();
+    const abbreviation = ({ "240": "HIST", "629": "TURK", "642": "TURK" } as Record<string, string>)[course.slice(0, 3)];
+    return abbreviation && /^\d{7}$/.test(course) ? `${abbreviation} ${course.slice(3).replace(/^0+/, "")}` : course;
+  }).join(", ");
+  const kept = label(match[2]);
+  const alternative = label(match[3]);
+  const family = match[1].toLowerCase() === "history" ? t("Tarih", "history") : t("Türkçe", "Turkish language");
+  return t(
+    `${family} dersi olarak ${kept} eklendi. Uluslararası öğrenciysen ${alternative} dersini elle ekleyebilirsin.`,
+    `${kept} was added for the ${family} requirement. International students can add ${alternative} manually instead.`,
+  );
 }
 
 // The first three digits of a seven-digit code name the department that owns
@@ -422,7 +480,7 @@ function readSavedPlan(): Partial<SavedPlan> | null {
 }
 
 export function SchedulePlanner() {
-  const { pick } = useLocale();
+  const { locale, pick } = useLocale();
   const t = useCallback((tr: string, en: string) => pick({ tr, en }), [pick]);
 
   const [term] = useState(() => upcomingTerm());
@@ -460,6 +518,7 @@ export function SchedulePlanner() {
   const [alternativeIndex, setAlternativeIndex] = useState(0);
   const [curriculumNotice, setCurriculumNotice] = useState("");
   const [prerequisiteRejections, setPrerequisiteRejections] = useState<PrerequisiteRejection[]>([]);
+  const [mobileDay, setMobileDay] = useState<Day>("Mon");
   const [poolQuery, setPoolQuery] = useState("");
   const [suggestions, setSuggestions] = useState<CatalogCourse[]>([]);
   const [suggestBusy, setSuggestBusy] = useState(false);
@@ -489,8 +548,8 @@ export function SchedulePlanner() {
         // Every field is checked rather than trusted: this is a value the
         // user's own browser holds, so an older or hand-edited shape must not
         // be able to push `undefined` into a controlled input.
-        if (Array.isArray(plan.entries)) setEntries(plan.entries);
-        if (Array.isArray(plan.pool)) setCatalogCourses(plan.pool);
+        if (Array.isArray(plan.entries)) setEntries(plan.entries.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) })));
+        if (Array.isArray(plan.pool)) setCatalogCourses(plan.pool.map((course) => ({ ...course, code: formatMetuCourseCode(course.code) })));
         if (plan.sections && typeof plan.sections === "object") setSectionsByCourse(plan.sections);
         if (typeof plan.department === "string") setDepartment(plan.department);
         if (typeof plan.departmentLabel === "string") setDepartmentLabel(plan.departmentLabel);
@@ -503,18 +562,23 @@ export function SchedulePlanner() {
         if (typeof plan.ignoreConstraints === "boolean") setIgnoreConstraints(plan.ignoreConstraints);
         // Kept so a reload does not silently collapse a set of alternatives
         // back to whichever one happened to be on screen.
-        if (Array.isArray(plan.alternatives)) setAlternatives(plan.alternatives.filter(Array.isArray));
+        if (Array.isArray(plan.alternatives)) setAlternatives(plan.alternatives.filter(Array.isArray).map((alternative) =>
+          alternative.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) }))));
         if (typeof plan.alternativeIndex === "number") setAlternativeIndex(plan.alternativeIndex);
       }
       // A shared link is an explicit instruction and outranks the stored plan.
       if (shared) {
         try {
-          setEntries(JSON.parse(decodeURIComponent(escape(atob(shared)))) as Entry[]);
+          const sharedEntries = JSON.parse(decodeURIComponent(escape(atob(shared)))) as Entry[];
+          setEntries(sharedEntries.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) })));
           window.history.replaceState(null, "", window.location.pathname);
         } catch { /* malformed shared plan */ }
       }
       const raw = window.localStorage.getItem(`${STORAGE_KEY}:favorites`);
-      if (raw) try { setFavorites(JSON.parse(raw) as Entry[][]); } catch { /* ignore corrupt local draft */ }
+      if (raw) try {
+        const storedFavorites = JSON.parse(raw) as Entry[][];
+        setFavorites(storedFavorites.map((favorite) => favorite.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) }))));
+      } catch { /* ignore corrupt local draft */ }
       setHydrated(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -659,6 +723,12 @@ export function SchedulePlanner() {
     }
     return [...groups.values()];
   }, [entries]);
+  const scheduledCodes = new Set(entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
+  const selectedPoolCount = catalogCourses.filter((course) =>
+    scheduledCodes.has(courseIdentity(course.code)) || scheduledCodes.has(courseIdentity(course.rawCode))).length;
+  const mobileEntries = entries
+    .filter((entry) => entry.day === mobileDay)
+    .sort((a, b) => a.start - b.start || a.code.localeCompare(b.code));
 
   const dayLabel = useCallback((day: Day) => ({ Mon: t("Pzt", "Mon"), Tue: t("Sal", "Tue"), Wed: t("Çar", "Wed"), Thu: t("Per", "Thu"), Fri: t("Cum", "Fri") })[day], [t]);
   // What distinguishes one alternative from the next, in the terms a student
@@ -706,9 +776,10 @@ export function SchedulePlanner() {
         const verdicts = await loadConstraints(code);
         const verdict = verdicts[section];
         if (verdict && !verdict.eligible && !ignoreConstraints) {
+          const reason = localizedRestrictionReason(verdict.reason, t);
           return toast.error(verdict.reason
-            ? t(`Şube ${section} sana kapalı: ${verdict.reason}. Yine de eklemek için "Kısıtları yok say"ı aç.`,
-                `Section ${section} is closed to you: ${verdict.reason}. Turn on "ignore restrictions" to add it anyway.`)
+            ? t(`Şube ${section} sana kapalı: ${reason}. Yine de eklemek için "Şube kısıtlarını yok say"ı aç.`,
+                `Section ${section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
             : t(`Şube ${section} kısıtlarına uymuyorsun.`, `You do not meet section ${section}'s restrictions.`));
         }
         if (verdict && !verdict.eligible) {
@@ -770,7 +841,7 @@ export function SchedulePlanner() {
           `/api/schedule/courses/search?query=${encodeURIComponent(typed)}&semester=${encodeURIComponent(term)}`,
         );
         if (cancelled) return;
-        setSuggestions(response.courses.map((item) => ({ rawCode: item.code, code: item.code, name: item.name, credits: item.credits })));
+        setSuggestions(response.courses.map((item) => ({ rawCode: item.full_code, code: item.code, name: item.name, credits: item.credits })));
         setSuggestNote(response.courses.length ? "" : t(`${response.department} altında eşleşen ders yok.`, `No matching course under ${response.department}.`));
       } catch (error) {
         if (cancelled) return;
@@ -977,7 +1048,12 @@ export function SchedulePlanner() {
       const rawCode = String(item.code ?? "").trim();
       if (!rawCode) return [];
       sectionMap[courseIdentity(rawCode)] = parseSections(item.sections ?? []);
-      return [{ rawCode, code: rawCode.toUpperCase(), name: String(item.name ?? rawCode), credits: Number(item.credits ?? 0) }];
+      return [{
+        rawCode,
+        code: formatMetuCourseCode(String(item.display_code ?? rawCode)),
+        name: cleanCourseName(String(item.name ?? rawCode)),
+        credits: Number(item.credits ?? 0),
+      }];
     });
     setSectionsByCourse((current) => ({ ...current, ...sectionMap }));
     const warnings = (response.warnings ?? []).filter((warning): warning is string => typeof warning === "string");
@@ -1004,11 +1080,10 @@ export function SchedulePlanner() {
       // student happens to expand one: the red flags have to be visible while
       // they are choosing, not after.
       void fetchAllConstraints(result.courses);
-      const timing = typeof result.durationMs === "number" ? ` (${(result.durationMs / 1000).toFixed(1)} sn)` : "";
-      const cacheLabel = result.cacheHit ? t(" · kalıcı önbellekten", " · from persistent cache") : "";
+      const warningText = result.warnings.map((warning) => localizedCurriculumWarning(warning, t)).join(" ");
       setCurriculumNotice(result.courses.length
-        ? t(`Müfredatından bu dönem açılan ${result.courses.length} ders bulundu${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `${result.courses.length} courses from your curriculum are offered this term${timing}${cacheLabel}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`)
-        : t(`Müfredatında bu dönem açılan, henüz almadığın bir ders bulunamadı.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, `No course from your curriculum that you still need is offered this term.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`));
+        ? t(`Bu dönem alman gereken ${result.courses.length} ders bulundu.${warningText ? ` ${warningText}` : ""}`, `${result.courses.length} required courses were found for this term.${warningText ? ` ${warningText}` : ""}`)
+        : t(`Müfredatında bu dönem açılan, henüz almadığın bir ders bulunamadı.${warningText ? ` ${warningText}` : ""}`, `No course from your curriculum that you still need is offered this term.${warningText ? ` ${warningText}` : ""}`));
     } catch (error) {
       captureRequestFailure(error, { operation: "schedule.required_courses", kind: "query" });
       toast.error(t(`Alman gereken dersler getirilemedi: ${error instanceof Error ? error.message : "Bilinmeyen hata"}`, `Required courses failed: ${error instanceof Error ? error.message : "Unknown error"}`));
@@ -1160,12 +1235,13 @@ export function SchedulePlanner() {
     // be missing and because the student is the one who knows their own case.
     const check = sectionAllowed(course, section);
     if (!check.allowed && !ignoreConstraints) {
+      const reason = localizedRestrictionReason(check.reason, t);
       return toast.error(
         check.reason
-          ? t(`Şube ${section.section} sana kapalı: ${check.reason}. Eklemek için "Kısıtları yok say"ı aç.`,
-              `Section ${section.section} is closed to you: ${check.reason}. Turn on "ignore restrictions" to add it anyway.`)
-          : t(`Şube ${section.section} kısıtlarına uymuyorsun. Eklemek için "Kısıtları yok say"ı aç.`,
-              `You do not meet section ${section.section}'s restrictions. Turn on "ignore restrictions" to add it anyway.`),
+          ? t(`Şube ${section.section} sana kapalı: ${reason}. Eklemek için "Şube kısıtlarını yok say"ı aç.`,
+              `Section ${section.section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
+          : t(`Şube ${section.section} kısıtlarına uymuyorsun. Eklemek için "Şube kısıtlarını yok say"ı aç.`,
+              `You do not meet section ${section.section}'s restrictions. Turn on "Ignore section restrictions" to add it anyway.`),
       );
     }
     if (!check.allowed) {
@@ -1271,7 +1347,7 @@ export function SchedulePlanner() {
 
         {/* Above both columns: it explains the whole screen, and once dismissed
             it shrinks to a single link rather than taking space forever. */}
-        <PlannerIntro className="mb-4" />
+        <PlannerIntro className="sm:mb-4" />
 
         <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
@@ -1362,6 +1438,12 @@ export function SchedulePlanner() {
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
               {planBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite"><Loader2Icon className="size-3.5 animate-spin" />{t("Müfredatın okunuyor…", "Reading your curriculum…")}</p> : null}
               {curriculumNotice ? <p className="rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground">{curriculumNotice}</p> : null}
+              {catalogCourses.length ? (
+                <div className="flex items-center justify-between gap-3 text-xs" aria-live="polite">
+                  <span className="font-medium">{t(`${catalogCourses.length} dersten ${selectedPoolCount} tanesi programa eklendi`, `${selectedPoolCount} of ${catalogCourses.length} courses added to the schedule`)}</span>
+                  <span className="shrink-0 tabular-nums text-muted-foreground">{selectedPoolCount}/{catalogCourses.length}</span>
+                </div>
+              ) : null}
               {constraintsBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"><Loader2Icon className="size-3.5 shrink-0 animate-spin" />{t("Şube kısıtları ODTÜ'den okunuyor; kırmızı işaretler geldikçe belirecek.", "Reading section restrictions from METU; red flags will appear as they arrive.")}</p> : null}
               <div className="space-y-2" data-tour="search">
                 <div className="relative">
@@ -1389,7 +1471,7 @@ export function SchedulePlanner() {
                         className="flex w-full items-start gap-2 p-2 text-left text-sm transition hover:bg-primary/5"
                       >
                         <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold">{item.code}</span>
-                        <span className="min-w-0 flex-1 break-words text-xs leading-snug text-muted-foreground">{item.name}</span>
+                        <span className="min-w-0 flex-1 break-words text-xs leading-snug text-muted-foreground">{localizedCourseName(item.name, locale)}</span>
                         {item.credits ? <span className="shrink-0 text-[11px] text-muted-foreground">{item.credits} {t("kr", "cr")}</span> : null}
                       </button>
                     </li>
@@ -1411,7 +1493,7 @@ export function SchedulePlanner() {
                       <div key={course.rawCode} className={cn("overflow-hidden rounded-lg border transition", expanded && "border-primary bg-primary/5")}>
                         <div className="flex items-center gap-1 p-1">
                           <button onClick={() => void toggleCourse(course)} aria-expanded={expanded} className="flex min-w-0 flex-1 items-center gap-2 p-1 text-left text-sm">
-                            <span className="min-w-0 flex-1"><span className="block font-semibold">{course.code}</span><span className="block truncate text-xs text-muted-foreground">{course.name}</span></span>
+                            <span className="min-w-0 flex-1"><span className="block font-semibold">{course.code}</span><span className="block line-clamp-2 text-xs text-muted-foreground">{localizedCourseName(course.name, locale)}</span></span>
                             <ChevronDownIcon className={cn("size-4 shrink-0 transition-transform", expanded && "rotate-180")} />
                           </button>
                           <Button size="icon" variant="ghost" aria-label={t(`${course.code} dersini havuzdan çıkar`, `Remove ${course.code} from course pool`)} onClick={() => removePoolCourse(course)}><Trash2Icon /></Button>
@@ -1421,8 +1503,9 @@ export function SchedulePlanner() {
                             : sections.length ? sections.map((section) => {
                               const check = sectionAllowed(course, section);
                               const eligible = check.allowed;
+                              const reason = localizedRestrictionReason(check.reason, t);
                               const closedLabel = check.reason
-                                ? t(`Bu şube sana kapalı: ${check.reason}.`, `This section is closed to you: ${check.reason}.`)
+                                ? t(`Bu şube sana kapalı: ${reason}.`, `This section is closed to you: ${reason}.`)
                                 : t("Bu şubenin kısıtlarına uymuyorsun.", "You do not meet this section's restrictions.");
                               return (
                                 <button
@@ -1432,27 +1515,15 @@ export function SchedulePlanner() {
                                 >
                                   <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                     <span className="font-semibold">{t("Şube", "Section")} {section.section}</span>
-                                    {!eligible ? <Tooltip>
-                                      {/* No tabIndex: this sits inside the
-                                          section button, and a focusable
-                                          inside a button is not reachable in
-                                          the way it looks like it should be.
-                                          The reason is in the sr-only text
-                                          below, which the button announces. */}
-                                      <TooltipTrigger render={<span className="inline-flex shrink-0 text-destructive" />}>
-                                        <TriangleAlertIcon className="size-3.5" aria-hidden="true" />
-                                        <span className="sr-only">{closedLabel}</span>
-                                      </TooltipTrigger>
-                                      <TooltipContent className="max-w-56 text-xs">{closedLabel}</TooltipContent>
-                                    </Tooltip> : null}
                                   </span>
+                                  {!eligible ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
                                   <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${String(meeting.start).padStart(2, "0")}:40 · ${meeting.room?.trim() || "TBA"}`).join(" / ") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
                                   {/* Shown verbatim. It is a free-text box a
                                       department types into, so only the surname
                                       range is ever interpreted — everything else
                                       the student has to read for themselves. */}
-                                  {section.constraint ? <span className="mt-1 block rounded bg-muted/50 px-1.5 py-1 text-[11px] leading-snug text-muted-foreground">{section.constraint}</span> : null}
+                                  {section.constraint ? <span className="mt-1 block rounded bg-muted/50 px-1.5 py-1 text-[11px] leading-snug text-muted-foreground">{localizedRestrictionReason(section.constraint, t)}</span> : null}
                                 </button>
                               );
                             }) : <p className="text-xs text-muted-foreground">{t("Bu ders için şube bulunamadı.", "No sections found for this course.")}</p>}
@@ -1467,7 +1538,7 @@ export function SchedulePlanner() {
             {entries.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
               {scheduledCourseGroups.map((courseEntries) => { const entry = courseEntries[0]; return (
                 <div key={`${entry.code}-${entry.section}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
-                  <div className="min-w-0"><p className="truncate text-sm font-medium">{entry.code} · {entry.name}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${String(meeting.start).padStart(2, "0")}:40`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
+                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${String(meeting.start).padStart(2, "0")}:40`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
                   <Button size="icon" variant="ghost" aria-label={t("Dersi kaldır", "Remove course")} onClick={() => removeScheduledCourse(courseEntries)}><Trash2Icon /></Button>
                 </div>
               ); })}
@@ -1492,7 +1563,7 @@ export function SchedulePlanner() {
               five day columns stay legible, and without this the single grid
               column below xl grows to that width and takes the whole page
               sideways with it. */}
-          <main className="min-w-0 space-y-3 xl:flex xl:min-h-0 xl:flex-col xl:gap-3 xl:space-y-0">
+          <section aria-label={t("Haftalık program", "Weekly schedule")} className="min-w-0 space-y-3 xl:flex xl:min-h-0 xl:flex-col xl:gap-3 xl:space-y-0">
             <Card className="overflow-hidden xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
               {/* Deliberately not CardHeader: that is a grid with auto rows, so
                   a title, a stat line and two icon buttons became three stacked
@@ -1510,11 +1581,51 @@ export function SchedulePlanner() {
                   <Button size="icon-sm" variant="ghost" aria-label={t("Özeti kopyala", "Copy summary")} onClick={() => void copySummary()}><ClipboardIcon /></Button>
                 </div>
               </div>
-              <CardContent className="overflow-auto p-0 xl:min-h-0 xl:flex-1" data-tour="grid">
-                <div
+              <CardContent className="p-0 xl:min-h-0 xl:flex-1" data-tour="grid">
+                <div className="border-t p-3 sm:hidden">
+                  <div className="mb-3 grid grid-cols-5 gap-1" role="tablist" aria-label={t("Program günü", "Schedule day")}>
+                    {DAYS.map((day) => (
+                      <button
+                        key={day}
+                        type="button"
+                        role="tab"
+                        aria-selected={mobileDay === day}
+                        onClick={() => setMobileDay(day)}
+                        className={cn("h-9 rounded-md border text-xs font-medium transition", mobileDay === day ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground")}
+                      >
+                        {dayLabel(day)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="space-y-2" role="tabpanel" aria-label={dayLabel(mobileDay)}>
+                    {mobileEntries.length ? mobileEntries.map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => setEntries((current) => current.filter((item) =>
+                          entry.kind === "block"
+                            ? item.id !== entry.id
+                            : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
+                        className={cn("flex w-full items-start gap-3 rounded-xl border-l-4 p-3 text-left", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "ring-2 ring-destructive")}
+                        aria-label={t(`${entry.code} dersini programdan kaldır`, `Remove ${entry.code} from the schedule`)}
+                      >
+                        <span className="w-24 shrink-0 text-sm font-semibold tabular-nums">
+                          {String(entry.start).padStart(2, "0")}:40–{String(entry.start + entry.duration).padStart(2, "0")}:40
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}</span>
+                          <span className="mt-0.5 block text-xs leading-snug opacity-85">{localizedCourseName(entry.name, locale)}</span>
+                          <span className="mt-1 block text-xs opacity-75">{entry.room?.trim() || (entry.kind === "course" ? "TBA" : "—")}{entry.instructor ? ` · ${entry.instructor}` : ""}</span>
+                        </span>
+                      </button>
+                    )) : <p className="rounded-xl border border-dashed p-5 text-center text-sm text-muted-foreground">{t(`${dayLabel(mobileDay)} günü ders yok.`, `No classes on ${dayLabel(mobileDay)}.`)}</p>}
+                  </div>
+                </div>
+                <div className="hidden overflow-auto sm:block xl:h-full">
+                  <div
                   className="grid min-w-[820px] grid-cols-[68px_repeat(5,minmax(130px,1fr))] border-t text-sm xl:h-full"
                   style={{ gridTemplateRows: `auto repeat(${hours.length}, minmax(${ROW_MIN_PX}px, 1fr))` }}
-                >
+                  >
                   {/* No bottom border: the 08:40 label sits on this line, and a
                       rule through the text is the thing being removed. Sticky
                       with the day names, or the corner slides under them. */}
@@ -1600,7 +1711,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                                   <span className="shrink-0 text-[11px] font-medium opacity-80">{entry.room?.trim() || "TBA"}</span>
                                 ) : null}
                               </span>
-                              <span className="mt-0.5 block truncate text-xs opacity-85">{entry.name}</span>
+                              <span className="mt-0.5 block truncate text-xs opacity-85">{localizedCourseName(entry.name, locale)}</span>
                             </button>
                             );
                           })}
@@ -1608,6 +1719,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                       );
                     }),
                   ])}
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -1630,7 +1742,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
               {favorites.length ? <Button variant="ghost" onClick={nextFavorite}>{t("Sonraki favori", "Next favorite")}</Button> : null}
             </div>
             <div data-tour="assistant"><PlannerAssistant /></div>
-          </main>
+          </section>
         </div>
       </div>
     </div>
@@ -1638,4 +1750,4 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1.5"><Label>{label}</Label>{children}</div>; }
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2"><Label className="leading-5">{label}</Label><Switch checked={checked} onCheckedChange={onChange} /></div>; }
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2"><Label className="leading-5">{label}</Label><Switch aria-label={label} checked={checked} onCheckedChange={onChange} /></div>; }
