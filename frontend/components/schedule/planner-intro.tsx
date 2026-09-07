@@ -46,8 +46,8 @@ export function PlannerIntro({ className }: { className?: string }) {
       target: "pool",
       title: t("3 · Şubeler ve kırmızı ünlem", "3 · Sections and the red warning"),
       body: t(
-        "Havuzdaki bir dersin üstüne tıkla: şubeleri hoca, gün, saat ve derslikle açılır. Kırmızı ünlem o şubeye kayıt olamayacağın demek — üstüne gelince hangi kısıta takıldığını söyler: bölüm, soyadı aralığı, sınıf ya da dersten aldığın not.",
-        "Click a course in the pool to open its sections with instructor, day, time and room. A red warning means you cannot register for that section — hover it to see which rule blocks you: department, surname range, year, or the grade you already hold.",
+        "Havuzdaki bir derse dokun: şubeleri hoca, gün, saat ve derslikle açılır. Kayıt olamayacağın bir şubede nedeni kırmızı kutunun içinde doğrudan görürsün.",
+        "Tap a course in the pool to open its sections with instructor, day, time and room. When you cannot register for a section, the reason appears directly in a red box.",
       ),
     },
     {
@@ -112,9 +112,11 @@ export function PlannerIntro({ className }: { className?: string }) {
     const node = document.querySelector('[data-tour="' + target + '"]');
     if (!node) return;
     node.classList.add(...HIGHLIGHT);
-    // "nearest" leaves a target that is already on screen exactly where it
-    // is, so stepping through does not yank the page under the reader.
-    node.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    // On phones the explanation is a fixed bottom sheet, so centering the
+    // target keeps it above that sheet. Larger screens keep nearby content in
+    // place and avoid unnecessary movement.
+    const narrow = window.matchMedia("(max-width: 639px)").matches;
+    node.scrollIntoView({ behavior: "smooth", block: narrow ? "center" : "nearest", inline: "nearest" });
   }, []);
 
   const currentTarget = steps[step]?.target ?? null;
@@ -149,17 +151,12 @@ export function PlannerIntro({ className }: { className?: string }) {
   }
 
   const current = steps[step];
-  // Plain document flow — never fixed, never sticky. Floating at the
-  // bottom-right it sat squarely on the timetable's afternoon slots and the
-  // export buttons, so the walkthrough explaining the grid was the thing
-  // stopping anyone from clicking it. Nothing on this screen is worth covering
-  // to save a student one scroll.
   return (
     <div
       role="region"
       aria-live="polite"
       aria-label={t("Program ekranı tanıtımı", "Planner walkthrough")}
-      className={cn("rounded-2xl border bg-muted/30 p-4", className)}
+      className={cn("fixed inset-x-3 bottom-3 z-50 max-h-[45svh] overflow-y-auto rounded-2xl border bg-background/95 p-4 shadow-2xl backdrop-blur sm:static sm:max-h-none sm:bg-muted/30 sm:shadow-none", className)}
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">

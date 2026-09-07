@@ -1710,6 +1710,8 @@ export interface components {
         CurriculumCourseOut: {
             /** Code */
             code: string;
+            /** Display Code */
+            display_code: string;
             /** Name */
             name: string;
             /** Credits */
