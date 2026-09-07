@@ -289,3 +289,31 @@ async def test_the_report_never_carries_a_url(sais, capsys):
     assert "sais_call" in line
     for secret in ("http", "pkg=", "hidden_creds", "CREDS", "token"):
         assert secret not in line, f"{secret!r} must never reach a shared log"
+
+
+def _curriculum_box(number, checked, code="2300213", grade=""):
+    mark = '<img src="img/check.gif">' if checked else ''
+    assigned = f'<div id="0000000|1|1|{code}|1|25|{grade}|PHYS 213|0">PHYS 213 MUST COURSE {grade}</div>' if grade else ''
+    return f'''<div class="box-table-curriculum">
+      <div class="box-table-head-curriculum"><div class="box-column-label-curriculum">{number}.SEMESTER</div>{mark}</div>
+      <div class="box-row-curriculum"><div class="box-column-label-curriculum">PHYS 213</div>
+      <div class="box-column-value-curriculum"><div id="0000000|1|1|{number}|{code}|1|PHYS 213">{assigned}</div></div></div>
+    </div>'''
+
+def test_real_curriculum_dom_checkmarks_and_grade_cells(sais):
+    html = '<div id="curriculum">' + _curriculum_box(1, True, grade="BA") + _curriculum_box(3, False) + '</div>'
+    result = sais.parse_student_curriculum(html)
+    assert result["semesters"][0]["completed"] is True
+    assert result["semesters"][0]["courses"][0]["grade"] == "BA"
+    assert result["semesters"][1]["completed"] is False
+    assert result["semesters"][1]["courses"][0]["grade"] == ""
+    assert "0000000" not in str(result)
+
+def test_curriculum_parser_rejects_missing_board(sais):
+    with pytest.raises(ValueError):
+        sais.parse_student_curriculum('<form id="autologin"></form>')
+
+def test_curriculum_parser_does_not_read_other_tabs(sais):
+    html = '<div id="studentTranscript">' + _curriculum_box(1, False) + '</div>'
+    html += '<div id="curriculum">' + _curriculum_box(3, False) + '</div>'
+    assert [s["semester"] for s in sais.parse_student_curriculum(html)["semesters"]] == [3]

@@ -118,16 +118,17 @@ async def test_the_second_student_is_served_the_first_student_answer(monkeypatch
     assert len({key for key, _ in layers.writes}) == 1
 
 
-async def test_a_student_scoped_answer_never_reaches_the_persistent_layer(monkeypatch):
+@pytest.mark.parametrize("tool", ["get_student_course_categories", "get_student_curriculum"])
+async def test_a_student_scoped_answer_never_reaches_the_persistent_layer(monkeypatch, tool):
     """No shared TTL means no persistent traffic at all, not a private row."""
     layers = _Layers({"course_categories": [{"id": "1-236"}]}).install(monkeypatch)
 
-    await course_info.call_course_info(None, uuid.uuid4(), "get_student_course_categories", {})
+    await course_info.call_course_info(None, uuid.uuid4(), tool, {})
     assert layers.reads == []
     assert layers.writes == []
 
     # Nor may one student's curriculum be answered from another's memory entry.
-    await course_info.call_course_info(None, uuid.uuid4(), "get_student_course_categories", {})
+    await course_info.call_course_info(None, uuid.uuid4(), tool, {})
     assert layers.campus_calls == 2
 
 

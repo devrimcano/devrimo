@@ -505,7 +505,8 @@ export interface paths {
          * Curriculum Plan
          * @description The courses this student still has to take, offered this term.
          *
-         *     Read from their own curriculum listing and this term's department catalogs.
+         *     Read from the first unchecked semester in the SAIS Curriculum tab.
+         *     Only courses with a blank grade are considered, then verified as offered.
          *     This used to be an agent run: a median of 95.8 seconds in production, of
          *     which about 88 were model round trips between tool calls that themselves
          *     took eight. Matching a code list against a department listing is not a
@@ -1820,6 +1821,32 @@ export interface components {
             /** Runs */
             runs: components["schemas"]["RunView"][];
         };
+        /** CurriculumCourseOut */
+        CurriculumCourseOut: {
+            /** Code */
+            code: string;
+            /** Name */
+            name: string;
+            /** Credits */
+            credits: number;
+            /** Sections */
+            sections?: unknown[];
+        };
+        /** CurriculumPlanResponse */
+        CurriculumPlanResponse: {
+            /** Courses */
+            courses?: components["schemas"]["CurriculumCourseOut"][];
+            /** Warnings */
+            warnings?: string[];
+            /** Prerequisite Rejections */
+            prerequisite_rejections?: components["schemas"]["PrerequisiteRejectionOut"][];
+            /** Source */
+            source: string;
+            /** Cache Hit */
+            cache_hit: boolean;
+            /** Duration Ms */
+            duration_ms: number;
+        };
         /** DeleteUserIn */
         DeleteUserIn: {
             /** Reason */
@@ -2020,6 +2047,17 @@ export interface components {
             value: {
                 [key: string]: unknown;
             };
+        };
+        /** PrerequisiteRejectionOut */
+        PrerequisiteRejectionOut: {
+            /** Course Code */
+            course_code: string;
+            /** Course Label */
+            course_label: string;
+            /** Prerequisite Course Codes */
+            prerequisite_course_codes: string[];
+            /** Prerequisite Course Labels */
+            prerequisite_course_labels: string[];
         };
         /**
          * ProfileIn
@@ -3158,7 +3196,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CurriculumPlanResponse"];
                 };
             };
             /** @description Validation Error */
@@ -3191,7 +3229,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CurriculumPlanResponse"];
                 };
             };
             /** @description Validation Error */

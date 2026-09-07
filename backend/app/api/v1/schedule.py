@@ -22,9 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
-from app.campus import curriculum, departments
-from app.campus.warmer import record_wanted_courses
-from app.campus.eligibility import course_candidates, evaluate, prior_grade
+from app.campus import curriculum, departments, prerequisites
 from app.campus.course_info import (
     CatalogSession,
     call_course_info,
@@ -36,6 +34,8 @@ from app.campus.course_info import (
     resolve_department,
     section_numbers,
 )
+from app.campus.eligibility import course_candidates, evaluate, prior_grade
+from app.campus.warmer import record_wanted_courses
 from app.core.digest import owner_digest, stable_digest
 from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
@@ -73,7 +73,27 @@ class AiScheduleRequest(BaseModel):
     courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
 
 
+class PrerequisiteRejectionOut(BaseModel):
+    course_code: str
+    course_label: str
+    prerequisite_course_codes: list[str]
+    prerequisite_course_labels: list[str]
 
+
+class CurriculumCourseOut(BaseModel):
+    code: str
+    name: str
+    credits: float
+    sections: list[Any] = Field(default_factory=list)
+
+
+class CurriculumPlanResponse(BaseModel):
+    courses: list[CurriculumCourseOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    prerequisite_rejections: list[PrerequisiteRejectionOut] = Field(default_factory=list)
+    source: str
+    cache_hit: bool
+    duration_ms: int
 
 async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
     """The department to plan against: what the client sent, else what SAIS said.
@@ -816,7 +836,7 @@ def _constraint_rows(payload: Any) -> list[dict[str, Any]]:
 _CURRICULUM_NAMESPACE = "schedule-curriculum"
 # Bumped when the shape of a stored answer changes, so a deploy cannot spend six
 # hours serving results built by the previous version of this code.
-_CURRICULUM_VERSION = 1
+_CURRICULUM_VERSION = 4
 
 
 def _curriculum_cache_key(
@@ -843,35 +863,15 @@ def _curriculum_year(value: Any) -> int:
 async def _category_rows(
     db: AsyncSession, user: AuthenticatedUser, catalog: CatalogSession, department: str
 ) -> tuple[list[dict], list[str]]:
-    """The student's curriculum rows, and anything SAIS said instead of rows."""
-    overview = await call_course_info(
-        db, user.id, "get_student_course_categories", {}, session=catalog
+    """Ungraded courses in the first unchecked SAIS curriculum semester."""
+    board = await call_course_info(
+        db, user.id, "get_student_curriculum", {}, session=catalog
     )
-    program_type, categories = curriculum.select_program(overview, department)
-    rows: list[dict] = []
-    warnings: list[str] = []
-    for rank, category in enumerate(categories):
-        category_id = str(category.get("id") or "").strip()
-        if not category_id:
-            continue
-        values = {"category": category_id}
-        if program_type:
-            values["program_type"] = program_type
-        result = await call_course_info(
-            db, user.id, "get_student_courses_by_category", values, session=catalog
-        )
-        if not isinstance(result, dict):
-            continue
-        # SAIS answers an empty category with prose rather than an empty table.
-        # Surfacing it is the difference between "you have no electives left"
-        # and "we could not read your electives".
-        message = result.get("message")
-        if isinstance(message, str) and message.strip() and not result.get("courses"):
-            warnings.append(f"{category.get('name') or category_id}: {message.strip()}")
-        for row in result.get("courses") or []:
-            if isinstance(row, dict):
-                rows.append({**row, "_rank": rank})
-    return rows, warnings
+    try:
+        rows = curriculum.next_semester_courses(board)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return [{**row, "_rank": index} for index, row in enumerate(rows)], []
 
 
 async def _offered_courses(
@@ -938,7 +938,7 @@ async def _curriculum_courses(
     department: str,
     semester: str,
     completed: list[dict],
-) -> tuple[list[dict], list[str]]:
+) -> tuple[list[dict], list[str], list[dict]]:
     rows, warnings = await _category_rows(db, user, catalog, department)
 
     candidates: dict[str, dict] = {}
@@ -948,8 +948,6 @@ async def _curriculum_courses(
             label = " ".join(str(row.get("course_code") or "").split())
             if label:
                 warnings.append(f"{label}: this code names no department we know, so it was left out.")
-            continue
-        if not curriculum.still_needed(code, completed):
             continue
         candidates.setdefault(
             code,
@@ -971,24 +969,30 @@ async def _curriculum_courses(
     )
     warnings.extend(variant_warnings)
     kept.sort(key=lambda course: (course["_year"], course["_rank"], course["code"]))
+    approved, prerequisite_rejections, prerequisite_warnings = await prerequisites.filter_courses(
+        db, user.id, catalog, semester, kept, completed
+    )
+    warnings.extend(prerequisite_warnings)
     return (
         [
             {key: value for key, value in course.items() if not key.startswith("_")}
-            for course in kept[: curriculum.MAX_COURSES]
+            for course in approved[: curriculum.MAX_COURSES]
         ],
         warnings,
+        [rejection.as_dict() for rejection in prerequisite_rejections],
     )
 
 
-@router.post("/curriculum")
+@router.post("/curriculum", response_model=CurriculumPlanResponse)
 async def curriculum_plan(
     body: AiScheduleRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-):
+) -> dict[str, Any]:
     """The courses this student still has to take, offered this term.
 
-    Read from their own curriculum listing and this term's department catalogs.
+    Read from the first unchecked semester in the SAIS Curriculum tab.
+    Only courses with a blank grade are considered, then verified as offered.
     This used to be an agent run: a median of 95.8 seconds in production, of
     which about 88 were model round trips between tool calls that themselves
     took eight. Matching a code list against a department listing is not a
@@ -1018,7 +1022,7 @@ async def curriculum_plan(
     completed = list(snapshot.completed_courses) if snapshot else []
     try:
         async with catalog_session(db, user.id) as catalog:
-            courses, warnings = await _curriculum_courses(
+            courses, warnings, prerequisite_rejections = await _curriculum_courses(
                 db, user, catalog, department, body.semester.strip(), completed
             )
     except HTTPException as exc:
@@ -1029,7 +1033,8 @@ async def curriculum_plan(
         return {
             "courses": [],
             "warnings": [f"Your curriculum could not be read from METU: {exc.detail}"],
-            "source": "curriculum",
+            "prerequisite_rejections": [],
+            "source": "sais_curriculum",
             "cache_hit": False,
             "duration_ms": round((time.monotonic() - started_at) * 1000),
         }
@@ -1037,7 +1042,8 @@ async def curriculum_plan(
     response = {
         "courses": courses,
         "warnings": warnings,
-        "source": "curriculum",
+        "prerequisite_rejections": prerequisite_rejections,
+        "source": "sais_curriculum",
         "cache_hit": False,
         "duration_ms": round((time.monotonic() - started_at) * 1000),
     }
@@ -1057,12 +1063,12 @@ async def curriculum_plan(
     return response
 
 
-@router.post("/ai-plan")
+@router.post("/ai-plan", response_model=CurriculumPlanResponse)
 async def ai_schedule_plan(
     body: AiScheduleRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-):
+) -> dict[str, Any]:
     """The previous name for :func:`curriculum_plan`.
 
     Kept for one release. A browser holding a cached bundle still calls this
@@ -1070,5 +1076,3 @@ async def ai_schedule_plan(
     breaks every tab that was already open.
     """
     return await curriculum_plan(body, user, db)
-
-
