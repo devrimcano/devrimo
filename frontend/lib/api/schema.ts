@@ -1808,19 +1808,6 @@ export interface components {
             /** Campus */
             campus?: string | null;
         };
-        /** DashboardView */
-        DashboardView: {
-            /** Researchers */
-            researchers: number;
-            /** Sections */
-            sections: number;
-            /** Busy */
-            busy: boolean;
-            /** Proxy Enabled */
-            proxy_enabled: boolean;
-            /** Runs */
-            runs: components["schemas"]["RunView"][];
-        };
         /** CurriculumCourseOut */
         CurriculumCourseOut: {
             /** Code */
@@ -1846,6 +1833,19 @@ export interface components {
             cache_hit: boolean;
             /** Duration Ms */
             duration_ms: number;
+        };
+        /** DashboardView */
+        DashboardView: {
+            /** Researchers */
+            researchers: number;
+            /** Sections */
+            sections: number;
+            /** Busy */
+            busy: boolean;
+            /** Proxy Enabled */
+            proxy_enabled: boolean;
+            /** Runs */
+            runs: components["schemas"]["RunView"][];
         };
         /** DeleteUserIn */
         DeleteUserIn: {
