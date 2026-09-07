@@ -11,6 +11,8 @@ between the planning bridge and the schedule endpoints.
 import json
 from typing import Any
 
+_RESULT_WRAPPERS = frozenset({"result", "data", "content", "output", "payload", "response"})
+
 
 def mcp_payload(result: Any) -> Any:
     """Return the payload an MCP tool result carries, preferring typed output."""
@@ -21,22 +23,25 @@ def mcp_payload(result: Any) -> Any:
     return _unwrap_content(getattr(result, "content", result))
 
 
-def _unwrap_envelope(value: Any) -> Any:
-    """Unwrap a single-key wrapper whose only value is a JSON document.
+def _unwrap_envelope(value: Any, depth: int = 0) -> Any:
+    """Unwrap nested single-key MCP result envelopes.
 
-    FastMCP wraps a tool that returns a *string* in a one-key envelope
-    ("result"), and for these servers that string is itself the document. The
-    wrapper arrives on the typed ``structured_content`` path as readily as on
-    the text path, so both have to unwrap it -- reading the structured payload
-    and stopping there is what left the SAIS student profile looking empty
-    when every field was in fact right there, one parse down.
+    FastMCP wraps a tool result in a one-key envelope, and some Agno/FastMCP
+    combinations add that envelope twice. Keep peeling known wrapper keys until
+    the actual document is reached. Plain text stays inside its wrapper so
+    callers can distinguish an error message from a structured answer.
     """
-    if isinstance(value, dict) and len(value) == 1:
-        only = next(iter(value.values()))
-        if isinstance(only, str):
-            parsed = parse_json_document(only)
-            if not isinstance(parsed, str):
-                return parsed
+    if depth > 4 or not isinstance(value, dict) or len(value) != 1:
+        return value
+    key, only = next(iter(value.items()))
+    if str(key).strip().lower() not in _RESULT_WRAPPERS:
+        return value
+    if isinstance(only, (dict, list)):
+        return _unwrap_envelope(only, depth + 1)
+    if isinstance(only, str):
+        parsed = parse_json_document(only)
+        if not isinstance(parsed, str):
+            return _unwrap_envelope(parsed, depth + 1)
     return value
 
 

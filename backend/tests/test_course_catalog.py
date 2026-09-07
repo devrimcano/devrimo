@@ -52,6 +52,11 @@ def test_single_key_envelope_is_unwrapped_on_the_structured_path():
     assert mcp_payload(result) == {"Program Code / Name": "236/Mathematics", "Program Type": "MAJOR"}
 
 
+def test_nested_structured_envelopes_are_unwrapped():
+    result = _Result(structured={"result": {"result": '{"semesters": []}'}})
+    assert mcp_payload(result) == {"semesters": []}
+
+
 def test_a_single_key_envelope_holding_plain_text_is_left_alone():
     result = _Result(structured={"result": "no courses found"})
     assert mcp_payload(result) == {"result": "no courses found"}
