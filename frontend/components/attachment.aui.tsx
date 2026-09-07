@@ -36,6 +36,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
 import { useAttachmentSrc } from "@/hooks/use-attachment-src";
 import { cn } from "@/lib/utils";
+import { useLocale } from "@/components/locale-provider";
 
 type AttachmentPreviewProps = {
   src: string;
@@ -211,11 +212,13 @@ const AttachmentUI: FC = () => {
 };
 
 const AttachmentRemove: FC = () => {
+  const { pick } = useLocale();
   return (
     <AttachmentPrimitive.Remove
       render={
         <TooltipIconButton
-          tooltip="Remove file"
+          tooltip={pick({ tr: "Dosyayı kaldır", en: "Remove file" })}
+          aria-label={pick({ tr: "Dosyayı kaldır", en: "Remove file" })}
           className="aui-attachment-tile-remove absolute end-1 top-1 size-5 rounded-full bg-black/50! text-white after:absolute after:-inset-1.5 hover:bg-black/70! hover:text-white! active:scale-[0.96] motion-reduce:transition-none"
           side="top"
         />
@@ -247,16 +250,17 @@ export const ComposerAttachments: FC = () => {
 };
 
 export const ComposerAddAttachment: FC = () => {
+  const { pick } = useLocale();
   return (
     <ComposerPrimitive.AddAttachment
       render={
         <TooltipIconButton
-          tooltip="Add Attachment"
+          tooltip={pick({ tr: "Dosya ekle", en: "Add attachment" })}
           side="bottom"
           variant="ghost"
           size="icon"
           className="aui-composer-add-attachment text-muted-foreground hover:text-foreground hover:bg-muted-foreground/15 dark:border-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-7 rounded-full active:scale-[0.96] motion-reduce:transition-none"
-          aria-label="Add Attachment"
+          aria-label={pick({ tr: "Dosya ekle", en: "Add attachment" })}
         />
       }
     >

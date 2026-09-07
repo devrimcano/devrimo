@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { jsonFetch } from "@/lib/api/fetcher";
 import { formatUpdateCategory, formatUpdateSource } from "@/lib/campus";
 import type { CampusUpdates } from "@/lib/types";
@@ -35,21 +36,20 @@ const suggestions = {
 export function MetuWelcome() {
   const { pick } = useLocale();
   return (
-    <div className="relative mx-auto mb-7 flex max-w-2xl flex-col items-center px-4 text-center">
-      <div className="motion-enter mb-4 inline-flex items-center gap-2 rounded-full border border-primary/15 bg-primary/[0.045] px-3 py-1.5 text-xs font-medium text-primary">
-        <ShieldCheckIcon className="size-3.5" />
-        {pick({ tr: "Kişisel, kontrollü ve sana özel", en: "Personal, controlled, and private to you" })}
-      </div>
-      <h1 className="motion-enter text-3xl font-semibold tracking-[-0.045em] sm:text-4xl [animation-delay:45ms]">
+    <div className="relative mx-auto mb-5 flex max-w-2xl flex-col items-center px-3 pt-5 text-center sm:mb-7 sm:px-4 sm:pt-0">
+      <h1 className="motion-enter text-balance text-[2rem] leading-[1.08] font-semibold tracking-[-0.035em] sm:text-4xl">
         {pick({ tr: "Bugün neyi kolaylaştıralım?", en: "What should we make easier today?" })}
       </h1>
-      <p className="motion-enter mt-3 max-w-xl text-sm leading-6 text-muted-foreground [animation-delay:90ms]">
+      <p className="motion-enter mt-3 max-w-xl text-sm leading-6 text-muted-foreground [animation-delay:55ms]">
         {pick({
-          tr: "Ders planlama, akademik tarihler ve kampüs yaşamı için yardım al. ODTÜClass ve e-posta bilgileri yalnızca Ayarlar'da izin verdiğinde kullanılır.",
-          en: "Get help with course planning, academic dates, and campus life. ODTÜClass and email information are used only when you allow them in Settings.",
+          tr: "Ders programını düzenle, yaklaşan tarihleri yakala ve kampüs yaşamını tek sohbetten planla.",
+          en: "Arrange your schedule, catch upcoming dates, and plan campus life in one conversation.",
         })}
       </p>
-      <CampusDigest />
+      <p className="motion-enter mt-2 flex items-center justify-center gap-1.5 text-xs leading-5 text-muted-foreground [animation-delay:90ms]">
+        <ShieldCheckIcon className="size-3.5 shrink-0 text-primary" />
+        {pick({ tr: "ODTÜClass ve e-posta yalnızca izin verdiğinde kullanılır.", en: "ODTÜClass and email are used only with your permission." })}
+      </p>
     </div>
   );
 }
@@ -57,8 +57,9 @@ export function MetuWelcome() {
 function CampusDigest() {
   const { locale, pick } = useLocale();
   const query = useQuery({ queryKey: ["student", "updates", "digest"], queryFn: () => jsonFetch<CampusUpdates>("/api/student/updates?digest=true&limit=3"), staleTime: 5 * 60_000 });
+  if (query.isLoading) return <section className="mt-6 w-full border-t pt-5" aria-label={pick({ tr: "Kampüs özeti yükleniyor", en: "Loading campus digest" })}><div className="mb-3 flex items-center justify-between"><Skeleton className="h-4 w-36" /><Skeleton className="h-4 w-24" /></div><div className="grid gap-3 sm:grid-cols-3"><Skeleton className="h-24 rounded-xl" /><Skeleton className="hidden h-24 rounded-xl sm:block" /><Skeleton className="hidden h-24 rounded-xl sm:block" /></div></section>;
   if (!query.data?.items.length) return null;
-  return <section className="motion-enter mt-5 w-full rounded-2xl border bg-card/75 p-3 text-left shadow-sm [animation-delay:130ms]" aria-label={pick({ tr: "Kampüs özeti", en: "Campus digest" })}><div className="mb-2 flex items-center justify-between gap-3"><p className="flex items-center gap-2 text-sm font-semibold"><SparklesIcon className="size-4 text-primary" />{pick({ tr: "Senin için kampüs özeti", en: "Your campus digest" })}</p><Link href="/updates" className="text-xs font-medium text-primary hover:underline">{pick({ tr: "Tüm güncellemeler", en: "All updates" })}</Link></div><div className="grid gap-2 sm:grid-cols-3">{query.data.items.slice(0, 3).map((item) => <Link key={item.id} href={item.url || "/updates"} className="rounded-xl border bg-background/65 p-3 transition-colors hover:border-primary/25 hover:bg-background"><div className="mb-1 flex items-center gap-2"><Badge variant="outline" className="text-[10px]">{formatUpdateCategory(item.type, locale)}</Badge></div><p className="line-clamp-2 text-sm font-medium leading-5">{item.title}</p><p className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">{formatUpdateSource(item.source)}</p></Link>)}</div></section>;
+  return <section className="motion-enter mt-6 w-full border-t pt-5 text-left [animation-delay:160ms]" aria-label={pick({ tr: "Kampüs özeti", en: "Campus digest" })}><div className="mb-3 flex items-center justify-between gap-3"><p className="flex items-center gap-2 text-sm font-semibold"><SparklesIcon className="size-4 text-primary" />{pick({ tr: "Kampüsten son gelişmeler", en: "Latest from campus" })}</p><Link href="/updates" className="rounded-md text-xs font-medium text-primary underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">{pick({ tr: "Tümünü gör", en: "View all" })}</Link></div><div className="grid auto-cols-[minmax(15rem,82vw)] grid-flow-col gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid-flow-row sm:grid-cols-3 sm:overflow-visible">{query.data.items.slice(0, 3).map((item) => <Link key={item.id} href={item.url || "/updates"} className="group rounded-xl border border-border/75 bg-card/55 p-3 transition-[border-color,background-color,transform] hover:-translate-y-0.5 hover:border-primary/25 hover:bg-card focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"><Badge variant="outline" className="mb-2 text-[10px]">{formatUpdateCategory(item.type, locale)}</Badge><p className="line-clamp-2 text-sm font-medium leading-5 group-hover:text-primary">{item.title}</p><p className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">{formatUpdateSource(item.source)}</p></Link>)}</div></section>;
 }
 
 export function MetuStarterPrompts() {
@@ -66,15 +67,16 @@ export function MetuStarterPrompts() {
   const { locale, pick } = useLocale();
 
   return (
-    <section aria-label={pick({ tr: "Örnek sorular", en: "Example questions" })} className="w-full pb-1">
-      <p className="mb-2 px-1 text-xs font-medium text-muted-foreground">{pick({ tr: "Bir örnekle başla", en: "Start with an example" })}</p>
-      <div className="grid w-full gap-2 sm:grid-cols-2">
+    <div className="w-full pb-1">
+      <section aria-label={pick({ tr: "Örnek sorular", en: "Example questions" })}>
+      <p className="mb-2 px-1 text-xs font-medium text-muted-foreground">{pick({ tr: "Hızlı başlangıç", en: "Quick start" })}</p>
+      <div className="grid w-full auto-cols-[minmax(16rem,84vw)] grid-flow-col gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid-flow-row sm:grid-cols-2 sm:overflow-visible">
         {suggestions[locale].map(({ label, prompt, icon: Icon }, index) => (
           <button
             key={prompt}
             type="button"
             disabled={isDisabled}
-            className="motion-enter group flex min-h-[4.5rem] items-start gap-3 rounded-xl border border-border/70 bg-card/80 p-3 text-left shadow-[0_8px_26px_rgb(70_48_35/5%)] transition-[transform,border-color,background-color,box-shadow] hover:-translate-y-0.5 hover:border-primary/25 hover:bg-card hover:shadow-[0_12px_30px_rgb(215_24_63/8%)] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+            className="motion-enter group flex min-h-[4.25rem] items-start gap-3 rounded-xl border border-border/70 bg-card/70 p-3 text-left transition-[transform,border-color,background-color] hover:-translate-y-0.5 hover:border-primary/25 hover:bg-card focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
             style={{ animationDelay: `${180 + index * 45}ms` }}
             onClick={() => { setText(prompt); send(); }}
           >
@@ -86,6 +88,8 @@ export function MetuStarterPrompts() {
           </button>
         ))}
       </div>
-    </section>
+      </section>
+      <CampusDigest />
+    </div>
   );
 }

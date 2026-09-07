@@ -45,6 +45,10 @@ export function formatUpdateCategory(type: string, locale: "tr" | "en" = "tr"): 
     event: { tr: "Etkinlik", en: "Event" },
     news: { tr: "Haber", en: "News" },
     mail_fact: { tr: "E-posta", en: "Email" },
+    service_status: { tr: "Hizmet Bilgisi", en: "Service Status" },
+    servicestatus: { tr: "Hizmet Bilgisi", en: "Service Status" },
+    working_hours: { tr: "Çalışma Saatleri", en: "Opening Hours" },
+    workinghours: { tr: "Çalışma Saatleri", en: "Opening Hours" },
   };
   return labels[normalized]?.[locale] ?? type.replaceAll("_", " ");
 }
