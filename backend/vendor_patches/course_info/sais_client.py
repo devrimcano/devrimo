@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
@@ -79,6 +80,59 @@ def clean_text(text: Optional[str]) -> str:
             except (UnicodeEncodeError, UnicodeDecodeError):
                 pass
     return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_student_curriculum(html: str) -> dict:
+    """Read the actual Student Information curriculum board (SAIS App 61).
+
+    Only course identities, grades and completion markers leave this parser;
+    student identifiers embedded in DOM ids and the student card are discarded.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    semesters = {}
+    for box in soup.select("#curriculum .box-table-curriculum"):
+        head = box.select_one(".box-table-head-curriculum")
+        if head is None:
+            continue
+        label = head.select_one(".box-column-label-curriculum")
+        match = re.fullmatch(r"\s*(\d+)\s*\.\s*(?:SEMESTER|YARIYIL|DÖNEM)\s*", label.get_text() if label else "", re.I)
+        if not match:
+            continue
+        number = int(match.group(1))
+        completed = any(urljoin("https://example.invalid/", img.get("src", "")).split("?")[0].endswith("/check.gif") for img in head.select("img"))
+        courses = []
+        for row in box.select(".box-row-curriculum"):
+            name = row.select_one(".box-column-label-curriculum")
+            value = row.select_one(".box-column-value-curriculum")
+            if name is None or value is None:
+                raise ValueError("SAIS curriculum row is missing its course or grade cell")
+            label_text = clean_text(name.get_text(" ", strip=True))
+            # Elective slots have a category label, not a named required course.
+            if not re.fullmatch(r"[A-Z]{2,6}\s*\d{3,4}", label_text, re.I):
+                continue
+            container = value.find(attrs={"id": True}, recursive=False)
+            fields = str(container.get("id", "") if container else "").split("|")
+            if len(fields) != 7 or not re.fullmatch(r"\d{7}", fields[4]):
+                raise ValueError("SAIS curriculum course identity could not be read")
+            grade = ""
+            for assigned in container.find_all(attrs={"id": True}):
+                parts = assigned["id"].split("|")
+                if len(parts) == 9:
+                    grade = clean_text(parts[6])
+                    if grade:
+                        break
+            # Nonempty assigned content without a readable grade is not a blank
+            # requirement. Fail rather than silently recommend it again.
+            if value.get_text(strip=True) and not grade:
+                raise ValueError("SAIS curriculum assigned course grade could not be read")
+            courses.append({"course_code": fields[4], "course_name": label_text, "grade": grade})
+        semester = {"semester": number, "completed": completed, "courses": courses}
+        if number in semesters and semesters[number] != semester:
+            raise ValueError("SAIS returned conflicting curriculum boards")
+        semesters[number] = semester
+    if not semesters:
+        raise ValueError("SAIS Student Information curriculum board could not be read")
+    return {"semesters": [semesters[n] for n in sorted(semesters)]}
 
 
 class SAISAuthError(Exception):
@@ -300,6 +354,26 @@ class SAISClient:
     # =========================================================================
     # Service 64: View Program Course Details
     # =========================================================================
+
+    async def get_student_curriculum(self) -> dict:
+        """Fetch the Student Information page and parse its Curriculum tab."""
+        # This form advances the page; never reuse a saved pre-submit form.
+        self._session = None
+        url, _, landing = await self._open_app_proxy_session(61)
+        selector = landing.find("select", attrs={"name": "text_semester_programtype"})
+        form = selector.find_parent("form") if selector else None
+        if form is None:
+            raise ValueError("SAIS Student Information semester form was not found")
+        options = [option for option in selector.find_all("option") if option.get("value", "").endswith("|1")]
+        if not options:
+            raise ValueError("SAIS main programme could not be selected")
+        selected = next((option for option in options if option.has_attr("selected")), options[0])
+        values = {item["name"]: item.get("value", "") for item in form.select('input[type="hidden"][name]')}
+        values["text_semester_programtype"] = selected["value"]
+        values["submit_studentInformation"] = "Submit"
+        response = await self._client.post(urljoin(url, form.get("action") or url), data=values)
+        response.raise_for_status()
+        return parse_student_curriculum(self._decode_html(response))
 
     async def get_departments_and_semesters(self) -> DepartmentAndSemesterList:
         """Fetch all available METU departments and semesters from Program Course Details (64)."""

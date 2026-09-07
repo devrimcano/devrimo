@@ -110,6 +110,7 @@ CAMPUS_TOOLS: tuple[CampusTool, ...] = (
             "get_thesis_courses",
             "get_student_course_categories",
             "get_student_courses_by_category",
+            "get_student_curriculum",
         ),
     ),
     CampusTool(
