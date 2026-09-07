@@ -26,7 +26,7 @@ from app.db.models import (
 from app.db.session import get_db
 from app.knowledge import registry
 from app.knowledge.embeddings import embedding_column, get_embedding_config
-from app.knowledge.retrieval import search_knowledge
+from app.knowledge.retrieval import SearchFilters, search_knowledge
 from app.knowledge.templates import DEFAULT_SOURCE_TEMPLATES
 from app.observability.client import report_exception
 
@@ -190,7 +190,9 @@ async def _source(db: AsyncSession, principal: AdminPrincipal, source_id: UUID) 
     return source
 
 
-def _source_out(source: CampusSource, revisions: int | None = None, records: int | None = None) -> dict:
+def _source_out(
+    source: CampusSource, revisions: int | None = None, records: int | None = None, drafts: int | None = None,
+) -> dict:
     return {
         "id": str(source.id),
         "name": source.name,
@@ -207,6 +209,7 @@ def _source_out(source: CampusSource, revisions: int | None = None, records: int
         "last_success_at": source.last_success_at,
         "last_error": source.last_error,
         "revisions": revisions,
+        "draft_revisions": drafts,
         "records": records,
     }
 
@@ -221,7 +224,8 @@ async def list_sources(
             select(
                 CampusSource,
                 func.count(func.distinct(CampusSourceRevision.id)),
-                func.count(func.distinct(CampusKnowledgeRecord.id)),
+                func.count(func.distinct(CampusKnowledgeRecord.id)).filter(CampusKnowledgeRecord.is_current.is_(True)),
+                func.count(func.distinct(CampusSourceRevision.id)).filter(CampusSourceRevision.published_at.is_(None)),
             )
             .outerjoin(CampusSourceRevision, CampusSourceRevision.source_id == CampusSource.id)
             .outerjoin(CampusKnowledgeRecord, CampusKnowledgeRecord.source_id == CampusSource.id)
@@ -230,7 +234,7 @@ async def list_sources(
             .order_by(CampusSource.name)
         )
     ).all()
-    return {"items": [_source_out(source, revisions, records) for source, revisions, records in rows]}
+    return {"items": [_source_out(source, revisions, records, drafts) for source, revisions, records, drafts in rows]}
 
 
 @router.get("/source-templates")
@@ -648,6 +652,9 @@ async def embedding_settings(
 async def debug_knowledge_search(
     q: str = Query(min_length=1, max_length=500),
     limit: int = Query(default=10, ge=1, le=25),
+    source_id: UUID | None = None,
+    language: Literal["tr", "en"] | None = None,
+    record_type: str | None = Query(default=None, max_length=50),
     principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_read)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -657,7 +664,11 @@ async def debug_knowledge_search(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A non-empty search query is required")
     organization_id = _org(principal)
     config = await get_embedding_config(db, organization_id)
-    results = await search_knowledge(db, query, organization_id=organization_id, limit=limit)
+    results = await search_knowledge(
+        db, query,
+        SearchFilters(source_id=source_id, language=language, record_types=(record_type,) if record_type else ()),
+        organization_id=organization_id, limit=limit,
+    )
     return {
         "query": query,
         "count": len(results),
@@ -777,6 +788,10 @@ async def reindex_embeddings(
 @router.get("/ingestion-jobs")
 async def ingestion_jobs(
     limit: int = Query(default=50, ge=1, le=200),
+    source_id: UUID | None = None,
+    offset: int = Query(default=0, ge=0),
+    source_name: str = Query(default="", max_length=300),
+    job_status: str | None = Query(default=None, max_length=50),
     principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_read)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -785,7 +800,11 @@ async def ingestion_jobs(
             select(CampusIngestionJob, CampusSource.name)
             .join(CampusSource, CampusSource.id == CampusIngestionJob.source_id)
             .where(CampusSource.organization_id == _org(principal))
-            .order_by(CampusIngestionJob.created_at.desc())
+            .where(CampusIngestionJob.source_id == source_id if source_id else True)
+            .where(func.lower(CampusSource.name).contains(source_name.lower(), autoescape=True))
+            .where(CampusIngestionJob.status == job_status if job_status else True)
+            .order_by(CampusIngestionJob.created_at.desc(), CampusIngestionJob.id.desc())
+            .offset(offset)
             .limit(limit)
         )
     ).all()
@@ -968,3 +987,47 @@ async def create_group(
         after={"group_id": str(group.id), "course_code": group.course_code},
     )
     return {"id": str(group.id), "course_code": group.course_code, "section": group.section or None}
+
+
+class GroupUpdateIn(BaseModel):
+    course_code: str = Field(min_length=2, max_length=32)
+    section: str | None = Field(default=None, max_length=16)
+    invite_url: str | None = Field(default=None, min_length=10, max_length=2000)
+    active: bool
+    valid_until: datetime | None = None
+
+    @field_validator("course_code")
+    @classmethod
+    def normalize_course(cls, value: str) -> str:
+        value = "".join(value.upper().split())
+        if len(value) < 2:
+            raise ValueError("A course code is required")
+        return value
+
+
+@router.put("/course-groups/{group_id}")
+async def update_group(
+    group_id: UUID,
+    body: GroupUpdateIn,
+    principal: AdminPrincipal = Depends(require(AdminPermission.groups_write)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    group = (await db.execute(select(CourseGroupLink).where(
+        CourseGroupLink.id == group_id,
+        CourseGroupLink.organization_id == _org(principal),
+    ))).scalar_one_or_none()
+    if group is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Course group not found")
+    group.course_code = body.course_code
+    group.section = body.section or ""
+    group.active = body.active
+    group.valid_until = body.valid_until
+    if body.invite_url is not None:
+        group.invite_url_enc = encrypt_secret(body.invite_url)
+    await db.commit()
+    await record_event(
+        db, actor_user_id=principal.user.id, organization_id=_org(principal),
+        action="course_group.update", result="success",
+        after={"group_id": str(group.id), "active": group.active},
+    )
+    return {"id": str(group.id), "active": group.active}

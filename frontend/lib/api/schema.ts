@@ -1358,6 +1358,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/course-groups/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Group */
+        put: operations["update_group_api_v1_admin_course_groups__group_id__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/researchers/dashboard": {
         parameters: {
             query?: never;
@@ -1873,6 +1890,19 @@ export interface components {
             course_code: string;
             /** Section */
             section?: string | null;
+        };
+        /** GroupUpdateIn */
+        GroupUpdateIn: {
+            /** Course Code */
+            course_code: string;
+            /** Section */
+            section?: string | null;
+            /** Invite Url */
+            invite_url?: string | null;
+            /** Active */
+            active: boolean;
+            /** Valid Until */
+            valid_until?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -4663,6 +4693,9 @@ export interface operations {
             query: {
                 q: string;
                 limit?: number;
+                source_id?: string | null;
+                language?: ("tr" | "en") | null;
+                record_type?: string | null;
             };
             header?: never;
             path?: never;
@@ -4718,6 +4751,10 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                source_id?: string | null;
+                offset?: number;
+                source_name?: string;
+                job_status?: string | null;
             };
             header?: never;
             path?: never;
@@ -4854,6 +4891,43 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_group_api_v1_admin_course_groups__group_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupUpdateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

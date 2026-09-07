@@ -144,6 +144,7 @@ export type KnowledgeSource = {
   last_success_at: string | null;
   last_error: string | null;
   revisions: number | null;
+  draft_revisions?: number | null;
   records: number | null;
 };
 

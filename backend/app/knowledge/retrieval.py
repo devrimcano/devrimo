@@ -39,6 +39,7 @@ FRESHNESS_WINDOW = timedelta(days=14)
 
 @dataclass(slots=True)
 class SearchFilters:
+    source_id: UUID | None = None
     record_types: tuple[str, ...] = ()
     language: str | None = None
     campus: str | None = None
@@ -93,6 +94,8 @@ def _conditions(filters: SearchFilters, organization_id: UUID, now: datetime) ->
         CampusSource.status == "published",
         CampusSource.enabled.is_(True),
     ]
+    if filters.source_id:
+        conditions.append(CampusSource.id == filters.source_id)
     if filters.record_types:
         conditions.append(CampusKnowledgeRecord.record_type.in_(filters.record_types))
     if filters.language:
