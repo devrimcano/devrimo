@@ -124,7 +124,7 @@ export function CampusConnectionCard() {
   }
 
   return (
-    <Card id="connection" className="surface-raised scroll-mt-24 border-0 ring-1 ring-foreground/8">
+    <Card id="connection" className="surface-raised scroll-mt-32 border-0 ring-1 ring-foreground/8 lg:scroll-mt-24">
       <CardHeader className="border-b bg-muted/20">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -177,7 +177,7 @@ export function CampusConnectionCard() {
               </div>
             </section>
 
-            <section id="privacy" aria-labelledby="privacy-heading" className="scroll-mt-24 space-y-3">
+            <section id="privacy" aria-labelledby="privacy-heading" className="scroll-mt-32 space-y-3 lg:scroll-mt-24">
               <div>
                 <h2 id="privacy-heading" className="text-sm font-semibold">{pick({ tr: "Veri erişimi", en: "Data access" })}</h2>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{pick({ tr: "Yalnızca kullanmak istediğin bilgi kaynaklarına izin ver. Bu seçimler istediğin zaman değiştirilebilir.", en: "Allow only the information sources you want to use. You can change these choices at any time." })}</p>
@@ -190,19 +190,19 @@ export function CampusConnectionCard() {
                     <p className="text-sm font-semibold">{pick({ tr: "Ders programı ve akademik kayıt", en: "Schedule and academic record" })}</p>
                     <Badge variant="secondary" className="text-[10px]">{pick({ tr: "Bağlantıya dahil", en: "Included" })}</Badge>
                   </div>
-                  <p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Program, transkript, not ortalaması ve ders kataloğu bilgileri kullanılır.", en: "Uses schedule, transcript, GPA, and course-catalog information." })}</p>
+              <p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Program, transkript ve ders kataloğu bilgileri.", en: "Schedule, transcript, and course catalog information." })}</p>
                 </div>
               </div>
 
-              <DataAccessChoice id="allow-odtuclass" icon={GraduationCapIcon} title="ODTÜClass" description={pick({ tr: "Kayıtlı dersler, duyurular, izlenceler ve yaklaşan teslim tarihleri.", en: "Enrolled courses, announcements, syllabi, and upcoming deadlines." })} detail={pick({ tr: "Yalnızca izin verdiğinde ODTÜClass bilgilerin kullanılır.", en: "ODTÜClass information is accessed only when enabled." })} checked={privacy.odtuclass} disabled={busy} optionalLabel={pick({ tr: "İsteğe bağlı", en: "Optional" })} onCheckedChange={(checked) => setPrivacyDraft({ ...privacy, odtuclass: checked })} />
+              <DataAccessChoice id="allow-odtuclass" icon={GraduationCapIcon} title="ODTÜClass" description={pick({ tr: "Derslerin, duyuruların ve yaklaşan teslim tarihlerin.", en: "Your courses, announcements, and upcoming deadlines." })} detail={pick({ tr: "Yalnızca izin verdiğinde ODTÜClass bilgilerin kullanılır.", en: "ODTÜClass information is accessed only when enabled." })} checked={privacy.odtuclass} disabled={busy} optionalLabel={pick({ tr: "İsteğe bağlı", en: "Optional" })} onCheckedChange={(checked) => setPrivacyDraft({ ...privacy, odtuclass: checked })} />
 
-              <DataAccessChoice id="allow-webmail" icon={MailIcon} title={pick({ tr: "ODTÜ e-postası", en: "METU email" })} description={pick({ tr: "E-postaları okuma ve arama; ileti gönderme veya yanıtlama.", en: "Read and search email; send or reply to messages." })} detail={pick({ tr: "E-posta göndermeden veya yanıtlamadan önce her zaman onayını ister.", en: "Always asks for your confirmation before sending or replying to an email." })} checked={privacy.webmail} disabled={busy} optionalLabel={pick({ tr: "İsteğe bağlı", en: "Optional" })} onCheckedChange={(checked) => setPrivacyDraft({ ...privacy, webmail: checked })} />
+              <DataAccessChoice id="allow-webmail" icon={MailIcon} title={pick({ tr: "ODTÜ e-postası", en: "METU email" })} description={pick({ tr: "E-postalarını okuma ve arama.", en: "Read and search your email." })} detail={pick({ tr: "Göndermeden veya yanıtlamadan önce her zaman onayını ister.", en: "Always asks for your confirmation before sending or replying." })} checked={privacy.webmail} disabled={busy} optionalLabel={pick({ tr: "İsteğe bağlı", en: "Optional" })} onCheckedChange={(checked) => setPrivacyDraft({ ...privacy, webmail: checked })} />
             </section>
 
             <div className="flex flex-wrap items-center gap-2 border-t pt-5">
-              <Button disabled={busy || (Boolean(connection?.connected) && !password && !privacyDirty && !usernameDirty)} onClick={() => void save()}>
+              <Button className="disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100" disabled={busy || (Boolean(connection?.connected) && !password && !privacyDirty && !usernameDirty)} onClick={() => void save()}>
                 {busy ? <Loader2Icon className="animate-spin" /> : null}
-                {connection?.connected ? pick({ tr: "Değişiklikleri kaydet", en: "Save changes" }) : pick({ tr: "Hesabı bağla", en: "Connect account" })}
+                {connection?.connected ? pick({ tr: "ODTÜ bağlantısını kaydet", en: "Save METU connection" }) : pick({ tr: "Hesabı bağla", en: "Connect account" })}
               </Button>
 
               {connection?.connected ? (
