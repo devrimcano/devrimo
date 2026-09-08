@@ -11,9 +11,12 @@ assert.ok(functionSource, "retry classification function is present");
 const compiled = ts.transpileModule(functionSource, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const module = { exports: {} };
-new Function("module", "exports", compiled)(module, module.exports);
-const { isRetryablePlanningFailure } = module.exports;
+// Named anything but `module`: Next's lint rule reserves that identifier, and
+// the compiled CommonJS output only cares what it is passed, not what the
+// binding here is called.
+const sandbox = { exports: {} };
+new Function("module", "exports", compiled)(sandbox, sandbox.exports);
+const { isRetryablePlanningFailure } = sandbox.exports;
 
 test("validation failure does not lock later schedule edits", () => {
   assert.equal(isRetryablePlanningFailure(422), false);
