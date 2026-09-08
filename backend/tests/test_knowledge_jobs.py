@@ -15,6 +15,7 @@ from app.knowledge.ingestion import (
     JobLease,
     JobLeaseLost,
     SourceRevisionChanged,
+    _load_records,
     _set_progress,
     claim_job,
     fail_job,
@@ -30,17 +31,7 @@ MENU = {"records": [{"external_id": "menu", "title": "Lunch", "content": "Soup"}
 QWEN = EmbeddingConfig("remote", "qwen/qwen3-embedding-8b", None, 1536, 32)
 
 
-@pytest.fixture
-def embeddings(monkeypatch):
-    monkeypatch.setattr("app.knowledge.ingestion.get_embedding_config", AsyncMock(return_value=QWEN))
-    monkeypatch.setattr("app.api.v1.knowledge_admin.get_embedding_config", AsyncMock(return_value=QWEN))
-    monkeypatch.setattr(
-        "app.knowledge.ingestion.embed_texts",
-        AsyncMock(side_effect=lambda _db, _org, texts, **kw: [[1.0] + [0.0] * 1535 for _ in texts]),
-    )
-
-
-async def test_claims_serialize_a_source_and_allow_other_sources(embeddings):
+async def test_claims_serialize_a_source_and_allow_other_sources():
     async with SessionLocal() as db:
         source, revision, first = await _source_and_job(db, kind="curated", config=MENU)
         next_job = CampusIngestionJob(source_id=source.id, revision_id=revision.id)
@@ -85,7 +76,7 @@ async def test_simultaneous_claims_only_lease_one_job_per_source():
     assert sum(job is not None for job in jobs) == 1
 
 
-async def test_storage_serializes_preexisting_overlapping_leases(monkeypatch, embeddings):
+async def test_storage_serializes_preexisting_overlapping_leases(monkeypatch):
     # Cover leases created before deployment, when multiple source jobs could run.
     async with SessionLocal() as db:
         source, revision, first = await _source_and_job(db, kind="curated", config=MENU)
@@ -103,22 +94,22 @@ async def test_storage_serializes_preexisting_overlapping_leases(monkeypatch, em
     ready = asyncio.Event()
     arrived = 0
 
-    async def embed(_db, _org, texts, **kwargs):
+    async def load(source, revision):
         nonlocal arrived
         arrived += 1
         if arrived == 2:
             ready.set()
         await asyncio.wait_for(ready.wait(), 5)
-        return [[1.0] + [0.0] * 1535 for _ in texts]
+        return await _load_records(source, revision)
 
-    monkeypatch.setattr("app.knowledge.ingestion.embed_texts", embed)
+    monkeypatch.setattr("app.knowledge.ingestion._load_records", load)
     assert await asyncio.wait_for(asyncio.gather(*(run_leased_job(lease) for lease in leases)), 10) == [1, 1]
     async with SessionLocal() as db:
         rows = (await db.scalars(select(CampusKnowledgeRecord))).all()
         assert len(rows) == 1 and rows[0].external_id == "menu"
 
 
-async def test_reclaimed_attempt_cannot_progress_save_renew_or_fail(embeddings):
+async def test_reclaimed_attempt_cannot_progress_save_renew_or_fail():
     async with SessionLocal() as stale:
         source, _, job = await _source_and_job(stale, kind="curated", config=MENU)
         lease = JobLease.from_job(job)
@@ -154,7 +145,7 @@ async def test_reclaimed_attempt_cannot_progress_save_renew_or_fail(embeddings):
             assert source.last_error is None
 
 
-async def test_heartbeat_renews_during_a_blocked_embedding_call(monkeypatch, embeddings):
+async def test_heartbeat_renews_during_a_blocked_source_read(monkeypatch):
     monkeypatch.setattr(get_settings(), "knowledge_worker_lease_seconds", 3)
     async with SessionLocal() as db:
         source, revision, job = await _source_and_job(db, kind="curated", config=MENU)
@@ -168,12 +159,12 @@ async def test_heartbeat_renews_during_a_blocked_embedding_call(monkeypatch, emb
         await original_renew(db, lease)
         renewed.set()
 
-    async def embed(_db, _org, texts, **kwargs):
+    async def load(source, revision):
         await release.wait()
-        return [[1.0] + [0.0] * 1535 for _ in texts]
+        return await _load_records(source, revision)
 
     monkeypatch.setattr("app.knowledge.worker.renew_lease", observe_renew)
-    monkeypatch.setattr("app.knowledge.ingestion.embed_texts", embed)
+    monkeypatch.setattr("app.knowledge.ingestion._load_records", load)
     running = asyncio.create_task(run_leased_job(lease))
     try:
         await asyncio.wait_for(renewed.wait(), 5)
@@ -189,21 +180,21 @@ async def test_heartbeat_renews_during_a_blocked_embedding_call(monkeypatch, emb
         await asyncio.gather(running, return_exceptions=True)
 
 
-async def test_lost_heartbeat_cancels_processing_without_overwriting_new_owner(monkeypatch, embeddings):
+async def test_lost_heartbeat_cancels_processing_without_overwriting_new_owner(monkeypatch):
     monkeypatch.setattr(get_settings(), "knowledge_worker_lease_seconds", 3)
     async with SessionLocal() as db:
         _, _, job = await _source_and_job(db, kind="curated", config=MENU)
         lease = JobLease.from_job(job)
     started, cancelled = asyncio.Event(), asyncio.Event()
 
-    async def embed(*args, **kwargs):
+    async def load(*args, **kwargs):
         started.set()
         try:
             await asyncio.Event().wait()
         finally:
             cancelled.set()
 
-    monkeypatch.setattr("app.knowledge.ingestion.embed_texts", embed)
+    monkeypatch.setattr("app.knowledge.ingestion._load_records", load)
     running = asyncio.create_task(run_leased_job(lease))
     try:
         await asyncio.wait_for(started.wait(), 5)
@@ -232,25 +223,25 @@ async def test_lost_heartbeat_cancels_processing_without_overwriting_new_owner(m
         await asyncio.gather(running, return_exceptions=True)
 
 
-async def test_current_owner_failure_schedules_retry_and_clears_lease(monkeypatch, embeddings):
-    monkeypatch.setattr("app.knowledge.ingestion.embed_texts", AsyncMock(side_effect=ValueError("provider error")))
+async def test_current_owner_failure_schedules_retry_and_clears_lease(monkeypatch):
+    monkeypatch.setattr("app.knowledge.ingestion._load_records", AsyncMock(side_effect=ValueError("source error")))
     async with SessionLocal() as db:
         source, _, job = await _source_and_job(db, kind="curated", config=MENU)
         lease = JobLease.from_job(job)
-        with pytest.raises(ValueError, match="provider error") as error:
+        with pytest.raises(ValueError, match="source error") as error:
             await run_leased_job(lease)
         await fail_job(db, lease, error.value)
         await db.refresh(job)
         await db.refresh(source)
         assert job.status == "failed" and job.available_at > datetime.now(UTC)
         assert job.lease_owner is None and job.leased_until is None
-        assert source.last_error == "provider error"
+        assert source.last_error == "source error"
         with pytest.raises(JobLeaseLost):
             await renew_lease(db, lease)
 
 
-@pytest.mark.parametrize("kind", ["ingest", "reembed", "not_modified"])
-async def test_revision_change_during_io_cannot_save_or_overwrite_source(monkeypatch, embeddings, kind):
+@pytest.mark.parametrize("kind", ["ingest", "not_modified"])
+async def test_revision_change_during_io_cannot_save_or_overwrite_source(monkeypatch, kind):
     async with SessionLocal() as db:
         source, revision, job = await _source_and_job(db, kind="html_page", config={})
         job.kind = "reembed" if kind == "reembed" else "ingest"
@@ -279,18 +270,12 @@ async def test_revision_change_during_io_cannot_save_or_overwrite_source(monkeyp
                 current.etag = "new-etag"
                 await publisher.commit()
 
-        async def embed(_db, _org, texts, **kwargs):
-            await publish_new()
-            return [[1.0] + [0.0] * 1535 for _ in texts]
-
         async def fetch(*args, **kwargs):
-            if kind == "not_modified":
-                await publish_new()
+            await publish_new()
             return FetchedDocument(
                 source.url, b"<main><h1>Old content</h1></main>", "text/html", not_modified=kind == "not_modified"
             )
 
-        monkeypatch.setattr("app.knowledge.ingestion.embed_texts", embed)
         monkeypatch.setattr("app.knowledge.ingestion.fetch_document", fetch)
         with pytest.raises(SourceRevisionChanged):
             await process_job(db, job)
@@ -299,12 +284,11 @@ async def test_revision_change_during_io_cannot_save_or_overwrite_source(monkeyp
         await db.refresh(row)
         await db.refresh(job)
         assert row.content == "New revision" and row.is_current
-        assert row.embedding_model is None
         assert source.etag == "new-etag" and source.last_error is None
         assert job.status == "dead"
 
 
-async def test_publishing_reparses_unchanged_page_with_new_settings(monkeypatch, embeddings):
+async def test_publishing_reparses_unchanged_page_with_new_settings(monkeypatch):
     async with SessionLocal() as db:
         source, _, first = await _source_and_job(db, kind="html_page", config={"content_selector": ".old"})
         page = b"<h1>Menu</h1><div class='old'>Old selector</div><div class='new'>New selector</div>"
@@ -331,39 +315,21 @@ async def test_publishing_reparses_unchanged_page_with_new_settings(monkeypatch,
         assert "New selector" in row.content and "Old selector" not in row.content
 
 
-@pytest.mark.parametrize("running_kind", ["ingest", "reembed"])
-async def test_reindex_queues_new_model_after_running_job(monkeypatch, embeddings, running_kind):
+async def test_reindex_creates_frozen_generation_without_ingestion_writes(monkeypatch):
+    from app.knowledge.index_models import KnowledgeIndexGeneration
+
     monkeypatch.setattr("app.api.v1.knowledge_admin.record_event", AsyncMock())
+    monkeypatch.setattr("app.api.v1.knowledge_admin.get_embedding_config", AsyncMock(return_value=QWEN))
+    monkeypatch.setattr("app.knowledge.indexes.get_embedding_config", AsyncMock(return_value=QWEN))
     async with SessionLocal() as db:
-        source, revision, job = await _source_and_job(db, kind="curated", config=MENU)
-        if running_kind == "reembed":
-            await process_job(db, job)
-            db.add(CampusIngestionJob(source_id=source.id, revision_id=revision.id, kind="reembed"))
-            await db.commit()
-            job = await claim_job(db, "old-model-worker")
+        source, _, job = await _source_and_job(db, kind="curated", config=MENU)
         principal = SimpleNamespace(
             organization_id=source.organization_id, user=SimpleNamespace(id=source.organization_id)
         )
-        old_config = EmbeddingConfig("remote", "gemini-embedding-001", None, 768, 32)
-        monkeypatch.setattr("app.knowledge.ingestion.get_embedding_config", AsyncMock(return_value=old_config))
-
-        async def switch_model(_db, _org, texts, **kwargs):
-            async with SessionLocal() as admin:
-                result = await reindex_embeddings(principal=principal, db=admin)
-                assert result["queued"] == 1
-                assert (await reindex_embeddings(principal=principal, db=admin))["queued"] == 0
-                assert await claim_job(admin, "new-model-worker") is None
-            return [[1.0] + [0.0] * 767 for _ in texts]
-
-        monkeypatch.setattr("app.knowledge.ingestion.embed_texts", switch_model)
+        result = await reindex_embeddings(principal=principal, db=db)
+        assert result["queued"] == 1
+        generation = (await db.scalars(select(KnowledgeIndexGeneration))).one()
+        assert generation.model == QWEN.model
+        assert (await db.scalars(select(CampusIngestionJob))).all() == [job]
         await process_job(db, job)
-        row = (await db.scalars(select(CampusKnowledgeRecord))).one()
-        assert row.embedding_model == old_config.model_label
-        monkeypatch.setattr("app.knowledge.ingestion.get_embedding_config", AsyncMock(return_value=QWEN))
-        monkeypatch.setattr("app.knowledge.ingestion.embed_texts", AsyncMock(return_value=[[1.0] + [0.0] * 1535]))
-        successor = await claim_job(db, "new-model-worker")
-        assert successor is not None and successor.kind == "reembed"
-        await process_job(db, successor)
-        await db.refresh(row)
-        assert row.embedding_model == QWEN.model_label
-        assert row.embedding_768 is None and len(row.embedding_1536) == 1536
+        assert (await db.scalars(select(CampusKnowledgeRecord))).one().content == "Soup"

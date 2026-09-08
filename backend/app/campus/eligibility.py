@@ -25,6 +25,7 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 # Turkish alphabetical order. Used instead of ``locale`` because the broker
@@ -87,6 +88,60 @@ def _number(value: Any) -> float | None:
     text = str(value).strip().replace(",", ".")
     match = re.search(r"-?\d+(?:\.\d+)?", text)
     return float(match.group(0)) if match else None
+
+
+def validated_constraint_rows(payload: Any) -> list[dict[str, Any]] | None:
+    """Validate the small constraint table used for positive eligibility.
+
+    ``None`` means the upstream shape was unreadable. An empty list is the
+    only unrestricted answer. A non-empty table must identify each admitted
+    department and may not carry container values in scalar restriction
+    fields; otherwise an unrecognised rule could be mistaken for an open row.
+    """
+
+    if isinstance(payload, dict):
+        if "constraints" not in payload:
+            return None
+        rows = payload.get("constraints")
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        return None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return None
+    if not rows:
+        return []
+
+    department_keys = ("given_dept", "givenDept", "dept")
+    text_keys = (
+        "start_char", "startChar", "end_char", "endChar",
+        "start_grade", "startGrade", "end_grade", "endGrade",
+    )
+    number_keys = (
+        "min_cgpa", "minCgpa", "max_cgpa", "maxCgpa",
+        "min_year", "minYear", "max_year", "maxYear",
+    )
+    for row in rows:
+        department = next((row.get(key) for key in department_keys if key in row), None)
+        if not isinstance(department, str) or not department.strip():
+            return None
+        for key in text_keys:
+            if key not in row or row[key] in (None, ""):
+                continue
+            if not isinstance(row[key], str):
+                return None
+        for key in number_keys:
+            if key not in row or row[key] in (None, ""):
+                continue
+            value = row[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return None
+            try:
+                if not isfinite(float(str(value).strip().replace(",", "."))):
+                    return None
+            except (TypeError, ValueError):
+                return None
+    return rows
 
 
 # METU grades that count as having passed the course. Anything else — FD, FF,

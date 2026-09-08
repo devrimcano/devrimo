@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.directory import METU_ID
 from app.db.models import CourseOffering, CourseRule, PlanningPolicy, StudentAcademicSnapshot
+from app.planning.solver import SolverGroup, enumerate_solutions
 
 GRADE_POINTS = {
     "AA": 4.0,
@@ -144,49 +145,34 @@ def _fits_user_constraints(offering: CourseOffering, request: SemesterPlanReques
     return True, None
 
 
-def _conflicts(offering: CourseOffering, selected: list[CourseOffering]) -> bool:
-    for day, start, end in _meetings(offering):
-        for other in selected:
-            for other_day, other_start, other_end in _meetings(other):
-                if day == other_day and start < other_end and other_start < end:
-                    return True
-    return False
-
-
 def _best_combination(
     groups: list[tuple[str, list[CourseOffering]]],
     required: set[str],
     preferred: set[str],
     max_credits: float,
 ) -> list[CourseOffering]:
+    solver_groups = [SolverGroup(key=code, options=tuple(sections)) for code, sections in groups]
+    solutions = enumerate_solutions(
+        solver_groups,
+        lambda offering: _meetings(offering),
+        max_solutions=200,
+        max_nodes=150_000,
+        allow_skip=lambda group: group.key not in required,
+        allow_option=lambda selected, offering: (
+            sum(float(choice.option.credits) for choice in selected) + float(offering.credits) <= max_credits
+        ),
+    )
     best: list[CourseOffering] = []
     best_score = (-1, -1.0, -1, 0)
-    visited = 0
-
-    def visit(index: int, selected: list[CourseOffering], credits: float) -> None:
-        nonlocal best, best_score, visited
-        visited += 1
-        if visited > 150_000:
-            return
-        if index == len(groups):
-            codes = {_code(item.course_code) for item in selected}
-            days = {day for item in selected for day, _, _ in _meetings(item)}
-            score = (len(codes & required), credits, len(codes & preferred), -len(days))
-            if score > best_score:
-                best_score = score
-                best = list(selected)
-            return
-        code, sections = groups[index]
-        if code not in required:
-            visit(index + 1, selected, credits)
-        for offering in sections:
-            next_credits = credits + float(offering.credits)
-            if next_credits <= max_credits and not _conflicts(offering, selected):
-                selected.append(offering)
-                visit(index + 1, selected, next_credits)
-                selected.pop()
-
-    visit(0, [], 0)
+    for solution in solutions:
+        selected = [choice.option for choice in solution]
+        credits = sum(float(item.credits) for item in selected)
+        codes = {_code(item.course_code) for item in selected}
+        days = {day for item in selected for day, _, _ in _meetings(item)}
+        score = (len(codes & required), credits, len(codes & preferred), -len(days))
+        if score > best_score:
+            best_score = score
+            best = selected
     return best
 
 
@@ -349,18 +335,24 @@ async def upsert_academic_snapshot(
     if snapshot is None:
         snapshot = StudentAcademicSnapshot(user_id=user_id, term=term)
         db.add(snapshot)
+    changed = False
     if completed_courses is not None:
         snapshot.completed_courses = merge_courses(snapshot.completed_courses or [], completed_courses)
+        changed = True
     if enrolled_courses is not None:
         # Replaced, not merged: dropping a course is a real thing that happens,
         # and this list is small enough that a failed read is reported as None.
         snapshot.enrolled_courses = enrolled_courses
+        changed = True
     if current_credits is not None:
         snapshot.current_credits = current_credits
+        changed = True
     if current_grade_points is not None:
         snapshot.current_grade_points = current_grade_points
-    snapshot.source = source
-    snapshot.fetched_at = datetime.now(UTC)
+        changed = True
+    if changed:
+        snapshot.source = source
+        snapshot.fetched_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(snapshot)
     return snapshot

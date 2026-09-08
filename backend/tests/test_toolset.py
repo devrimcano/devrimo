@@ -9,8 +9,8 @@ their entire agent rather than the one tool.
 import stat
 from pathlib import Path
 
-from app.agents.toolset import build_toolkits
 from app.campus.mcp_config import CampusServerSpec
+from app.campus.toolkits import build_toolkits
 
 TIMEOUT = 30
 

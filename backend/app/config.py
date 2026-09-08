@@ -1,8 +1,38 @@
+import os
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEVELOPMENT_ENVIRONMENTS = frozenset({"development", "test"})
+_PLACEHOLDER_ENCRYPTION_KEYS = frozenset(
+    {
+        "change-me",
+        "change-me-to-a-real-generated-secret",
+        "changeme",
+        "replace-me",
+        "test-encryption-key",
+        "test-secret-not-for-production",
+        "your-secret-key",
+    }
+)
+_ENCRYPTION_KEY_ROLES = frozenset({"api", "assistant", "catalog", "embedding", "planning", "student"})
+_RUNTIME_COMPONENTS = frozenset(
+    {
+        "",
+        "api",
+        "broker",
+        "assistant",
+        "agentos",
+        "knowledge",
+        "embedding",
+        "researcher",
+        "directory",
+        "catalog",
+        "retention",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -24,6 +54,67 @@ class Settings(BaseSettings):
     # Retrieval depends on pgvector, pg_trgm and Postgres full-text search, so
     # there is no second supported engine to fall back to.
     database_url: str = "postgresql+asyncpg://devrimo:devrimo@localhost:5432/devrimo"
+
+    # Every process connects using its own restricted login. Migration credentials
+    # belong only to the release job, never a worker environment.
+    database_migration_url: str = ""
+    database_runtime_role: Literal[
+        "api", "knowledge", "embedding", "researcher", "directory", "catalog", "assistant", "planning", "student"
+    ] = "api"
+    assistant_database_url: str = ""
+    workspace_gateway_url: str = ""
+    assistant_worker_concurrency: int = Field(default=4, ge=1, le=128)
+    workspace_gateway_allowed_hosts: str = ""
+    # The catalog database role is shared by the catalog warmer and the
+    # retention sweep. Only the former decrypts campus credentials, so the
+    # process identity keeps the startup key check precise without adding a
+    # new database role or granting retention a secret it never uses.
+    runtime_component: str = Field(
+        default="", validation_alias=AliasChoices("DEVRIMO_RUNTIME_COMPONENT", "runtime_component")
+    )
+
+    @model_validator(mode="after")
+    def validate_database_configuration(self):
+        from sqlalchemy.engine import make_url
+
+        base = make_url(self.database_url)
+        if base.get_backend_name() != "postgresql":
+            raise ValueError("Devrimo requires one PostgreSQL database")
+        for configured in (self.database_migration_url, self.assistant_database_url):
+            if configured:
+                other = make_url(configured)
+                if (other.get_backend_name(), other.host, other.port, other.database) != (
+                    base.get_backend_name(),
+                    base.host,
+                    base.port,
+                    base.database,
+                ):
+                    raise ValueError("All database identities must use the same PostgreSQL endpoint and database")
+        if self.environment in {"production", "staging"}:
+            if self.database_migration_url and self.database_migration_url == self.database_url:
+                raise ValueError("Migration and runtime credentials must be separate")
+            if base.username and base.username.split(".")[0] in {"postgres", "supabase_admin", "service_role"}:
+                raise ValueError("Runtime requires a restricted database login")
+        environment = self.environment.strip().casefold()
+        runtime_component = self.runtime_component.strip().casefold()
+        if runtime_component not in _RUNTIME_COMPONENTS:
+            raise ValueError(f"DEVRIMO_RUNTIME_COMPONENT is not recognized: {self.runtime_component!r}")
+        if (
+            environment not in _DEVELOPMENT_ENVIRONMENTS
+            and self.database_runtime_role in _ENCRYPTION_KEY_ROLES
+            and not (self.database_runtime_role == "catalog" and runtime_component == "retention")
+            and not (
+                self.agentos_enabled
+                and self.database_runtime_role == "assistant"
+                and runtime_component == "agentos"
+            )
+        ):
+            encryption_key = self.secret_encryption_key.strip()
+            if not encryption_key or encryption_key.casefold() in _PLACEHOLDER_ENCRYPTION_KEYS:
+                raise ValueError(
+                    "SECRET_ENCRYPTION_KEY must be set to a non-placeholder value outside development/test"
+                )
+        return self
 
     avesis_proxy_url: SecretStr | None = None
 
@@ -59,18 +150,13 @@ class Settings(BaseSettings):
     agent_retries: int = 2
     agent_store_events: bool = False
     agent_tracing_enabled: bool = False
-    # A user's agent (and its MCP subprocesses) is torn down after this long
-    # with no turns. Nothing is lost — history lives in the database.
-    agent_idle_timeout_seconds: int = 900
-    # Ceiling on simultaneously-resident users. The least recently used agent
-    # is evicted past this, so a busy hour can't spawn unbounded subprocesses.
-    agent_pool_max_size: int = 64
-    reconcile_interval_seconds: int = 60
+    # Authenticated integration sessions have a bounded idle lifetime and
+    # process-local capacity. Assistant runs themselves are durable jobs.
+    campus_session_idle_seconds: int = Field(default=300, ge=1)
+    campus_session_max_size: int = Field(default=256, ge=1)
     # How often expired schedule_data_cache rows are reclaimed. Nothing else
     # reclaims them: the read path only drops rows somebody asks for twice.
     schedule_cache_sweep_seconds: int = 3600
-    turn_lock_lease_seconds: int = 180
-    turn_lock_heartbeat_seconds: int = 60
 
     # --- Observability (PostHog) -------------------------------------------
     # Everything below is optional: with no key the whole integration is a
@@ -210,4 +296,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(_env_file=os.environ.get("DEVRIMO_ENV_FILE", ".env") or None)

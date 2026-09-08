@@ -144,6 +144,7 @@ export function authenticatedRoute<Extra extends unknown[]>(
         outcome: outcomeForStatus(status),
         duration_seconds: (Date.now() - started) / 1000,
         streaming: options.streaming ?? false,
+        phase: options.streaming ? "response_headers" : "response_complete",
         ...extra,
       });
     };

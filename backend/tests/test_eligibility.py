@@ -5,9 +5,13 @@ not invented cases: ADM really is limited to surnames YA-YA with a 3.00 CGPA
 floor, ECON really is DJ-KA, and CENG really does require second year or above.
 """
 
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
 import pytest
 
-from app.campus.eligibility import evaluate, tr_upper
+from app.campus.eligibility import evaluate, tr_upper, validated_constraint_rows
+from app.planning.eligibility import academic_evidence_fresh, issue_eligibility_token
 
 # Transcribed verbatim from MATH 2360260 section 1.
 MATH260 = [
@@ -111,3 +115,43 @@ def test_matched_department_is_reported():
 def test_turkish_uppercase_keeps_the_dot():
     assert tr_upper("iş") == "İŞ"
     assert tr_upper("ışık") == "IŞIK"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"unexpected": "value"}],
+        {"constraints": [{"given_dept": "EE", "min_cgpa": {"nested": True}}]},
+        {"constraints": [{"given_dept": "EE", "min_cgpa": "NaN"}]},
+        {"constraints": ["not a row"]},
+    ],
+)
+def test_malformed_constraint_rows_are_unknown_not_unrestricted(payload):
+    assert validated_constraint_rows(payload) is None
+
+
+def test_an_explicitly_empty_constraint_table_is_valid_open_evidence():
+    assert validated_constraint_rows({"constraints": []}) == []
+
+
+def test_academic_evidence_has_a_defined_freshness_window():
+    now = datetime.now(UTC)
+    assert academic_evidence_fresh(now, now, now=now)
+    assert not academic_evidence_fresh(now - timedelta(days=8), now, now=now)
+    assert not academic_evidence_fresh(now, now - timedelta(days=8), now=now)
+
+
+def test_stale_academic_evidence_cannot_mint_a_positive_token():
+    now = datetime.now(UTC)
+    with pytest.raises(ValueError, match="stale"):
+        issue_eligibility_token(
+            uuid4(),
+            "20261",
+            "MATH119",
+            "1",
+            eligibility_status="verified",
+            eligible=True,
+            context_verified_at=now - timedelta(days=8),
+            snapshot_fetched_at=now,
+            meetings=[{"day": "Mon", "start_minute": 520, "duration_minutes": 110, "room": "A1"}],
+        )

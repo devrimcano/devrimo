@@ -26,6 +26,10 @@ os.environ["AGNO_TELEMETRY"] = "false"
 os.environ["POSTHOG_API_KEY"] = ""
 os.environ["POSTHOG_PERSONAL_API_KEY"] = ""
 os.environ["ENVIRONMENT"] = "test"
+os.environ["AGENTOS_JWKS_FILE"] = ""
+os.environ["DATABASE_MIGRATION_URL"] = ""
+os.environ["ASSISTANT_DATABASE_URL"] = ""
+os.environ["DATABASE_RUNTIME_ROLE"] = "api"
 os.environ["RELEASE"] = "test"
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret-not-for-production")
@@ -56,6 +60,16 @@ with _admin_connection() as _conn:
 _base, _, _ = _ADMIN_URL.rpartition("/")
 os.environ["DATABASE_URL"] = f"{_base}/{_TEST_DB}".replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# Exercise the same release chain against Supabase's extension placement.
+# The default run still covers PostgreSQL's ordinary public-schema install.
+if os.environ.get("TEST_EXTENSION_SCHEMA") == "extensions":
+    import psycopg
+
+    with psycopg.connect(f"{_base}/{_TEST_DB}", autocommit=True) as _conn:
+        _conn.execute("CREATE SCHEMA extensions")
+        _conn.execute("CREATE EXTENSION vector WITH SCHEMA extensions")
+        _conn.execute("CREATE EXTENSION pg_trgm WITH SCHEMA extensions")
+
 # The schema comes from the migrations, not from ``create_all``: the search
 # columns are Postgres generated columns and the indexes are GIN/HNSW, none of
 # which the model metadata carries. Running them here also means every test
@@ -68,6 +82,8 @@ _migration = subprocess.run(
     text=True,
 )
 if _migration.returncode:
+    with _admin_connection() as _conn:
+        _conn.execute(f'DROP DATABASE IF EXISTS "{_TEST_DB}"')
     raise RuntimeError(f"Test database migration failed:\n{_migration.stderr}")
 
 
@@ -95,8 +111,8 @@ import jwt as pyjwt
 import pytest
 from sqlalchemy import text
 
-from app.agents.pool import reset_pool
 from app.agents.store import get_agno_db
+from app.campus.session_pool import close_all
 from app.db.base import Base
 from app.db.session import engine
 from app.main import app
@@ -105,22 +121,14 @@ CAMPUS_MCP_ROOT = os.environ["CAMPUS_MCP_ROOT"]
 CAMPUS_STATE_ROOT = os.environ["CAMPUS_STATE_ROOT"]
 
 
-async def _drop_agno_tables(conn) -> None:
-    """Agno creates its own tables, so ``Base.metadata`` cannot drop them.
-
-    Without this they outlive the fixture and a session id reused by a later
-    test resolves to the previous test's user — which looks exactly like a
-    cross-user history leak, and would mask a real one. On Postgres they live in
-    Agno's own ``ai`` schema rather than beside the application's tables.
-    """
+async def _clear_agno_tables(conn) -> None:
+    """Keep migration-owned Agno schema and grants; clear only test data."""
     result = await conn.execute(
-        text(
-            "SELECT schemaname, tablename FROM pg_tables "
-            "WHERE tablename LIKE 'agno_%' AND schemaname NOT IN ('pg_catalog', 'information_schema')"
-        )
+        text("SELECT schemaname, tablename FROM pg_tables WHERE tablename LIKE 'agno_%' AND schemaname='ai'")
     )
-    for schema, table in result.fetchall():
-        await conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}" CASCADE'))
+    tables = [f'"{schema}"."{table}"' for schema, table in result.fetchall()]
+    if tables:
+        await conn.execute(text("TRUNCATE " + ", ".join(tables) + " RESTART IDENTITY CASCADE"))
 
 
 @pytest.fixture(autouse=True)
@@ -131,16 +139,14 @@ async def _fresh_schema():
     tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
     async with engine.begin() as conn:
         await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
-        await _drop_agno_tables(conn)
-    await reset_pool()
-    # The Agno db caches which of its tables it has already created, so it must
-    # be rebuilt alongside the schema or it will write to tables the previous
-    # test's teardown dropped.
+        await _clear_agno_tables(conn)
+    await close_all()
+    # Reset framework caches between independent test event loops.
     get_agno_db.cache_clear()
     yield
     # Resident agents hold MCP subprocesses; a test that leaves one behind
     # leaks it into the next test's pool.
-    await reset_pool()
+    await close_all()
     # Each test runs in its own event loop, and asyncpg connections are bound to
     # the loop that opened them. Returning one to the pool would hand the next
     # test a connection whose futures belong to a closed loop.
@@ -149,9 +155,24 @@ async def _fresh_schema():
 
 @pytest.fixture
 async def client():
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+    # Production runs this executor in a separate assistant-only process.
+    # Tests pump the same durable queue using the fake model, never an API
+    # fallback that could accidentally run inference inside production HTTP.
+    from app.assistant.worker import run_one
+
+    async def pump():
+        while True:
+            if not await run_one("test-worker"):
+                await asyncio.sleep(0.01)
+
+    worker = asyncio.create_task(pump())
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 def new_user_id() -> uuid.UUID:

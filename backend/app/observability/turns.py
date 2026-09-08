@@ -156,14 +156,16 @@ class TurnObservation:
             "agent_tool_error",
             distinct_id=self.user_id,
             tool=tool,
-            detail=detail,
+            # A provider/tool detail can contain transcript or course data.
+            # The aggregate failure and tool name are sufficient for grouping.
+            error_type="tool_failed",
             turn_kind=self.kind,
             **{"$ai_trace_id": self.trace_id, "$ai_session_id": self.session_id},
         )
 
     def run_failed(self, detail: str | None, error_type: str | None = None) -> None:
         self.outcome = OUTCOME_RUN_ERROR
-        self.error_message = detail
+        self.error_message = None
         self.error_type = error_type
 
     def cancelled(self, reason: str | None = None) -> None:
@@ -177,11 +179,11 @@ class TurnObservation:
         if self.failed:
             return
         self.outcome = OUTCOME_CANCELLED
-        self.error_message = reason
+        self.error_message = None
 
     def stream_failed(self, exc: BaseException) -> None:
         self.outcome = OUTCOME_STREAM_ERROR
-        self.error_message = str(exc)
+        self.error_message = None
         self.error_type = exc.__class__.__name__
         report_exception(
             exc,
@@ -223,7 +225,9 @@ class TurnObservation:
                 recovered_tool_errors=self.recovered_tool_errors,
                 paused_for_confirmation=self.paused,
                 error_type=self.error_type,
-                error_message=self.error_message,
+                # Keep the exception class as an aggregate diagnostic. The
+                # message may echo academic context or an upstream body.
+                error_message=None,
                 result=self.result,
                 trace_id=self.trace_id,
                 chat_session_id=self.session_id,

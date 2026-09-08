@@ -1,11 +1,14 @@
 "use client";
 
 import {
+  Loader2Icon,
   MessageSquareIcon,
   MessageSquarePlusIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
+  RotateCcwIcon,
   Trash2Icon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { useId } from "react";
 import { motion, useReducedMotion } from "motion/react";
@@ -22,6 +25,10 @@ export function SessionSidebar({
   onSelect,
   onDelete,
   onDeleteAll,
+  isLoading = false,
+  retrying = false,
+  error,
+  onRetry,
   className,
   collapsed = false,
   onToggleCollapse,
@@ -32,6 +39,10 @@ export function SessionSidebar({
   onSelect: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   onDeleteAll?: () => void;
+  isLoading?: boolean;
+  retrying?: boolean;
+  error?: unknown;
+  onRetry?: () => void | Promise<unknown>;
   className?: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -47,7 +58,7 @@ export function SessionSidebar({
             {!collapsed ? (
               <div>
                 <p className="text-sm font-semibold">{pick({ tr: "Sohbetler", en: "Chats" })}</p>
-                <p className="text-[11px] text-muted-foreground">{sessions.length} {pick({ tr: "sohbet", en: sessions.length === 1 ? "conversation" : "conversations" })}</p>
+                <p className="text-[11px] text-muted-foreground">{isLoading ? pick({ tr: "Yükleniyor…", en: "Loading…" }) : `${sessions.length} ${pick({ tr: "sohbet", en: sessions.length === 1 ? "conversation" : "conversations" })}`}</p>
               </div>
             ) : null}
             <Button variant="ghost" size="icon-sm" onClick={onToggleCollapse} aria-label={collapsed ? pick({ tr: "Sohbet kenar çubuğunu aç", en: "Expand chat sidebar" }) : pick({ tr: "Sohbet kenar çubuğunu daralt", en: "Collapse chat sidebar" })}>
@@ -62,7 +73,25 @@ export function SessionSidebar({
       </div>
       {!collapsed ? <ScrollArea className="min-h-0 flex-1">
         <nav aria-label={pick({ tr: "Sohbetler", en: "Chats" })} className="flex flex-col gap-1.5 px-2 pb-3 pt-1">
-          {sessions.length === 0 ? (
+          {isLoading ? (
+            <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground" role="status">
+              <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
+              {pick({ tr: "Sohbet geçmişi yükleniyor…", en: "Loading chat history…" })}
+            </div>
+          ) : error ? (
+            <div className="mx-1 my-2 rounded-xl border border-destructive/35 bg-destructive/5 p-3 text-sm" role="alert">
+              <div className="flex items-start gap-2 text-destructive">
+                <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <p>{pick({ tr: "Sohbet geçmişi yüklenemedi.", en: "Chat history could not be loaded." })}</p>
+              </div>
+              {onRetry ? (
+                <Button variant="outline" size="sm" className="mt-3" onClick={() => void onRetry()} disabled={retrying}>
+                  <RotateCcwIcon className={retrying ? "animate-spin" : undefined} />
+                  {retrying ? pick({ tr: "Yenileniyor…", en: "Retrying…" }) : pick({ tr: "Tekrar dene", en: "Try again" })}
+                </Button>
+              ) : null}
+            </div>
+          ) : sessions.length === 0 ? (
             <p className="px-2 py-6 text-sm text-muted-foreground">{pick({ tr: "İlk sohbetini başlat.", en: "Start your first conversation." })}</p>
           ) : (
             sessions.map((session) => {

@@ -18,17 +18,21 @@ from uuid import UUID
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.assistant.models import AssistantRun
 from app.campus.course_info import forget_user
 from app.core.digest import owner_digest
 from app.db.models import (
     ScheduleDataCache,
     StudentAcademicSnapshot,
     StudentContext,
+    StudentResourceRevision,
     StudentTimetable,
+    StudentTimetableRevision,
     UserMailFact,
     UserPreference,
     UserUpdateState,
 )
+from app.workspace.models import WorkspaceMailApproval, WorkspaceMemoryMutation
 
 
 async def purge_academic_data(db: AsyncSession, user_id: UUID) -> None:
@@ -40,6 +44,7 @@ async def purge_academic_data(db: AsyncSession, user_id: UUID) -> None:
     """
     await db.execute(delete(StudentAcademicSnapshot).where(StudentAcademicSnapshot.user_id == user_id))
     await db.execute(delete(StudentContext).where(StudentContext.user_id == user_id))
+    await db.execute(delete(StudentTimetableRevision).where(StudentTimetableRevision.user_id == user_id))
     await db.execute(delete(StudentTimetable).where(StudentTimetable.user_id == user_id))
     await db.execute(delete(ScheduleDataCache).where(ScheduleDataCache.owner_hash == owner_digest(user_id)))
     forget_user(user_id)
@@ -55,6 +60,10 @@ async def purge_student_data(db: AsyncSession, user_id: UUID) -> None:
     record of external actions taken on the student's behalf.
     """
     await purge_academic_data(db, user_id)
+    await db.execute(delete(AssistantRun).where(AssistantRun.user_id == user_id))
+    await db.execute(delete(WorkspaceMailApproval).where(WorkspaceMailApproval.user_id == user_id))
+    await db.execute(delete(WorkspaceMemoryMutation).where(WorkspaceMemoryMutation.user_id == user_id))
+    await db.execute(delete(StudentResourceRevision).where(StudentResourceRevision.user_id == user_id))
     await db.execute(delete(UserPreference).where(UserPreference.user_id == user_id))
     await db.execute(delete(UserMailFact).where(UserMailFact.user_id == user_id))
     await db.execute(delete(UserUpdateState).where(UserUpdateState.user_id == user_id))

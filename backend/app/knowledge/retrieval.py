@@ -19,7 +19,9 @@ from sqlalchemy import Float, case, func, literal, literal_column, or_, select, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CampusKnowledgeRecord, CampusSource
-from app.knowledge.embeddings import embed_query, embedding_column, get_embedding_config
+from app.knowledge.embeddings import embed_query
+from app.knowledge.index_models import KnowledgeIndexGeneration, KnowledgeIndexVector
+from app.knowledge.indexes import active_generation, generation_config, vector_column
 
 # Reciprocal Rank Fusion. The constant damps the influence of the very top of
 # each list so a single channel cannot dominate the fused ordering.
@@ -126,21 +128,26 @@ def _conditions(filters: SearchFilters, organization_id: UUID, now: datetime) ->
     return conditions
 
 
-def _ranked_channel(conditions: list, signal, match, candidate_limit: int, *, descending: bool, name: str):
+def _ranked_channel(
+    conditions: list, signal, match, candidate_limit: int, *, descending: bool, name: str, generation_id=None
+):
     """Rank one retrieval channel in the database and number its results.
 
     The inner statement is ordered and limited so the channel's index bounds the
     work; the outer statement only assigns the rank RRF consumes.
     """
     order = signal.desc() if descending else signal.asc()
-    inner = (
-        select(CampusKnowledgeRecord.id.label("record_id"), signal.label("signal"))
-        .join(CampusSource, CampusSource.id == CampusKnowledgeRecord.source_id)
-        .where(*conditions, match)
-        .order_by(order)
-        .limit(candidate_limit)
-        .subquery()
+    statement = select(CampusKnowledgeRecord.id.label("record_id"), signal.label("signal")).join(
+        CampusSource, CampusSource.id == CampusKnowledgeRecord.source_id
     )
+    if generation_id is not None:
+        statement = statement.join(
+            KnowledgeIndexVector,
+            (KnowledgeIndexVector.record_id == CampusKnowledgeRecord.id)
+            & (KnowledgeIndexVector.generation_id == generation_id)
+            & (KnowledgeIndexVector.content_hash == CampusKnowledgeRecord.content_hash),
+        )
+    inner = statement.where(*conditions, match).order_by(order).limit(candidate_limit).subquery()
     inner_order = inner.c.signal.desc() if descending else inner.c.signal.asc()
     return select(
         inner.c.record_id,
@@ -181,6 +188,7 @@ async def search_knowledge(
     *,
     organization_id: UUID,
     limit: int = 10,
+    generation_id: UUID | None = None,
 ) -> list[dict]:
     filters = filters or SearchFilters()
     now = datetime.now(UTC)
@@ -200,8 +208,21 @@ async def search_knowledge(
         ).all()
         return _pick_per_document([(record, source, 1.0) for record, source in rows], limit=limit)
 
-    config = await get_embedding_config(db, organization_id)
-    query_embedding = await embed_query(db, organization_id, clean_query, config=config)
+    if generation_id:
+        generation = await db.scalar(
+            select(KnowledgeIndexGeneration).where(
+                KnowledgeIndexGeneration.id == generation_id,
+                KnowledgeIndexGeneration.organization_id == organization_id,
+            )
+        )
+        if generation is None:
+            raise ValueError("Index generation not found")
+    else:
+        generation = await active_generation(db, organization_id)
+    config = generation_config(generation) if generation else None
+    query_embedding = (
+        await embed_query(db, organization_id, clean_query, config=config) if config and config.enabled else None
+    )
     candidate_limit = min(500, max(limit * 8, 50))
 
     search_vector = literal_column("campus_knowledge_records.search_vector")
@@ -232,17 +253,18 @@ async def search_knowledge(
             TRIGRAM_WEIGHT,
         ),
     ]
-    if query_embedding is not None:
-        vector_column = embedding_column(config.dimensions)
+    if query_embedding is not None and config is not None and generation is not None:
+        column = vector_column(config.dimensions)
         channels.append(
             (
                 _ranked_channel(
                     conditions,
-                    vector_column.cosine_distance(query_embedding),
-                    (CampusKnowledgeRecord.embedding_model == config.model_label) & vector_column.is_not(None),
+                    column.cosine_distance(query_embedding),
+                    column.is_not(None),
                     candidate_limit,
                     descending=False,
                     name="semantic",
+                    generation_id=generation.id,
                 ),
                 SEMANTIC_WEIGHT,
             )

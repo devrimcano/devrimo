@@ -15,8 +15,10 @@ engine. Same database, same tables namespace, separate pool.
 from functools import lru_cache
 
 from agno.db.base import BaseDb
+from sqlalchemy import create_engine
 
 from app.config import get_settings
+from app.db.engine import postgres_connect_args, postgres_driver_url
 from app.logging import get_logger
 
 logger = get_logger(__name__)
@@ -47,17 +49,20 @@ _APPROVALS_TABLE = "agno_approvals"
 
 
 def _sync_postgres_url(url: str) -> str:
-    """Swap an async driver for the sync one Agno's engine needs."""
-    for async_driver in ("+asyncpg", "+psycopg_async"):
-        url = url.replace(async_driver, "+psycopg")
-    if "+psycopg" not in url:
-        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
+    """Use psycopg while preserving escaped credentials and TLS semantics."""
+    return postgres_driver_url(url).render_as_string(hide_password=False)
 
 
 @lru_cache
 def get_agno_db() -> BaseDb:
-    url = get_settings().database_url
+    settings = get_settings()
+    if (
+        settings.environment in {"production", "staging"}
+        and settings.database_runtime_role == "api"
+        and not settings.assistant_database_url
+    ):
+        raise RuntimeError("API requires ASSISTANT_DATABASE_URL for assistant-owned persistence")
+    url = settings.assistant_database_url or settings.database_url
     tables = {
         "id": "devrimo-agno",
         "session_table": _SESSION_TABLE,
@@ -80,4 +85,19 @@ def get_agno_db() -> BaseDb:
 
     from agno.db.postgres import PostgresDb
 
-    return PostgresDb(db_url=_sync_postgres_url(url), **tables)
+    class MigrationManagedPostgresDb(PostgresDb):
+        def _create_table(self, table_name, table_type):
+            raise RuntimeError(f"Missing Agno table {table_name}; run release migrations")
+
+    managed = settings.environment in {"production", "staging"} or settings.database_runtime_role != "api"
+    sync_url = _sync_postgres_url(url)
+    db = MigrationManagedPostgresDb(
+        db_engine=create_engine(sync_url, pool_pre_ping=True, connect_args=postgres_connect_args(sync_url)),
+        create_schema=False,
+        **tables,
+    )
+    if managed:
+        from app.db.session import validate_sync_database_identity
+
+        validate_sync_database_identity(db.db_engine, "assistant")
+    return db

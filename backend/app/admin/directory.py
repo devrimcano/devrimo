@@ -19,7 +19,9 @@ async def ensure_metu(db: AsyncSession) -> Organization:
         await db.execute(
             insert(Organization)
             .values(id=METU_ID, slug="metu", name="Middle East Technical University")
-            .on_conflict_do_nothing(index_elements=[Organization.id])
+            # Both id and slug are unique. Concurrent bootstrap requests can
+            # encounter either constraint before the winning row is visible.
+            .on_conflict_do_nothing()
         )
         organization = await db.get(Organization, METU_ID)
         if organization is None:
@@ -80,3 +82,31 @@ async def active_account(db: AsyncSession, user_id: UUID) -> AccountDirectory | 
             )
         )
     ).scalar_one_or_none()
+
+
+async def synchronize_directory(db: AsyncSession) -> int:
+    from app.admin.supabase import SupabaseAdmin, parse_auth_time
+
+    await ensure_metu(db)
+    admin = SupabaseAdmin()
+    users: list[dict] = []
+    page = 1
+    while True:
+        batch = await admin.list_users(page=page, per_page=1000)
+        users.extend(batch)
+        if len(batch) < 1000:
+            break
+        page += 1
+    for auth_user in users:
+        user_id = UUID(auth_user["id"])
+        account = await db.get(AccountDirectory, user_id)
+        email = auth_user.get("email")
+        if account is None:
+            account = AccountDirectory(user_id=user_id, organization_id=METU_ID)
+            db.add(account)
+        if account.status != AccountStatus.deleted:
+            account.email = email
+            account.email_normalized = email.strip().lower() if email else None
+            account.auth_created_at = parse_auth_time(auth_user.get("created_at"))
+    await db.commit()
+    return len(users)

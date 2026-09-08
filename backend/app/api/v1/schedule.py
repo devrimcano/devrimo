@@ -10,12 +10,18 @@ seconds in production and made opening the planner during a chat turn fail with
 a 409. It now reads the student's own curriculum listing directly.
 """
 
+import hashlib
 import re
 import time
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import uuid4
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +32,7 @@ from app.campus import curriculum, departments, prerequisites
 from app.campus.course_info import (
     CatalogSession,
     call_course_info,
+    catalog_answer_expires_at,
     catalog_key,
     catalog_session,
     department_for_course,
@@ -34,19 +41,29 @@ from app.campus.course_info import (
     resolve_department,
     section_numbers,
 )
-from app.campus.eligibility import course_candidates, evaluate, prior_grade
+from app.campus.eligibility import course_candidates, evaluate, prior_grade, validated_constraint_rows
 from app.campus.warmer import record_wanted_courses
 from app.core.digest import owner_digest, stable_digest
 from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
-from app.db.models import StudentAcademicSnapshot, StudentContext, StudentTimetable
+from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability.client import report_exception
+from app.planning.catalog import normalize_sections
+from app.planning.eligibility import academic_evidence_fresh, issue_eligibility_token, planning_context_fingerprint
 from app.planning.mcp_bridge import sync_student_context_from_sais
+from app.planning.models import PlanChanges, PlanConflictError, PlanSection, PlanValidationError
+from app.planning.service import current_term
+from app.planning.workspace import projection_from_state
+from app.planning.workspace import read_timetable as read_canonical_timetable
+from app.planning.workspace import undo_timetable as undo_canonical_timetable
+from app.planning.workspace import update_timetable as update_canonical_timetable
 
 router = APIRouter()
 logger = get_logger(__name__)
+ISTANBUL = ZoneInfo("Europe/Istanbul")
+_SAFE_TERM = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
 # Filling a student's context spawns their whole campus toolkit as subprocesses,
 # so the schedule page mounting must not be able to start one per render. The
@@ -95,6 +112,76 @@ class CurriculumPlanResponse(BaseModel):
     source: str
     cache_hit: bool
     duration_ms: int
+
+
+class CurriculumFullCourseOut(BaseModel):
+    semester: int
+    semester_completed: bool
+    course_code: str
+    course_name: str
+    grade: str | None = None
+    status: Literal["completed", "failed", "outstanding"]
+    credits: float = 0
+
+
+class CurriculumFullResponse(BaseModel):
+    courses: list[CurriculumFullCourseOut] = Field(default_factory=list)
+    source: str
+    fetched_at: Any | None = None
+    warning: str | None = None
+
+
+class CourseSectionsResponse(BaseModel):
+    """Raw catalog data plus the server-normalized section contract."""
+
+    data: Any
+    sections: list[PlanSection] = Field(default_factory=list)
+
+
+def _signed_course_code(compact_course: str, lookup_department: str) -> str:
+    owner = departments.by_code(lookup_department)
+    return _short_code(compact_course, owner.abbreviation if owner else "")
+
+
+def _tag_catalog_sections(rows: list[dict[str, Any]], compact_course: str, lookup_department: str) -> list[dict[str, Any]]:
+    signed_code = _signed_course_code(compact_course, lookup_department)
+    return [
+        {**row, "eligibility_course_code": signed_code, "eligibility_raw_code": compact_course}
+        for row in rows
+    ]
+
+
+def _eligibility_is_verified(
+    rows: list[dict[str, Any]], profile: "_StudentProfile", prior: str | None
+) -> bool:
+    """Return whether the inputs needed by these rows came from SAIS.
+
+    ``evaluate`` intentionally treats missing values as unknown so it can be
+    useful for explanations. A normal timetable has a stricter contract: an
+    unknown dimension must be surfaced as unverified and cannot be saved.
+    """
+    context = profile.context
+    if context is None or context.verified_at is None or not profile.department:
+        return False
+    if not academic_evidence_fresh(context.verified_at, profile.snapshot_fetched_at):
+        return False
+    if not rows:
+        return True
+    if not profile.has_snapshot and any(
+        str(row.get("start_grade") or row.get("startGrade") or row.get("end_grade") or row.get("endGrade") or "").strip()
+        for row in rows
+    ):
+        return False
+    for row in rows:
+        start_char = str(row.get("start_char") or row.get("startChar") or "").strip()
+        end_char = str(row.get("end_char") or row.get("endChar") or "").strip()
+        if (start_char or end_char) and not context.surname_prefix:
+            return False
+        if any(row.get(name) not in (None, "") for name in ("min_cgpa", "minCgpa", "max_cgpa", "maxCgpa")) and profile.cgpa is None:
+            return False
+        if any(row.get(name) not in (None, "") for name in ("min_year", "minYear", "max_year", "maxYear")) and context.year_of_study is None:
+            return False
+    return True
 
 async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
     """The department to plan against: what the client sent, else what SAIS said.
@@ -244,41 +331,243 @@ class TimetableIn(BaseModel):
     busy_blocks: list[TimetableBlock] = Field(default_factory=list, max_length=20)
 
 
+class TimetableUpdateIn(BaseModel):
+    """One explicit, revision-checked update to the canonical plan."""
+
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    changes: PlanChanges
+
+
+class TimetableUndoIn(BaseModel):
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+def _canonical_response(envelope) -> dict[str, Any]:
+    """Expose the resource envelope plus the old chat projection."""
+
+    body = envelope.model_dump(mode="json")
+    projection = projection_from_state(envelope.state)
+    body.update(projection)
+    return body
+
+
+def _conflict_response(exc: PlanConflictError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "error": "revision_conflict",
+            "detail": str(exc),
+            "current": _canonical_response(exc.current),
+        },
+    )
+
+
 @router.put("/timetable")
 async def save_timetable(
     body: TimetableIn,
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Store the week the student is building, so chat can answer about it.
+    """Compatibility projection writer for one release of old browsers.
 
-    The planner keeps its full working state in the browser; only this
-    projection is sent. Replacing the row outright rather than merging is
-    deliberate: the browser holds the truth, and a merge would resurrect a
-    course the student had just deleted.
+    New clients use PATCH with a typed ``PlanChanges`` request.  This route
+    still accepts the old courses/blocks projection and routes it through the
+    same revisioned owner service, so it cannot create a second write path.
     """
-    row = await db.get(StudentTimetable, user.id)
-    payload = {"courses": [course.model_dump() for course in body.courses],
-               "busy_blocks": [block.model_dump() for block in body.busy_blocks]}
-    if row is None:
-        row = StudentTimetable(user_id=user.id, term=body.term, payload=payload)
-        db.add(row)
-    else:
-        row.term = body.term
-        row.payload = payload
-    await db.commit()
-    return {"saved": True, "courses": len(body.courses)}
+    current = await read_canonical_timetable(db, user.id, body.term)
+    payload = {
+        "term": body.term,
+        "courses": [course.model_dump() for course in body.courses],
+        "busy_blocks": [block.model_dump() for block in body.busy_blocks],
+    }
+    try:
+        envelope = await update_canonical_timetable(
+            db,
+            user.id,
+            body.term,
+            PlanChanges(operation="replace_projection", projection=payload),
+            current.revision,
+            f"legacy-put:{uuid4()}",
+        )
+    except PlanConflictError as exc:  # pragma: no cover - current was just read
+        return _conflict_response(exc)
+    return {"saved": True, "courses": len(body.courses), **_canonical_response(envelope)}
+
+
+@router.get("/timetable/canonical")
+async def read_canonical_timetable_route(
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Read the complete server-owned planner state."""
+
+    return _canonical_response(await read_canonical_timetable(db, user.id, term))
+
+
+@router.patch("/timetable")
+async def update_timetable(
+    body: TimetableUpdateIn,
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        envelope = await update_canonical_timetable(
+            db,
+            user.id,
+            term,
+            body.changes,
+            body.expected_revision,
+            body.idempotency_key,
+        )
+    except PlanConflictError as exc:
+        return _conflict_response(exc)
+    except PlanValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    return _canonical_response(envelope)
+
+
+@router.post("/timetable/undo")
+async def undo_timetable(
+    body: TimetableUndoIn,
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        envelope = await undo_canonical_timetable(
+            db,
+            user.id,
+            term,
+            body.expected_revision,
+            body.idempotency_key,
+        )
+    except PlanConflictError as exc:
+        return _conflict_response(exc)
+    except PlanValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    return _canonical_response(envelope)
 
 
 @router.get("/timetable")
 async def read_timetable(
+    term: str | None = Query(default=None, min_length=3, max_length=32),
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    row = await db.get(StudentTimetable, user.id)
-    if row is None:
-        return {"term": None, "courses": [], "busy_blocks": [], "updated_at": None}
-    return {"term": row.term, **row.payload, "updated_at": row.updated_at}
+    """Read the canonical plan with the legacy projection at the top level."""
+
+    requested_term = term or current_term()
+    return _canonical_response(await read_canonical_timetable(db, user.id, requested_term))
+
+
+@router.get("/timetable/export.ics")
+async def export_timetable_ics(
+    term: str = Query(min_length=3, max_length=32),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    revision: int = Query(ge=0),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Export one saved timetable revision as a bounded weekly calendar."""
+    if not _SAFE_TERM.fullmatch(term):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "term contains unsupported characters")
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "start_date and end_date are required to export a semester calendar",
+        )
+    if end_date <= start_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "end_date must be after start_date")
+    if (end_date - start_date).days > 240:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "calendar export cannot span more than 240 days")
+
+    from icalendar import Calendar, Event
+
+    envelope = await read_canonical_timetable(db, user.id, term)
+    if envelope.revision != revision:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the timetable changed; reload it before exporting")
+    if not envelope.state.entries:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "there are no timetable entries to export")
+    if envelope.state.generation_error or envelope.state.unscheduled_courses:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "the timetable is incomplete; generate a current schedule before exporting",
+        )
+
+    calendar = Calendar()
+    calendar.add("prodid", "-//Devrimo//Schedule Planner//EN")
+    calendar.add("version", "2.0")
+    calendar.add("calscale", "GREGORIAN")
+    calendar.add("method", "PUBLISH")
+    calendar.add("x-wr-timezone", "Europe/Istanbul")
+    mode_label = " (what-if)" if envelope.state.what_if or envelope.state.ignore_constraints else ""
+    calendar.add("x-wr-calname", f"Devrimo {term} schedule{mode_label}")
+    day_number = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4}
+    now = datetime.now(timezone.utc)
+    # RFC 5545 requires RRULE UNTIL to be UTC when DTSTART carries a TZID.
+    until = datetime.combine(end_date, dt_time(23, 59, 59), tzinfo=ISTANBUL).astimezone(timezone.utc)
+    export_owner = hashlib.sha256(str(user.id).encode("utf-8")).hexdigest()[:16]
+
+    for entry in envelope.state.entries:
+        weekday = day_number.get(entry.day)
+        if weekday is None:
+            continue
+        offset = (weekday - start_date.weekday()) % 7
+        first_date = start_date + timedelta(days=offset)
+        if first_date > end_date:
+            continue
+        starts_at = datetime.combine(
+            first_date,
+            dt_time(entry.start_minute // 60, entry.start_minute % 60),
+            tzinfo=ISTANBUL,
+        )
+        ends_at = starts_at + timedelta(minutes=entry.duration_minutes)
+        # Generated solver entries receive fresh UUIDs on every run.  The
+        # export identity follows the class occurrence instead, so calendar
+        # clients update an existing event when the student regenerates the
+        # same section rather than creating duplicates.
+        stable = hashlib.sha256(
+            f"{user.id}:{term}:{entry.code}:{entry.section}:{entry.day}:{entry.start_minute}:{entry.duration_minutes}:{entry.room}:{entry.instructor}".encode("utf-8")
+        ).hexdigest()[:24]
+        event = Event()
+        event.add("uid", f"{stable}.{export_owner}@devrimo")
+        event.add("dtstamp", now)
+        event.add("dtstart", starts_at)
+        event.add("dtend", ends_at)
+        event.add("rrule", {"freq": "weekly", "until": until})
+        label = f"{entry.code}{f' · Section {entry.section}' if entry.section else ''}"
+        if mode_label:
+            label = f"[What-if] {label}"
+        event.add("summary", label if not entry.name else f"{label} · {entry.name}")
+        description = []
+        if entry.instructor:
+            description.append(f"Instructor: {entry.instructor}")
+        description.append(f"Term: {term}")
+        if envelope.state.what_if or envelope.state.ignore_constraints:
+            description.append("What-if plan; verify eligibility before registration.")
+        event.add("description", "\n".join(description))
+        if entry.room and entry.room.strip().casefold() not in {"tba", "unknown", "-", "—"}:
+            event.add("location", entry.room)
+            event.add(
+                "url",
+                "https://www.google.com/maps/search/?" + urlencode({"api": "1", "query": f"METU {entry.room}"}),
+            )
+        event.add("sequence", envelope.revision)
+        calendar.add_component(event)
+
+    return Response(
+        content=calendar.to_ical(),
+        media_type="text/calendar; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="devrimo-{term}-schedule.ics"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/departments/search")
@@ -291,6 +580,44 @@ async def search_departments(
     # ``departments`` is the normalized list the schedule page's picker binds to;
     # ``data`` stays for callers that want the untouched catalog payload.
     return {"data": data, "departments": department_options(data)}
+
+
+def _published_terms(value: Any) -> list[str]:
+    """Extract only bounded METU term codes from the catalog response."""
+
+    found: set[str] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if str(key).casefold() in {"semester", "semester_code", "term", "term_code", "code"}:
+                    match = re.fullmatch(r"20\d{2}[1-3]", str(child).strip())
+                    if match:
+                        found.add(match.group(0))
+                visit(child)
+        elif isinstance(item, list):
+            for child in item[:200]:
+                visit(child)
+        elif isinstance(item, str):
+            found.update(re.findall(r"20\d{2}[1-3]", item))
+
+    visit(value)
+    return sorted(found, reverse=True)
+
+
+@router.get("/semesters")
+async def published_semesters(
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the bounded term list published by Course Info."""
+
+    try:
+        payload = await call_course_info(db, user.id, "get_departments_and_semesters", {})
+        terms = _published_terms(payload)
+    except HTTPException as exc:
+        return {"semesters": [current_term()], "source": "fallback", "warning": str(exc.detail)}
+    return {"semesters": terms or [current_term()], "source": "catalog", "warning": None}
 
 
 @router.get("/courses")
@@ -534,7 +861,7 @@ def _credit_value(raw: Any) -> float:
     return float(match.group(0)) if match else 0.0
 
 
-@router.get("/courses/{course_code}")
+@router.get("/courses/{course_code}", response_model=CourseSectionsResponse)
 async def course_sections(
     course_code: str = Path(min_length=3, max_length=20),
     department: str = Query(min_length=1, max_length=20),
@@ -546,15 +873,14 @@ async def course_sections(
         compact_course, lookup_department = await _expand_course(
             db, user.id, course_code, department, session=catalog
         )
-        return {
-            "data": await call_course_info(
-                db,
-                user.id,
-                "get_course_info",
-                {"department": lookup_department, "semester": semester, "course": compact_course},
-                session=catalog,
-            )
-        }
+        data = await call_course_info(
+            db,
+            user.id,
+            "get_course_info",
+            {"department": lookup_department, "semester": semester, "course": compact_course},
+            session=catalog,
+        )
+        return {"data": data, "sections": _tag_catalog_sections(normalize_sections(data), compact_course, lookup_department)}
 
 
 class BulkConstraintsRequest(BaseModel):
@@ -613,8 +939,7 @@ async def bulk_course_sections(
 
         for raw, (compact_course, lookup_department) in expanded.items():
             try:
-                results[raw] = {
-                    "data": await call_course_info(
+                data = await call_course_info(
                         db,
                         user.id,
                         "get_course_info",
@@ -625,7 +950,7 @@ async def bulk_course_sections(
                         },
                         session=catalog,
                     )
-                }
+                results[raw] = {"data": data, "sections": _tag_catalog_sections(normalize_sections(data), compact_course, lookup_department)}
             except HTTPException as exc:
                 logger.info("bulk_sections_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"error": str(exc.detail)}
@@ -727,6 +1052,9 @@ class _StudentProfile:
     department: Any
     cgpa: float | None
     completed: list[dict]
+    has_snapshot: bool
+    snapshot_fetched_at: datetime | None
+    context_fingerprint: str
 
 
 async def _student_profile(db: AsyncSession, user: AuthenticatedUser) -> _StudentProfile:
@@ -746,6 +1074,20 @@ async def _student_profile(db: AsyncSession, user: AuthenticatedUser) -> _Studen
         department=departments.resolve(code or query),
         cgpa=cgpa,
         completed=list(snapshot.completed_courses) if snapshot else [],
+        has_snapshot=snapshot is not None,
+        snapshot_fetched_at=snapshot.fetched_at if snapshot else None,
+        context_fingerprint=planning_context_fingerprint(
+            {
+                "department": getattr(context, "department", None),
+                "program_code": getattr(context, "program_code", None),
+                "degree_level": getattr(context, "degree_level", None),
+                "year_of_study": getattr(context, "year_of_study", None),
+                "surname_prefix": getattr(context, "surname_prefix", None),
+                "campus": getattr(context, "campus", None),
+                "verified_at": getattr(context, "verified_at", None),
+                "confirmed_at": getattr(context, "confirmed_at", None),
+            }
+        ),
     )
 
 
@@ -759,13 +1101,51 @@ async def _constraints_for(
     semester: str,
     profile: _StudentProfile,
 ) -> dict:
+    info_values = {"department": lookup_department, "semester": semester, "course": compact_course}
     info = await call_course_info(
         db,
         user.id,
         "get_course_info",
-        {"department": lookup_department, "semester": semester, "course": compact_course},
+        info_values,
         session=catalog,
     )
+    info_expires_at = await catalog_answer_expires_at(db, user.id, "get_course_info", info_values)
+    normalized_sections = {
+        str(row.get("section") or ""): row
+        for row in normalize_sections(info)
+        if isinstance(row, dict)
+    }
+
+    prerequisite_ok = True
+    prerequisite_reason = ""
+    prerequisite_known = True
+    prerequisite_expires_at: datetime | None = None
+    try:
+        prerequisite_values = {
+            "department": lookup_department,
+            "semester": semester,
+            "course": compact_course,
+        }
+        prerequisite_payload = await call_course_info(
+            db,
+            user.id,
+            "get_course_prerequisites",
+            prerequisite_values,
+            session=catalog,
+        )
+        prerequisite_expires_at = await catalog_answer_expires_at(
+            db, user.id, "get_course_prerequisites", prerequisite_values
+        )
+        prerequisite_rows = prerequisites._rows(prerequisite_payload)
+        missing = prerequisites.unmet_prerequisites(prerequisite_rows, profile.completed)
+        if missing:
+            prerequisite_ok = False
+            prerequisite_reason = f"Missing prerequisite: {prerequisites.display_code(missing[0])}"
+        if prerequisite_rows and not profile.has_snapshot:
+            prerequisite_known = False
+    except (HTTPException, ValueError):
+        prerequisite_known = False
+        prerequisite_reason = "Prerequisite data is temporarily unavailable"
 
     # A section reserved for students who still need the course is closed to
     # one who has already passed it, and only the transcript knows which.
@@ -774,6 +1154,7 @@ async def _constraints_for(
     # whoever owns it. Passing the student's department here would look for
     # "EE213", a course that does not exist.
     course_owner = departments.by_code(lookup_department)
+    signed_course_code = _signed_course_code(compact_course, lookup_department)
     held = prior_grade(
         profile.completed,
         course_candidates(course_code, course_owner, compact_course),
@@ -782,24 +1163,42 @@ async def _constraints_for(
     sections: dict[str, Any] = {}
     for number in section_numbers(info):
         try:
+            constraint_values = {
+                "department": lookup_department,
+                "semester": semester,
+                "course": compact_course,
+                "section": number,
+            }
             payload = await call_course_info(
                 db,
                 user.id,
                 "get_section_constraints",
-                {
-                    "department": lookup_department,
-                    "semester": semester,
-                    "course": compact_course,
-                    "section": number,
-                },
+                constraint_values,
                 session=catalog,
+            )
+            constraint_expires_at = await catalog_answer_expires_at(
+                db, user.id, "get_section_constraints", constraint_values
             )
         except HTTPException as exc:
             # A section whose table cannot be read must not fail the whole
             # course: the student still gets its times, just no verdict.
             logger.warning("section_constraints_failed", course=compact_course, section=number, detail=exc.detail)
+            sections[number] = {
+                "rows": [],
+                "eligible": None,
+                "eligibility_status": "unavailable",
+                "reason": "Eligibility data is temporarily unavailable",
+            }
             continue
         rows = _constraint_rows(payload)
+        if rows is None:
+            sections[number] = {
+                "rows": [],
+                "eligible": None,
+                "eligibility_status": "unavailable",
+                "reason": "Eligibility data was not returned in a valid form",
+            }
+            continue
         verdict = evaluate(
             rows,
             department=profile.department.abbreviation if profile.department else None,
@@ -808,10 +1207,45 @@ async def _constraints_for(
             year=profile.context.year_of_study if profile.context else None,
             prior_grade=held,
         )
+        section_meetings = normalized_sections.get(number, {}).get("meetings", [])
+        verified = _eligibility_is_verified(rows, profile, held) and prerequisite_known and bool(section_meetings)
+        eligible = verdict.eligible and prerequisite_ok
+        if not prerequisite_ok and prerequisite_known:
+            verified = True
+        if not prerequisite_known:
+            eligible = None
+        elif not prerequisite_ok:
+            eligible = False
+        reason = verdict.reason
+        if prerequisite_reason:
+            reason = prerequisite_reason if not prerequisite_ok or not prerequisite_known else reason
+        token = (
+            issue_eligibility_token(
+                user.id,
+                semester,
+                signed_course_code,
+                number,
+                eligibility_status="verified",
+                eligible=eligible is True,
+                context_verified_at=profile.context.verified_at if profile.context else None,
+                snapshot_fetched_at=profile.snapshot_fetched_at,
+                meetings=section_meetings,
+                source_expires_at=min(
+                    value for value in (info_expires_at, constraint_expires_at, prerequisite_expires_at) if value is not None
+                ) if any(value is not None for value in (info_expires_at, constraint_expires_at, prerequisite_expires_at)) else None,
+                context_fingerprint=profile.context_fingerprint,
+            )
+            if verified and eligible is True
+            else None
+        )
         sections[number] = {
             "rows": rows,
-            "eligible": verdict.eligible,
-            "reason": verdict.reason,
+            "eligible": eligible if verified else None,
+            "eligibility_status": "verified" if verified else "unverified",
+            "reason": reason if verified else "Student context, transcript, or prerequisite data is not verified",
+            "eligibility_token": token,
+            "eligibility_course_code": signed_course_code,
+            "eligibility_raw_code": compact_course,
         }
 
     return {
@@ -823,15 +1257,9 @@ async def _constraints_for(
     }
 
 
-def _constraint_rows(payload: Any) -> list[dict[str, Any]]:
+def _constraint_rows(payload: Any) -> list[dict[str, Any]] | None:
     """The eligibility rows out of whatever shape the tool returned."""
-    if isinstance(payload, dict):
-        rows = payload.get("constraints")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict) and "given_dept" in row]
-    return []
+    return validated_constraint_rows(payload)
 
 
 _CURRICULUM_NAMESPACE = "schedule-curriculum"
@@ -1078,3 +1506,36 @@ async def ai_schedule_plan(
     breaks every tab that was already open.
     """
     return await curriculum_plan(body, user, db)
+
+
+@router.post("/curriculum/full", response_model=CurriculumFullResponse)
+async def curriculum_full(
+    body: AiScheduleRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return every curriculum row for the course-management workspace."""
+    try:
+        async with catalog_session(db, user.id) as catalog:
+            board = await call_course_info(db, user.id, "get_student_curriculum", {}, session=catalog)
+        rows = curriculum.all_semester_courses(board)
+    except (HTTPException, ValueError) as exc:
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        return {"courses": [], "source": "sais_curriculum", "warning": detail}
+    return {
+        "courses": [
+            {
+                "semester": row["semester"],
+                "semester_completed": row["semester_completed"],
+                "course_code": row["course_code"],
+                "course_name": row["course_name"],
+                "grade": row["grade"],
+                "status": row["status"],
+                "credits": _credit_value(row.get("credit")),
+            }
+            for row in rows
+        ],
+        "source": "sais_curriculum",
+        "fetched_at": None,
+        "warning": None,
+    }

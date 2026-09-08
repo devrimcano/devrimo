@@ -14,14 +14,36 @@ flock -n 9 || { echo "Another Devrimo deployment is already running"; exit 1; }
 
 test -f "$RELEASE_ARCHIVE"
 test -f "$DEPLOY_DIR/backend/.env"
+test -f "$DEPLOY_DIR/backend/.env.migrations"
 test -f "$DEPLOY_DIR/frontend/.env.local"
 
-# The application connects through an async driver; pg_dump reaches the same
-# database through libpq, so only the driver suffix is dropped. tr strips any
-# surrounding quotes (octal escapes keep this line quote-free).
-DATABASE_URL="$(sed -n -e 's/^DATABASE_URL=//p' "$DEPLOY_DIR/backend/.env" | tail -1 | tr -d '\042\047')"
-test -n "$DATABASE_URL" || { echo "DATABASE_URL is not set in backend/.env"; exit 1; }
-PG_URL="${DATABASE_URL/+asyncpg/}"
+# Release-only credentials may target the staged database before runtime cutover.
+# Translate asyncpg's TLS query option for libpq without modifying credentials.
+PG_URL="$(
+  set -a
+  source "$DEPLOY_DIR/backend/.env.migrations"
+  set +a
+  python3 - <<'PYURL'
+import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+value = os.environ.get("DATABASE_MIGRATION_URL")
+if not value:
+    raise SystemExit("DATABASE_MIGRATION_URL is required in backend/.env.migrations")
+url = urlsplit(value)
+if url.scheme.split("+", 1)[0] != "postgresql":
+    raise SystemExit("Release backup requires PostgreSQL")
+query = dict(parse_qsl(url.query, keep_blank_values=True))
+if "ssl" in query:
+    mode = query.pop("ssl")
+    if mode not in {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}:
+        raise SystemExit("Unsupported PostgreSQL TLS mode")
+    if "sslmode" in query and query["sslmode"] != mode:
+        raise SystemExit("Conflicting PostgreSQL TLS modes")
+    query["sslmode"] = mode
+print(urlunsplit(("postgresql", url.netloc, url.path, urlencode(query), url.fragment)))
+PYURL
+)"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP_DIR"
@@ -33,7 +55,7 @@ tar -czf "$BACKUP_DIR/source-$stamp.tar.gz" \
   --exclude='./frontend/.next' \
   --exclude='./frontend/.env.local' \
   --exclude='./backend/.venv' \
-  --exclude='./backend/.env' \
+  --exclude='./backend/.env*' \
   --exclude='./backend/.campus-state' \
   --exclude='./backend/.agentos' \
   --exclude='./node' \
@@ -64,7 +86,7 @@ rsync -a --delete \
   --exclude='.next/' \
   "$stage_dir/frontend/" "$DEPLOY_DIR/frontend/"
 rsync -a --delete \
-  --exclude='.env' \
+  --exclude='.env*' \
   --exclude='.venv/' \
   --exclude='.campus-state/' \
   --exclude='.agentos/' \
@@ -145,9 +167,9 @@ bash -lc "
 "
 
 # Keep the migration/restart window short. Alembic migrations in this project
-# are additive; the database snapshot above remains available for recovery.
+# may change ownership and remove retired columns; keep the recovery snapshot.
 sudo /usr/bin/systemctl stop devrimo-api.service
-if ! bash -lc "cd '$DEPLOY_DIR/backend' && .venv/bin/python -m alembic upgrade head"; then
+if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && .venv/bin/python -m alembic upgrade head"; then
   sudo /usr/bin/systemctl start devrimo-api.service
   exit 1
 fi
@@ -157,7 +179,8 @@ fi
 # Every long-running unit that loads this source tree belongs in this list.
 sudo /usr/bin/systemctl restart devrimo-api.service
 sudo /usr/bin/systemctl restart devrimo-web.service
-sudo /usr/bin/systemctl restart devrimo-knowledge-worker.service
+worker_units=(devrimo-assistant-worker.service devrimo-knowledge-worker.service devrimo-embedding-worker.service devrimo-researcher-worker.service devrimo-directory-worker.service devrimo-catalog-worker.service devrimo-retention-worker.service)
+sudo /usr/bin/systemctl restart "${worker_units[@]}"
 
 for attempt in {1..30}; do
   api_ok=false
@@ -165,7 +188,7 @@ for attempt in {1..30}; do
   worker_ok=false
   curl -fsS http://127.0.0.1:8000/health >/dev/null && api_ok=true
   curl -fsS -o /dev/null http://127.0.0.1:3000/ && web_ok=true
-  systemctl is-active --quiet devrimo-knowledge-worker.service && worker_ok=true
+  systemctl is-active --quiet "${worker_units[@]}" && worker_ok=true
   if "$api_ok" && "$web_ok" && "$worker_ok"; then
     printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.deployed-sha"
     rm -f "$RELEASE_ARCHIVE"
@@ -177,6 +200,6 @@ done
 
 sudo /usr/bin/systemctl status devrimo-api.service --no-pager || true
 sudo /usr/bin/systemctl status devrimo-web.service --no-pager || true
-sudo /usr/bin/systemctl status devrimo-knowledge-worker.service --no-pager || true
+sudo /usr/bin/systemctl status "${worker_units[@]}" --no-pager || true
 journalctl -u devrimo-api.service -u devrimo-web.service -u devrimo-knowledge-worker.service -n 100 --no-pager || true
 exit 1

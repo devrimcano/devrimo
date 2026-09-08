@@ -1,202 +1,73 @@
-"""Broad first-party tools backed by the shared campus intelligence services."""
+"""Exactly seven operations over the same workspace services as the API."""
 
-from datetime import datetime
 from uuid import UUID
 
 from agno.tools.decorator import tool
-from sqlalchemy import select
 
-from app.admin.directory import active_account
-from app.campus import departments as department_directory
-from app.campus.course_info import call_course_info
-from app.campus.eligibility import course_candidates, prior_grade
-from app.campus.eligibility import evaluate as evaluate_eligibility
-from app.db.models import StudentAcademicSnapshot, StudentContext
-from app.db.session import SessionLocal
-from app.knowledge.retrieval import SearchFilters, search_knowledge
-from app.knowledge.retrieval import read_campus_page as read_indexed_page
-from app.planning.calculator import compute as calculate
-from app.planning.groups import get_course_group as resolve_course_group
-from app.planning.mcp_bridge import refresh_from_sais
+from app.agents.memory import MemoryChanges
+from app.planning.models import PlanChanges
 from app.planning.service import SemesterPlanRequest
-from app.planning.service import plan_semester as build_plan
-from app.student import service as student_service
+from app.workspace.resources import EmailDraft, PreferenceChanges, ResourceRef, SearchRequest, UpdateStateChanges
+from app.workspace.service import WorkspaceService
 
 
-def build_platform_tools(user_id: UUID, connected: list) -> list:
-    @tool(name="search_campus_knowledge")
-    async def search_campus_knowledge(
-        query: str,
-        record_types: list[str] | None = None,
-        starts_after: str | None = None,
-        starts_before: str | None = None,
-        limit: int = 10,
-    ) -> list[dict]:
-        """Search indexed campus facts with verified student-audience filters and citations."""
-        async with SessionLocal() as db:
-            account = await active_account(db, user_id)
-            if account is None:
-                return []
-            context = await student_service.get_context(db, user_id)
-            return await search_knowledge(
-                db,
-                query,
-                SearchFilters(
-                    record_types=tuple(record_types or []),
-                    campus=context.campus,
-                    department=context.department,
-                    degree_level=context.degree_level,
-                    starts_after=datetime.fromisoformat(starts_after) if starts_after else None,
-                    starts_before=datetime.fromisoformat(starts_before) if starts_before else None,
-                ),
-                organization_id=account.organization_id,
-                limit=max(1, min(limit, 25)),
-            )
+def build_platform_tools(user_id: UUID) -> list:
+    from app.config import get_settings
 
-    @tool(name="read_campus_page")
-    async def read_campus_page(url: str) -> dict:
-        """Read one already-approved, indexed campus page by its canonical URL."""
-        async with SessionLocal() as db:
-            account = await active_account(db, user_id)
-            result = await read_indexed_page(db, url, organization_id=account.organization_id) if account else None
-            return result or {"status": "not_indexed", "url": url}
+    settings = get_settings()
+    if settings.database_runtime_role == "assistant":
+        from app.workspace.client import WorkspaceClient
 
-    @tool(name="plan_semester")
-    async def plan_semester(request: dict) -> dict:
-        """Deterministically plan from server-fetched transcript, offerings, prerequisites, and policies."""
-        parsed = SemesterPlanRequest.model_validate(request)
-        await refresh_from_sais(user_id, parsed.term, connected)
-        async with SessionLocal() as db:
-            return await build_plan(db, user_id, parsed)
+        gateway_url = getattr(settings, "workspace_gateway_url", "")
+        if not gateway_url:
+            raise RuntimeError("Assistant workers require WORKSPACE_GATEWAY_URL")
+        workspace = WorkspaceClient(gateway_url)
+    else:
+        workspace = WorkspaceService(user_id)
 
-    @tool(name="get_course_group")
-    async def get_course_group(course: str, term: str, section: str | None = None) -> dict:
-        """Return a curated course-group invite only after code-level enrollment checks."""
-        await refresh_from_sais(user_id, term, connected)
-        async with SessionLocal() as db:
-            return await resolve_course_group(db, user_id, term=term, course_code=course, section=section)
+    @tool(name="search")
+    async def search(request: SearchRequest) -> dict:
+        """Search a typed campus, catalog or mailbox resource. Results carry provenance."""
+        return await workspace.search(SearchRequest.model_validate(request))
 
-    @tool(name="lookup_department")
-    async def lookup_department(value: str) -> dict:
-        """Resolve a METU department code, abbreviation, name or course code to one department."""
-        found = department_directory.resolve(value)
-        if found is None:
-            return {"status": "not_found", "query": value}
-        return {
-            "code": found.code,
-            "abbreviation": found.abbreviation,
-            "name_en": found.name_en,
-            "name_tr": found.name_tr,
-        }
+    @tool(name="read")
+    async def read(resource: ResourceRef) -> dict:
+        """Read a resource; student.registered_schedule is SAIS, planning.timetable is the editable week."""
+        return await workspace.read(ResourceRef.model_validate(resource))
 
-    @tool(name="get_course_sections")
-    async def get_course_sections(course_code: str, semester: str) -> dict:
-        """Sections, instructors, days, rooms and credits for a course, from the cached catalog.
+    @tool(name="plan")
+    async def plan(request: SemesterPlanRequest) -> dict:
+        """Propose a deterministic semester plan from verified transcript and catalog; does not save."""
+        return await workspace.plan(SemesterPlanRequest.model_validate(request).model_dump())
 
-        Accepts either form a student uses: "PHYS213" or "2300213".
-        """
-        expanded = department_directory.expand_course_code(course_code)
-        if expanded is None:
-            return {
-                "status": "unknown_course_code",
-                "course": course_code,
-                "detail": "Use a department abbreviation with a course number (PHYS213) or the full seven-digit code.",
-            }
-        full_code, owner = expanded
-        async with SessionLocal() as db:
-            return {
-                "course": full_code,
-                "department": owner.code,
-                "department_name": owner.name_en,
-                "semester": semester,
-                "data": await call_course_info(
-                    db,
-                    user_id,
-                    "get_course_info",
-                    {"department": owner.code, "semester": semester, "course": full_code},
-                ),
-            }
-
-    @tool(name="check_section_eligibility")
-    async def check_section_eligibility(course_code: str, semester: str, section: str) -> dict:
-        """Whether this student may register for one section, per METU's own eligibility table.
-
-        Answers from the table SAIS publishes for the section — the departments
-        it admits and their surname, CGPA and year ranges — not from anything
-        the student says in chat.
-        """
-        expanded = department_directory.expand_course_code(course_code)
-        if expanded is None:
-            return {
-                "status": "unknown_course_code",
-                "course": course_code,
-                "detail": "Use a department abbreviation with a course number (PHYS213) or the full seven-digit code.",
-            }
-        full_code, owner = expanded
-        async with SessionLocal() as db:
-            payload = await call_course_info(
-                db,
-                user_id,
-                "get_section_constraints",
-                {
-                    "department": owner.code,
-                    "semester": semester,
-                    "course": full_code,
-                    "section": section,
-                },
-            )
-            context = await db.get(StudentContext, user_id)
-            snapshot = await db.scalar(
-                select(StudentAcademicSnapshot)
-                .where(StudentAcademicSnapshot.user_id == user_id)
-                .order_by(StudentAcademicSnapshot.fetched_at.desc())
-                .limit(1)
-            )
-        rows = payload.get("constraints") if isinstance(payload, dict) else None
-        rows = [row for row in (rows or []) if isinstance(row, dict)]
-        student = department_directory.resolve(
-            (context.department or context.program_code) if context else None
+    @tool(name="update")
+    async def update(
+        resource: ResourceRef,
+        changes: PlanChanges | MemoryChanges | PreferenceChanges | UpdateStateChanges,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict:
+        """Save editable timetable changes against its current revision with a unique request key."""
+        return await workspace.update(
+            ResourceRef.model_validate(resource),
+            changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
+            expected_revision,
+            idempotency_key,
         )
-        cgpa = None
-        if snapshot and snapshot.current_credits:
-            cgpa = float(snapshot.current_grade_points) / float(snapshot.current_credits)
-        # A section restricted to students who still need the course is not
-        # open to one who has already passed it, and the transcript is the
-        # only place that says which they are.
-        held = prior_grade(
-            snapshot.completed_courses if snapshot else [],
-            course_candidates(course_code, owner, full_code),
-        )
-        verdict = evaluate_eligibility(
-            rows,
-            department=student.abbreviation if student else None,
-            surname=context.surname_prefix if context else None,
-            cgpa=cgpa,
-            year=context.year_of_study if context else None,
-            prior_grade=held,
-        )
-        return {
-            "course": full_code,
-            "section": section,
-            "student_department": student.abbreviation if student else None,
-            "your_grade_in_this_course": held,
-            "eligible": verdict.eligible,
-            "reason": verdict.reason,
-            "constraints": rows,
-        }
+
+    @tool(name="undo")
+    async def undo(resource: ResourceRef, expected_revision: int, idempotency_key: str) -> dict:
+        """Undo the latest saved timetable revision, preserving history and rejecting stale edits."""
+        return await workspace.undo(ResourceRef.model_validate(resource), expected_revision, idempotency_key)
+
+    @tool(name="send_email", requires_confirmation=True)
+    async def send_email(draft: EmailDraft) -> dict:
+        """Send or reply to the exact message shown for explicit student confirmation."""
+        return await workspace.send_approved_email(EmailDraft.model_validate(draft))
 
     @tool(name="compute")
-    def compute(expression: str) -> float:
-        """Safely evaluate arithmetic expressions without code execution."""
-        return calculate(expression)
+    async def compute(expression: str) -> dict:
+        """Evaluate bounded arithmetic without executing code."""
+        return await workspace.compute(expression)
 
-    return [
-        search_campus_knowledge,
-        read_campus_page,
-        plan_semester,
-        get_course_group,
-        lookup_department,
-        get_course_sections,
-        check_section_eligibility,
-        compute,
-    ]
+    return [search, read, plan, update, undo, send_email, compute]

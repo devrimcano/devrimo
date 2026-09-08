@@ -111,6 +111,14 @@ RUN set -eux; \
     done; \
     rm -rf /tmp/course_info_patch
 
+# Expose existing client thread headers so replies send exactly the approved
+# recipient, subject and body, without upstream implicit quoting or recipients.
+COPY vendor_patches/webmail/patch_server.py /tmp/patch_webmail.py
+RUN python /tmp/patch_webmail.py /opt/mcp/webmail/src/metu_webmail_mcp/server.py \
+    && printf 'webmail-patch %s vendor_patches/webmail/patch_server.py\n' \
+        "$(sha256sum /tmp/patch_webmail.py | cut -d" " -f1)" >> /opt/mcp/MANIFEST \
+    && rm /tmp/patch_webmail.py
+
 # Installed as a built wheel, not `-e`, so nothing at runtime depends on the
 # source tree layout surviving. metu-odtuclass-mcp ships loose modules and a
 # requirements.txt rather than an installable package, so it gets its
@@ -160,4 +168,4 @@ USER devrimo
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

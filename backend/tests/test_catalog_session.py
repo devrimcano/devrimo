@@ -9,6 +9,7 @@ connection brought it to 6.5s, and opening it lazily kept a warm page free.
 
 import asyncio
 import uuid
+from unittest.mock import AsyncMock
 
 import app.campus.course_info as course_info
 from app.campus.course_info import CatalogSession, catalog_session
@@ -67,7 +68,6 @@ async def test_the_connection_is_closed_even_when_the_caller_raises(monkeypatch)
     assert session_seen[0]._stack is None
 
 
-
 async def test_two_catalog_reads_for_one_student_never_overlap(monkeypatch):
     """The Course Info server holds one stateful SAIS session per student.
 
@@ -82,6 +82,7 @@ async def test_two_catalog_reads_for_one_student_never_overlap(monkeypatch):
     two reads of the *same* key and would hide the absence of a lock.
     """
     _count_connections(monkeypatch)
+    monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
     course_info._catalog.purge(lambda key: True)
     depth = [0]
     peak = [0]
@@ -109,14 +110,52 @@ async def test_two_catalog_reads_for_one_student_never_overlap(monkeypatch):
 
     user_id = uuid.uuid4()
     async with catalog_session(None, user_id) as session:
-        await asyncio.gather(*[
-            course_info.call_course_info(
-                None,
-                user_id,
-                "get_course_info",
-                {"department": "236", "semester": "20252", "course": code},
-                session=session,
-            )
-            for code in ("2360111", "2360122", "2360133", "2360144")
-        ])
+        await asyncio.gather(
+            *[
+                course_info.call_course_info(
+                    None,
+                    user_id,
+                    "get_course_info",
+                    {"department": "236", "semester": "20252", "course": code},
+                    session=session,
+                )
+                for code in ("2360111", "2360122", "2360133", "2360144")
+            ]
+        )
     assert peak == [1], "two catalog calls for one student were in flight at once"
+
+
+async def test_waiting_request_does_not_block_current_session_next_read(monkeypatch):
+    """A held integration lease must be acquired before the process call lock."""
+    from contextlib import asynccontextmanager
+
+    lease_lock = asyncio.Lock()
+    waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def toolkit(db, user_id):
+        if lease_lock.locked():
+            waiting.set()
+        async with lease_lock:
+            yield _Toolkit()
+
+    async def call(db, user_id, toolkit, suffix, values):
+        return values
+
+    monkeypatch.setattr(course_info, "_catalog_toolkit", toolkit)
+    monkeypatch.setattr(course_info, "_call_toolkit", call)
+    user_id = uuid.uuid4()
+    async with catalog_session(None, user_id) as first:
+        await course_info._invoke(None, user_id, "get_course_info", {"course": "first"}, first)
+        competing = asyncio.create_task(course_info._invoke(None, user_id, "get_course_info", {"course": "other"}))
+        try:
+            await asyncio.wait_for(waiting.wait(), 1)
+            result = await asyncio.wait_for(
+                course_info._invoke(None, user_id, "get_course_info", {"course": "second"}, first), 1
+            )
+            assert result == {"course": "second"}
+        except BaseException:
+            competing.cancel()
+            await asyncio.gather(competing, return_exceptions=True)
+            raise
+    assert await asyncio.wait_for(competing, 1) == {"course": "other"}

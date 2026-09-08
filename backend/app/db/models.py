@@ -2,7 +2,6 @@ import enum
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -150,10 +149,9 @@ class AgentRuntimeSettings(Base):
 class Agent(Base):
     """A user's entitlement to an agent, plus its last known health.
 
-    Carries no container identity any more: the agent is built in-process on
-    demand (see :mod:`app.agents.pool`) and its conversation history lives in
-    the Agno tables, so there is nothing here that has to survive a restart
-    except the row itself.
+    Execution belongs to :mod:`app.assistant.worker`; durable requests and
+    event sequences live separately from this entitlement. Conversation history
+    lives in the same PostgreSQL database's Agno schema.
     """
 
     __tablename__ = "agents"
@@ -166,8 +164,6 @@ class Agent(Base):
 
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    turn_lock_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    turn_lock_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -455,14 +451,6 @@ class CampusKnowledgeRecord(Base):
             "source_id",
             postgresql_where=text("is_current"),
         ),
-        Index(
-            "ix_knowledge_records_embedding_model_current",
-            "embedding_model",
-            "source_id",
-            postgresql_where=text(
-                "is_current AND (embedding_384 IS NOT NULL OR embedding_768 IS NOT NULL OR embedding_1536 IS NOT NULL)"
-            ),
-        ),
         Index("ix_knowledge_records_type_dates", "record_type", "starts_at", "ends_at"),
         Index("ix_knowledge_records_audience", "campus", "department", "degree_level"),
         Index("ix_knowledge_records_published", "published_at", "id"),
@@ -491,10 +479,6 @@ class CampusKnowledgeRecord(Base):
     authority: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
-    embedding_384: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
-    embedding_768: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
-    embedding_1536: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -543,7 +527,8 @@ class StudentTimetable(Base):
     __tablename__ = "student_timetables"
 
     user_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    term: Mapped[str] = mapped_column(String(32), nullable=False)
+    term: Mapped[str] = mapped_column(String(32), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     # {"courses": [{code, name, section, credits, instructor, meetings: [...]}],
     #  "busy_blocks": [{name, meetings: [...]}]}
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -728,9 +713,58 @@ class UserMailFact(Base):
 
 
 # Register the public academic directory with the shared Alembic metadata.
+from app.knowledge.index_models import (  # noqa: E402,F401
+    KnowledgeIndexActivation,
+    KnowledgeIndexGeneration,
+    KnowledgeIndexJob,
+    KnowledgeIndexVector,
+)
 from app.researchers.models import (  # noqa: E402,F401
     Researcher,
     ResearcherImportItem,
     ResearcherImportRun,
     ResearcherSection,
 )
+
+
+class StudentResourceRevision(Base):
+    """Revision history and idempotency for student-owned editable resources."""
+
+    __tablename__ = "student_resource_revisions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "resource", "idempotency_key", name="uq_student_resource_idempotency"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    resource: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+from app.workspace.models import WorkspaceMemoryMutation  # noqa: E402,F401
+
+
+class StudentTimetableRevision(Base):
+    """Resulting plan snapshots and replay keys per student and term."""
+
+    __tablename__ = "timetable_revisions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "term", "revision", name="uq_timetable_revision"),
+        UniqueConstraint("user_id", "term", "idempotency_key", name="uq_timetable_idempotency"),
+        Index("ix_timetable_revisions_user_term_created", "user_id", "term", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    term: Mapped[str] = mapped_column(String(32), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+from app.assistant.models import AssistantRun, AssistantRunEvent  # noqa: E402,F401

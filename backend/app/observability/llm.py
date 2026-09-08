@@ -107,10 +107,11 @@ def _defaults(kwargs: dict[str, Any], input_token_price: float, output_token_pri
         # An explicit caller value always wins over the ambient one.
         kwargs["posthog_properties"] = {**merged, **(kwargs.get("posthog_properties") or {})}
 
-    # This project deliberately captures complete prompts and completions.
-    # The client-level before_send hook removes credentials without discarding
-    # the conversational content needed to investigate a bad turn.
-    kwargs["posthog_privacy_mode"] = False
+    # Academic prompts, transcript fragments and completions are student data.
+    # Keep generation metadata and usage metrics, but never send model input or
+    # output to the telemetry provider, even if a caller attempts to override
+    # the default.
+    kwargs["posthog_privacy_mode"] = True
 
     if kwargs.get("posthog_provider_override") is None:
         # Reported as $ai_provider so cost attribution does not claim these
@@ -245,7 +246,10 @@ class AiOperation:
     def failed(self, exc: BaseException, *, http_status: int | None = None) -> None:
         self.is_error = True
         self.error_type = exc.__class__.__name__
-        self.error_message = str(exc) or None
+        # Provider messages often echo a prompt, course query or upstream body.
+        # The class remains useful for grouping; the message is intentionally
+        # omitted from the AI span.
+        self.error_message = None
         if http_status is not None:
             self.http_status = http_status
 

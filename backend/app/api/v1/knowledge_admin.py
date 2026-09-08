@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.audit import record_event
@@ -25,7 +25,16 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.knowledge import registry
-from app.knowledge.embeddings import embedding_column, get_embedding_config
+from app.knowledge.embeddings import get_embedding_config
+from app.knowledge.indexes import (
+    IndexNotReady,
+    activate_generation,
+    active_generation,
+    create_generation,
+    generation_config,
+    list_generations,
+    lock_index_publication,
+)
 from app.knowledge.retrieval import SearchFilters, search_knowledge
 from app.knowledge.templates import DEFAULT_SOURCE_TEMPLATES
 from app.observability.client import report_exception
@@ -191,7 +200,10 @@ async def _source(db: AsyncSession, principal: AdminPrincipal, source_id: UUID) 
 
 
 def _source_out(
-    source: CampusSource, revisions: int | None = None, records: int | None = None, drafts: int | None = None,
+    source: CampusSource,
+    revisions: int | None = None,
+    records: int | None = None,
+    drafts: int | None = None,
 ) -> dict:
     return {
         "id": str(source.id),
@@ -350,27 +362,33 @@ async def batch_publish_sources(
         revisions = (await db.execute(statement)).scalars().all()
         candidate = next((r for r in revisions if r.validation.get("ok")), None)
         if not candidate:
-            failed.append({
-                "source_id": str(source.id),
-                "name": source.name,
-                "reason": "No valid revision available to publish",
-            })
+            failed.append(
+                {
+                    "source_id": str(source.id),
+                    "name": source.name,
+                    "reason": "No valid revision available to publish",
+                }
+            )
             continue
 
         try:
             job = await registry.publish_revision(db, source, candidate)
-            published.append({
-                "source_id": str(source.id),
-                "name": source.name,
-                "revision": candidate.revision,
-                "job_id": str(job.id),
-            })
+            published.append(
+                {
+                    "source_id": str(source.id),
+                    "name": source.name,
+                    "revision": candidate.revision,
+                    "job_id": str(job.id),
+                }
+            )
         except ValueError as exc:
-            failed.append({
-                "source_id": str(source.id),
-                "name": source.name,
-                "reason": str(exc),
-            })
+            failed.append(
+                {
+                    "source_id": str(source.id),
+                    "name": source.name,
+                    "reason": str(exc),
+                }
+            )
 
     await record_event(
         db,
@@ -398,14 +416,19 @@ async def bulk_update_sources(
     principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await lock_index_publication(db, _org(principal))
     sources = (
-        await db.execute(
-            select(CampusSource).where(
-                CampusSource.organization_id == _org(principal),
-                CampusSource.id.in_(body.source_ids),
+        (
+            await db.execute(
+                select(CampusSource).where(
+                    CampusSource.organization_id == _org(principal),
+                    CampusSource.id.in_(body.source_ids),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if len(sources) != len(body.source_ids):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "One or more sources were not found")
     changes = body.changes.model_dump(exclude_none=True)
@@ -579,48 +602,26 @@ async def enqueue_ingestion(
 
 async def _embedding_out(db: AsyncSession, organization_id: UUID) -> dict:
     config = await get_embedding_config(db, organization_id)
-    record_scope = (
-        select(func.count(CampusKnowledgeRecord.id))
-        .select_from(CampusKnowledgeRecord)
-        .join(CampusSource, CampusSource.id == CampusKnowledgeRecord.source_id)
-        .where(
-            CampusSource.organization_id == organization_id,
-            CampusSource.status == "published",
-            CampusSource.enabled.is_(True),
-            CampusKnowledgeRecord.is_current.is_(True),
-        )
-    )
-    total_records = int(await db.scalar(record_scope) or 0)
-    has_embedding = or_(
-        CampusKnowledgeRecord.embedding_384.is_not(None),
-        CampusKnowledgeRecord.embedding_768.is_not(None),
-        CampusKnowledgeRecord.embedding_1536.is_not(None),
-    )
-    embedded_records = int(await db.scalar(record_scope.where(has_embedding)) or 0)
-    current_model_records = (
-        int(
-            await db.scalar(
-                record_scope.where(
-                    CampusKnowledgeRecord.embedding_model == config.model_label,
-                    embedding_column(config.dimensions).is_not(None),
-                )
-            )
-            or 0
-        )
-        if config.enabled
-        else 0
-    )
-    active_jobs = int(
+    generations = await list_generations(db, organization_id)
+    active = next((item for item in generations if item["active"]), None)
+    candidate = generations[0] if generations else None
+    total_records = int(
         await db.scalar(
-            select(func.count(CampusIngestionJob.id))
-            .select_from(CampusIngestionJob)
-            .join(CampusSource, CampusSource.id == CampusIngestionJob.source_id)
+            select(func.count(CampusKnowledgeRecord.id))
+            .join(CampusSource)
             .where(
                 CampusSource.organization_id == organization_id,
-                CampusIngestionJob.status.in_(["queued", "leased", "failed"]),
+                CampusSource.status == "published",
+                CampusSource.enabled.is_(True),
+                CampusKnowledgeRecord.is_current.is_(True),
             )
         )
         or 0
+    )
+    embedded_records = active["ready"] if active else 0
+    current_model_records = candidate["ready"] if candidate else 0
+    active_jobs = sum(
+        item["status"] in {"queued", "running", "failed"} and item["ready"] < item["total"] for item in generations
     )
     return {
         "provider": config.provider,
@@ -637,6 +638,8 @@ async def _embedding_out(db: AsyncSession, organization_id: UUID) -> dict:
         "embedded_records": embedded_records,
         "current_model_records": current_model_records,
         "active_jobs": active_jobs,
+        "generations": generations,
+        "active_generation_id": active["id"] if active else None,
     }
 
 
@@ -653,6 +656,7 @@ async def debug_knowledge_search(
     q: str = Query(min_length=1, max_length=500),
     limit: int = Query(default=10, ge=1, le=25),
     source_id: UUID | None = None,
+    generation_id: UUID | None = None,
     language: Literal["tr", "en"] | None = None,
     record_type: str | None = Query(default=None, max_length=50),
     principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_read)),
@@ -663,16 +667,32 @@ async def debug_knowledge_search(
     if not query:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A non-empty search query is required")
     organization_id = _org(principal)
-    config = await get_embedding_config(db, organization_id)
+    if generation_id:
+        from app.knowledge.index_models import KnowledgeIndexGeneration
+
+        generation = await db.scalar(
+            select(KnowledgeIndexGeneration).where(
+                KnowledgeIndexGeneration.id == generation_id,
+                KnowledgeIndexGeneration.organization_id == organization_id,
+            )
+        )
+        if generation is None:
+            raise HTTPException(404, "Index generation not found")
+    else:
+        generation = await active_generation(db, organization_id)
+    config = generation_config(generation) if generation else None
     results = await search_knowledge(
-        db, query,
+        db,
+        query,
         SearchFilters(source_id=source_id, language=language, record_types=(record_type,) if record_type else ()),
-        organization_id=organization_id, limit=limit,
+        organization_id=organization_id,
+        limit=limit,
+        generation_id=generation.id if generation else None,
     )
     return {
         "query": query,
         "count": len(results),
-        "embedding_model": config.model_label if config.enabled else None,
+        "embedding_model": config.model_label if config and config.enabled else None,
         "items": results,
     }
 
@@ -706,6 +726,8 @@ async def update_embedding_settings(
         row.api_key_enc = encrypt_secret(supplied_key)
     elif body.provider != "remote" or body.clear_api_key:
         row.api_key_enc = None
+    await db.flush()
+    await create_generation(db, organization_id)
     await db.commit()
     await record_event(
         db,
@@ -735,44 +757,7 @@ async def reindex_embeddings(
     config = await get_embedding_config(db, organization_id)
     if not config.enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, "Enable a local or remote embedding provider first")
-    sources = (
-        (
-            await db.execute(
-                select(CampusSource)
-                .where(
-                    CampusSource.organization_id == organization_id,
-                    CampusSource.status == "published",
-                    CampusSource.enabled.is_(True),
-                    CampusSource.active_revision_id.is_not(None),
-                )
-                .order_by(CampusSource.id)
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
-    )
-    queued = []
-    for source in sources:
-        active = await db.scalar(
-            select(CampusIngestionJob.id).where(
-                CampusIngestionJob.source_id == source.id,
-                CampusIngestionJob.revision_id == source.active_revision_id,
-                CampusIngestionJob.kind == "reembed",
-                # Pending re-embeds read the latest settings when they start.
-                # Running jobs may already have captured the previous model,
-                # so they need a queued successor after a settings change.
-                CampusIngestionJob.status.in_(["queued", "failed"]),
-            )
-        )
-        if active is None:
-            job = CampusIngestionJob(
-                source_id=source.id,
-                revision_id=source.active_revision_id,
-                kind="reembed",
-            )
-            db.add(job)
-            queued.append(job)
+    generation = await create_generation(db, organization_id)
     await db.commit()
     await record_event(
         db,
@@ -780,9 +765,34 @@ async def reindex_embeddings(
         organization_id=organization_id,
         action="knowledge_embedding.reindex",
         result="success",
-        after={"queued": len(queued), "provider": config.provider, "model": config.model},
+        after={"generation_id": str(generation.id)},
     )
-    return {"queued": len(queued), "job_ids": [str(item.id) for item in queued]}
+    return {"queued": 1, "job_ids": [str(generation.id)], "generation_id": str(generation.id)}
+
+
+@router.post("/embedding/generations/{generation_id}/activate")
+async def activate_embedding_index(
+    generation_id: UUID,
+    principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_write)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    organization_id = _org(principal)
+    try:
+        await activate_generation(db, organization_id, generation_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except IndexNotReady as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    await record_event(
+        db,
+        actor_user_id=principal.user.id,
+        organization_id=organization_id,
+        action="knowledge_embedding.activate",
+        result="success",
+        after={"generation_id": str(generation_id)},
+    )
+    return await _embedding_out(db, organization_id)
 
 
 @router.get("/ingestion-jobs")
@@ -849,9 +859,7 @@ async def create_policy(
         )
     )
     if body.activate:
-        active = (
-            await db.execute(select(PlanningPolicy).where(PlanningPolicy.organization_id == org_id))
-        ).scalars()
+        active = (await db.execute(select(PlanningPolicy).where(PlanningPolicy.organization_id == org_id))).scalars()
         for item in active:
             item.active = False
     policy = PlanningPolicy(
@@ -1012,10 +1020,14 @@ async def update_group(
     principal: AdminPrincipal = Depends(require(AdminPermission.groups_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    group = (await db.execute(select(CourseGroupLink).where(
-        CourseGroupLink.id == group_id,
-        CourseGroupLink.organization_id == _org(principal),
-    ))).scalar_one_or_none()
+    group = (
+        await db.execute(
+            select(CourseGroupLink).where(
+                CourseGroupLink.id == group_id,
+                CourseGroupLink.organization_id == _org(principal),
+            )
+        )
+    ).scalar_one_or_none()
     if group is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Course group not found")
     group.course_code = body.course_code
@@ -1026,8 +1038,11 @@ async def update_group(
         group.invite_url_enc = encrypt_secret(body.invite_url)
     await db.commit()
     await record_event(
-        db, actor_user_id=principal.user.id, organization_id=_org(principal),
-        action="course_group.update", result="success",
+        db,
+        actor_user_id=principal.user.id,
+        organization_id=_org(principal),
+        action="course_group.update",
+        result="success",
         after={"group_id": str(group.id), "active": group.active},
     )
     return {"id": str(group.id), "active": group.active}

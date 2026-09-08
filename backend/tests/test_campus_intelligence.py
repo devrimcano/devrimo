@@ -1,6 +1,6 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -22,6 +22,8 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.knowledge.adapters import adapter_for
 from app.knowledge.fetcher import FetchPolicy, FetchRejected, _send_pinned, fetch_document
+from app.knowledge.index_models import KnowledgeIndexJob, KnowledgeIndexVector
+from app.knowledge.indexes import claim_index_job, process_index_batch
 from app.knowledge.ingestion import claim_job, process_job
 from app.knowledge.retrieval import read_campus_page, search_knowledge
 from app.knowledge.types import FetchedDocument
@@ -166,9 +168,7 @@ async def test_source_publish_ingest_search_and_personalized_updates(client, mon
         assert job is not None
         assert await process_job(db, job) == 1
         record = (await db.execute(select(CampusKnowledgeRecord))).scalar_one()
-        assert record.embedding_384 is None
-        assert record.embedding_768 is None
-        assert record.embedding_1536 is None
+        assert (await db.scalars(select(KnowledgeIndexVector))).all() == []
         assert record.is_current is True
 
     debug_search = await client.get(
@@ -305,25 +305,25 @@ async def test_source_publish_ingest_search_and_personalized_updates(client, mon
     assert reindex.status_code == 202, reindex.text
     assert reindex.json()["queued"] == 1
     async with SessionLocal() as db:
-        job = await claim_job(db, "embedding-worker")
-        assert job is not None and job.kind == "reembed"
-        assert await process_job(db, job) == 1
-        record = (await db.execute(select(CampusKnowledgeRecord))).scalar_one()
-        assert record.embedding_384 is not None and len(record.embedding_384) == 384
-        assert record.embedding_384[:3] == [1.0, 0.5, 0.25]
-        assert record.embedding_768 is None
-        assert record.embedding_1536 is None
-        assert record.embedding_model == "local:local-test:384"
+        lease = await claim_index_job(db, "embedding-worker")
+        assert lease is not None
+        assert await process_index_batch(db, lease[0], "embedding-worker", lease[1])
+        record = (await db.execute(select(KnowledgeIndexVector))).scalar_one()
+        assert len(record.embedding_384) == 384
+        assert list(record.embedding_384[:3]) == [1.0, 0.5, 0.25]
+        assert record.embedding_768 is None and record.embedding_1536 is None
         stored_settings = (await db.execute(select(KnowledgeEmbeddingSettings))).scalar_one()
-        assert stored_settings.api_key_enc is None  # Switching to local removes the remote secret.
+        assert stored_settings.api_key_enc is None
+        job = await db.get(KnowledgeIndexJob, UUID(reindex.json()["generation_id"]))
+        assert job.status == "completed" and job.completed == 1
+    activated = await client.post(
+        f"/api/v1/admin/embedding/generations/{reindex.json()['generation_id']}/activate",
+        headers=auth_header(admin_id),
+    )
+    assert activated.status_code == 200, activated.text
     embedding_status = await client.get("/api/v1/admin/embedding-settings", headers=auth_header(admin_id))
     assert embedding_status.json()["current_model_records"] == 1
-    jobs = await client.get("/api/v1/admin/ingestion-jobs", headers=auth_header(admin_id))
-    embedding_job = jobs.json()["items"][0]
-    assert embedding_job["kind"] == "reembed"
-    assert embedding_job["phase"] == "completed"
-    assert embedding_job["processed_records"] == 1
-    assert embedding_job["embedded_records"] == 1
+    assert embedding_status.json()["active_generation_id"] == reindex.json()["generation_id"]
 
     # The admin API is the only place these instructions can be set, so a save
     # has to round-trip them: dropping them would silently retire every stored
@@ -525,9 +525,10 @@ async def test_private_records_are_not_embedding_candidates():
     assert "embedding" not in CourseOffering.__table__.columns
     assert "embedding" not in CourseRule.__table__.columns
     assert "embedding" not in CampusKnowledgeRecord.__table__.columns
-    assert "embedding_384" in CampusKnowledgeRecord.__table__.columns
-    assert "embedding_768" in CampusKnowledgeRecord.__table__.columns
-    assert "embedding_1536" in CampusKnowledgeRecord.__table__.columns
+    assert "embedding_384" not in CampusKnowledgeRecord.__table__.columns
+    assert "embedding_384" in KnowledgeIndexVector.__table__.columns
+    assert "embedding_768" in KnowledgeIndexVector.__table__.columns
+    assert "embedding_1536" in KnowledgeIndexVector.__table__.columns
     assert "status" in CampusIngestionJob.__table__.columns
     assert "phase" in CampusIngestionJob.__table__.columns
     assert "provider" in KnowledgeEmbeddingSettings.__table__.columns

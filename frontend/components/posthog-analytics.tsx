@@ -82,7 +82,47 @@ type ProductEventProperties = {
   auth_signed_out: { result: "success" | "error" };
 
   // --- scheduling ---------------------------------------------------------
-  // The planner runs outside TanStack Query, so nothing it did was countable.
+  // Schedule telemetry is intentionally aggregate-only. Course identifiers,
+  // names, sections, academic context and upstream response bodies never
+  // belong in browser analytics.
+  schedule_step_viewed: {
+    step: "details" | "courses" | "timetable";
+    flow_id: string;
+    request_id: string | null;
+  };
+  schedule_step_completed: {
+    step: "details" | "courses" | "timetable";
+    outcome: "success" | "error" | "conflict" | "cancelled" | "unavailable" | "incomplete";
+    flow_id: string;
+    request_id: string | null;
+  };
+  schedule_source_load_terminal: {
+    source: "context" | "curriculum" | "catalog" | "sections" | "constraints" | "saved" | "cache" | "unknown";
+    outcome: "success" | "error" | "conflict" | "cancelled" | "unavailable" | "incomplete";
+    flow_id: string;
+    request_id: string | null;
+  };
+  schedule_generation_terminal: {
+    flow_id: string;
+    flow: "automatic" | "manual" | "assistant" | "what_if";
+    outcome: "success" | "error" | "conflict" | "cancelled" | "unavailable" | "incomplete";
+    duration_ms: number;
+    requested_count: number;
+    returned_count: number;
+    request_id: string | null;
+  };
+  schedule_save_conflict: {
+    flow_id: string;
+    request_id: string | null;
+  };
+  schedule_export_terminal: {
+    flow_id: string;
+    format: "ics" | "csv" | "wallpaper";
+    outcome: "success" | "error" | "conflict" | "cancelled" | "unavailable" | "incomplete";
+    status: number | null;
+    request_id: string | null;
+  };
+  /** @deprecated Kept until existing planner call sites migrate to terminals. */
   schedule_plan_completed: {
     result: "success" | "error";
     requested_courses: number;
@@ -104,12 +144,6 @@ type ProductEventProperties = {
   };
 };
 
-export type StudentIdentityProperties = {
-  name?: string | null;
-  user_name?: string | null;
-  department?: string | null;
-};
-
 function isReady() {
   return typeof window !== "undefined" && posthog.__loaded;
 }
@@ -119,7 +153,12 @@ export function captureProductEvent<EventName extends keyof ProductEventProperti
   properties: ProductEventProperties[EventName],
 ) {
   if (!isReady()) return;
-  posthog.capture(event, properties);
+  try {
+    posthog.capture(event, properties);
+  } catch {
+    // Analytics is optional. A blocked queue, browser extension or SDK update
+    // must never break the product action that emitted the event.
+  }
 }
 
 // One failure should be one issue. A mutation that fails reaches both the
@@ -144,14 +183,27 @@ export function captureError(error: unknown, context: Record<string, unknown> = 
     if (reportedErrors.has(error)) return false;
     reportedErrors.add(error);
   }
-  const exception = error instanceof Error ? error : new Error(String(error));
-  posthog.captureException(exception, {
+  const exception = new Error("client_error");
+  // Keep a stable exception class for grouping while excluding an API/body or
+  // chat message that may contain academic content.
+  exception.name = error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
+    ? error.name
+    : "ClientError";
+  const safeContext: Record<string, unknown> = {
     // Ties a browser issue to the proxy log and the broker issue for the same
     // failure. Present whenever the failure came back from our own API.
     request_id: requestIdOf(error),
-    ...context,
-  });
-  return true;
+  };
+  for (const key of ["source", "mode", "error_code", "operation", "kind", "status"]) {
+    const value = context[key];
+    if (typeof value === "string" || typeof value === "number") safeContext[key] = value;
+  }
+  try {
+    posthog.captureException(exception, safeContext);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -182,16 +234,19 @@ export function captureRequestFailure(
 /**
  * Link this browser to a student.
  *
- * The Supabase user id links events to the right person. Profile data is
- * supplied when it becomes available; email is deliberately excluded because
- * the broker already holds it and PostHog has no need for it.
+ * The verified Supabase user id links events to the right person. Academic
+ * profile fields, campus usernames and email are deliberately excluded.
  */
-export function identifyStudent(userId: string, properties: StudentIdentityProperties = {}) {
+export function identifyStudent(userId: string) {
   if (!isReady() || !userId) return;
-  const personProperties = Object.fromEntries(
-    Object.entries(properties).filter(([, value]) => typeof value === "string" && value.trim().length > 0),
-  );
-  posthog.identify(userId, personProperties);
+  // The verified Supabase subject is an opaque correlation id. Academic
+  // profile fields and campus usernames are deliberately never copied into
+  // the analytics person profile.
+  try {
+    posthog.identify(userId);
+  } catch {
+    // A telemetry SDK failure must not block auth or page rendering.
+  }
 }
 
 /**
@@ -203,7 +258,11 @@ export function identifyStudent(userId: string, properties: StudentIdentityPrope
  */
 export function resetStudent() {
   if (!isReady()) return;
-  posthog.reset();
+  try {
+    posthog.reset();
+  } catch {
+    // Sign-out must complete even if the optional analytics sink is broken.
+  }
 }
 
 export function PostHogAnalytics({ children }: { children: ReactNode }) {

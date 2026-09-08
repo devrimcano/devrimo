@@ -1,24 +1,24 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
 from app.campus.course_info import forget_user
 from app.campus.eligibility import tr_upper
-from app.db.models import StudentAcademicSnapshot, StudentContext, UserPreference, UserUpdateState
+from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability.client import report_exception
 from app.planning.groups import get_course_group
 from app.planning.mcp_bridge import sync_planning_snapshot_from_sais, sync_student_context_from_sais
 from app.planning.service import SemesterPlanRequest, plan_semester
-from app.student import service
+from app.student import service, workspace
 from app.student.purge import purge_academic_data
 from app.student.updates import get_updates
 
@@ -260,13 +260,8 @@ async def preference_put(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    try:
-        item = await service.save_preference(
-            db, user.id, key=key, value=body.value, provenance="explicit", confidence=1
-        )
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    return {"key": item.key, "value": item.value, "provenance": item.provenance, "confidence": 1}
+    result = await workspace.update_resource(db, user.id, "preference", key, {"value": body.value}, None, str(uuid4()))
+    return {**result["data"], "provenance": "explicit", "confidence": 1, "revision": result["revision"]}
 
 
 @router.delete("/preferences/{key}", status_code=status.HTTP_204_NO_CONTENT)
@@ -275,8 +270,7 @@ async def preference_delete(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await db.execute(delete(UserPreference).where(UserPreference.user_id == user.id, UserPreference.key == key))
-    await db.commit()
+    await workspace.update_resource(db, user.id, "preference", key, {"value": None}, None, str(uuid4()))
 
 
 @router.get("/updates")
@@ -297,17 +291,12 @@ async def update_state(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    state = await db.get(UserUpdateState, (user.id, record_id))
-    if state is None:
-        state = UserUpdateState(user_id=user.id, record_id=record_id)
-        db.add(state)
-    now = datetime.now(UTC)
-    if read is not None:
-        state.read_at = now if read else None
-    if dismissed is not None:
-        state.dismissed_at = now if dismissed else None
-    await db.commit()
-    return {"record_id": str(record_id), "read": state.read_at is not None, "dismissed": state.dismissed_at is not None}
+    changes = {key: value for key, value in {"read": read, "dismissed": dismissed}.items() if value is not None}
+    if not changes:
+        result = await workspace.read_resource(db, user.id, "update", str(record_id))
+    else:
+        result = await workspace.update_resource(db, user.id, "update", str(record_id), changes, None, str(uuid4()))
+    return {**result["data"], "revision": result["revision"]}
 
 
 @router.post("/plan")

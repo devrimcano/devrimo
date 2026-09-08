@@ -12,9 +12,9 @@ from sqlalchemy.orm import aliased
 from app.config import get_settings
 from app.db.models import CampusIngestionJob, CampusKnowledgeRecord, CampusSource, CampusSourceRevision
 from app.knowledge.adapters import adapter_for
-from app.knowledge.chunking import chunk_records, embedding_text
-from app.knowledge.embeddings import EmbeddingConfig, assign_embedding, embed_texts, get_embedding_config
+from app.knowledge.chunking import chunk_records
 from app.knowledge.fetcher import FetchPolicy, fetch_document
+from app.knowledge.indexes import lock_index_publication
 from app.knowledge.registry import REMOTE_KINDS
 from app.knowledge.types import ParsedRecord
 
@@ -85,6 +85,9 @@ async def renew_lease(db: AsyncSession, lease: JobLease) -> None:
 async def _lock_source_for_store(db: AsyncSession, job: CampusIngestionJob, lease: JobLease) -> CampusSource:
     # Source first, then job: claim, publication and failure use the same order.
     # These locks cover only database writes, never fetching or embedding I/O.
+    organization_id = await db.scalar(select(CampusSource.organization_id).where(CampusSource.id == job.source_id))
+    if organization_id is not None:
+        await lock_index_publication(db, organization_id)
     source = await db.scalar(
         select(CampusSource)
         .where(CampusSource.id == job.source_id)
@@ -216,38 +219,6 @@ async def _set_progress(db: AsyncSession, job: CampusIngestionJob, phase: str, *
     await db.commit()
 
 
-async def _embed_batches(
-    db: AsyncSession,
-    job: CampusIngestionJob,
-    source: CampusSource,
-    texts: list[str],
-    lease: JobLease,
-) -> tuple[list[list[float] | None], EmbeddingConfig]:
-    config = await get_embedding_config(db, source.organization_id)
-    job.embedding_provider = config.provider
-    job.embedding_model = config.model_label if config.enabled else None
-    job.total_records = len(texts)
-    job.processed_records = 0
-    job.embedded_records = 0
-    await _set_progress(db, job, "embedding", lease=lease)
-    if not texts:
-        return [], config
-    if not config.enabled:
-        job.processed_records = len(texts)
-        await _set_progress(db, job, "embedding", lease=lease)
-        return [None for _ in texts], config
-
-    result: list[list[float] | None] = []
-    for offset in range(0, len(texts), config.batch_size):
-        batch = texts[offset : offset + config.batch_size]
-        vectors = await embed_texts(db, source.organization_id, batch, config=config)
-        result.extend(vectors)
-        job.processed_records += len(batch)
-        job.embedded_records += sum(vector is not None for vector in vectors)
-        await _set_progress(db, job, "embedding", lease=lease)
-    return result, config
-
-
 async def _load_records(source: CampusSource, revision: CampusSourceRevision) -> tuple[list[ParsedRecord] | None, dict]:
     document = None
     headers: dict = {}
@@ -293,37 +264,9 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
     if source is None or revision is None or source.active_revision_id != revision.id:
         raise SourceRevisionChanged("Job points to a missing or inactive source revision")
     if job.kind == "reembed":
-        rows = (
-            (
-                await db.execute(
-                    select(CampusKnowledgeRecord).where(
-                        CampusKnowledgeRecord.source_id == source.id,
-                        CampusKnowledgeRecord.is_current.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        texts = [
-            embedding_text(
-                title=row.title,
-                summary=row.summary,
-                content=row.content,
-                metadata=row.metadata_json,
-            )
-            for row in rows
-        ]
-        embeddings, config = await _embed_batches(db, job, source, texts, lease)
-        await _set_progress(db, job, "storing", lease=lease)
-        await _lock_source_for_store(db, job, lease)
-        for row, embedding in zip(rows, embeddings, strict=True):
-            assign_embedding(row, embedding, config.dimensions)
-            row.embedding_model = config.model_label if embedding is not None else None
-        now = datetime.now(UTC)
-        _complete_job(job, now)
-        await db.commit()
-        return len(rows)
+        # Pre-migration jobs cannot grant an ingestion worker vector ownership.
+        # New generation jobs are discovered by the embedding worker instead.
+        raise SourceRevisionChanged("Legacy re-embedding job retired; create an index generation")
 
     # The source/revision reads above opened a transaction. Release it before
     # DNS, HTTP, parsing, and embedding I/O so the pool connection is not held
@@ -341,16 +284,9 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
         await db.commit()
         return 0
 
-    texts = [
-        embedding_text(
-            title=record.title,
-            summary=record.summary,
-            content=record.content,
-            metadata=record.metadata,
-        )
-        for record in records
-    ]
-    embeddings, config = await _embed_batches(db, job, source, texts, lease)
+    job.total_records = len(records)
+    job.processed_records = len(records)
+    job.embedded_records = 0
     await _set_progress(db, job, "storing", lease=lease)
     source = await _lock_source_for_store(db, job, lease)
     now = datetime.now(UTC)
@@ -361,7 +297,7 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
         ).scalars()
     }
     seen: set[str] = set()
-    for record, embedding in zip(records, embeddings, strict=True):
+    for record in records:
         seen.add(record.external_id)
         content_hash = _content_hash(record)
         row = existing.get(record.external_id)
@@ -395,8 +331,6 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
         row.authority = source.authority
         row.content_hash = content_hash
         row.metadata_json = record.metadata
-        assign_embedding(row, embedding, config.dimensions)
-        row.embedding_model = config.model_label if embedding is not None else None
         row.is_current = True
         row.last_seen_at = now
         row.removed_at = None

@@ -1,0 +1,125 @@
+"""Authenticated, stateless MCP transport over the canonical workspace service."""
+
+import hashlib
+import json
+from urllib.parse import urlsplit
+
+from fastapi import HTTPException
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import JSONResponse
+
+from app.agents.memory import MemoryChanges
+from app.auth.jwt import verify_access_token
+from app.config import get_settings
+from app.planning.models import PlanChanges
+from app.planning.service import SemesterPlanRequest
+from app.workspace.resources import EmailDraft, PreferenceChanges, ResourceRef, SearchRequest, UpdateStateChanges
+from app.workspace.service import WorkspaceService
+
+
+class BearerIdentity:
+    """Verify every HTTP request; transport sessions cannot substitute identity."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers", []))
+        authorization = headers.get(b"authorization", b"").decode("latin-1")
+        scheme, _, token = authorization.partition(" ")
+        try:
+            if scheme.lower() != "bearer" or not token:
+                raise HTTPException(401, "Unauthorized")
+            user = verify_access_token(token)
+        except HTTPException as exc:
+            return await JSONResponse({"detail": exc.detail}, status_code=exc.status_code)(scope, receive, send)
+        scope.setdefault("state", {})["workspace_user"] = user
+        await self.app(scope, receive, send)
+
+
+def create_gateway():
+    origins = get_settings().cors_origin_list
+    hosts = ["localhost", "127.0.0.1", "[::1]", "localhost:*", "127.0.0.1:*", "[::1]:*"]
+    hosts.extend(urlsplit(origin).netloc for origin in origins)
+    hosts.extend(host.strip() for host in get_settings().workspace_gateway_allowed_hosts.split(",") if host.strip())
+    if get_settings().workspace_gateway_url:
+        hosts.append(urlsplit(get_settings().workspace_gateway_url).netloc)
+    server = FastMCP(
+        "Devrimo Workspace",
+        stateless_http=True,
+        json_response=True,
+        streamable_http_path="/",
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
+        ),
+    )
+
+    def service(ctx: Context):
+        user = ctx.request_context.request.state.workspace_user
+        return WorkspaceService(user.id)
+
+    @server.tool()
+    async def search(request: SearchRequest, ctx: Context) -> dict:
+        """Search an authenticated workspace resource."""
+        return await service(ctx).search(request)
+
+    @server.tool()
+    async def read(resource: ResourceRef, ctx: Context) -> dict:
+        """Read one typed workspace resource."""
+        return await service(ctx).read(resource)
+
+    @server.tool()
+    async def plan(request: SemesterPlanRequest, ctx: Context) -> dict:
+        """Calculate a semester proposal using verified records."""
+        return await service(ctx).plan(request.model_dump())
+
+    @server.tool()
+    async def update(
+        resource: ResourceRef,
+        changes: PlanChanges | MemoryChanges | PreferenceChanges | UpdateStateChanges,
+        expected_revision: int,
+        idempotency_key: str,
+        ctx: Context,
+    ) -> dict:
+        """Update an editable resource with optimistic concurrency."""
+        return await service(ctx).update(
+            resource, changes.model_dump(exclude_unset=True), expected_revision, idempotency_key
+        )
+
+    @server.tool()
+    async def undo(resource: ResourceRef, expected_revision: int, idempotency_key: str, ctx: Context) -> dict:
+        """Undo the most recent resource revision."""
+        return await service(ctx).undo(resource, expected_revision, idempotency_key)
+
+    @server.tool()
+    async def send_email(draft: EmailDraft, ctx: Context) -> dict:
+        """Prepare an immutable message reference; sending requires Devrimo chat approval."""
+        workspace = service(ctx)
+        await workspace.authorize()
+        capability = ctx.request_context.request.headers.get("x-devrimo-mail-approval")
+        if capability:
+            from app.workspace.approvals import execute_approved
+
+            return await execute_approved(workspace.user_id, capability, draft, workspace.send_approved_email)
+        canonical = json.dumps(
+            {"user_id": str(workspace.user_id), "draft": draft.model_dump()}, sort_keys=True, separators=(",", ":")
+        )
+        return {
+            "status": "approval_required",
+            "action_reference": hashlib.sha256(canonical.encode()).hexdigest(),
+            "draft": draft.model_dump(),
+            "approval_channel": "devrimo_chat",
+            "detail": "Submit this exact draft in Devrimo chat and approve its pending send_email call.",
+        }
+
+    @server.tool()
+    async def compute(expression: str, ctx: Context) -> dict:
+        """Evaluate bounded arithmetic."""
+        return await service(ctx).compute(expression)
+
+    app = server.streamable_http_app()
+    app.add_middleware(BearerIdentity)
+    return server, app

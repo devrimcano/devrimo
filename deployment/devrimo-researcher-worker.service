@@ -1,0 +1,28 @@
+[Unit]
+Description=Devrimo researcher worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devrimo-researcher
+WorkingDirectory=/opt/devrimo/backend
+EnvironmentFile=/etc/devrimo/researcher.env
+Environment=DEVRIMO_ENV_FILE=
+Environment=DATABASE_RUNTIME_ROLE=researcher
+Environment=DEVRIMO_RUNTIME_COMPONENT=researcher
+ExecStart=/opt/devrimo/backend/.venv/bin/python -m app.workers.runtime researcher
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=devrimo-workers/researcher
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/devrimo/campus
+
+[Install]
+WantedBy=multi-user.target

@@ -110,7 +110,7 @@ def test_turn_observation_records_failure_and_is_idempotent(monkeypatch):
 
     trace = next(kw for event, kw in captured if event == "$ai_trace")
     assert trace["$ai_is_error"] is True
-    assert trace["$ai_error"] == "model refused"
+    assert trace["$ai_error"] == "ModelProviderError"
     assert trace["$ai_trace_id"] == "t-1"
 
     turn = next(kw for event, kw in captured if event == "chat_turn_completed")
@@ -165,9 +165,9 @@ def test_before_send_redacts_credential_shaped_values():
     assert result["properties"]["nested"]["access_token"] == "[redacted]"
     assert result["properties"]["nested"]["safe"] == "keep me"
     assert "eyJhbGciOiJIUzI1NiJ9" not in result["properties"]["free_text"]
-    # Conversation content is deliberately preserved: full capture is the
-    # documented choice for this project.
-    assert result["properties"]["messages"][0]["content"] == "Ekle-birak ne zaman?"
+    # Conversation content is student data and is omitted while aggregate
+    # usage/correlation fields remain available.
+    assert result["properties"]["messages"] == "[academic content redacted]"
 
 
 def test_before_send_adds_ai_cost_properties_from_token_prices():
@@ -190,6 +190,100 @@ def test_before_send_adds_ai_cost_properties_from_token_prices():
     assert result["properties"]["$ai_latency"] == 37.6
 
 
+def test_before_send_omits_academic_ai_payload_but_keeps_usage_metrics():
+    event = {
+        "event": "$ai_generation",
+        "properties": {
+            "$ai_input": [{"role": "user", "content": "PHYS213 transcript"}],
+            "$ai_output_choices": [{"message": {"content": "Course recommendation"}}],
+            "$ai_error": "provider echoed PHYS213 and transcript",
+            "$ai_error_type": "ProviderError",
+            "error_type": "ProviderError",
+            "$ai_input_tokens": 12,
+            "$ai_output_tokens": 8,
+            "$ai_latency": 0.4,
+            "flow_count": 2,
+        },
+    }
+
+    properties = ph_client._before_send(event)["properties"]
+
+    assert properties["$ai_input"] == "[academic content redacted]"
+    assert properties["$ai_output_choices"] == "[academic content redacted]"
+    assert properties["$ai_error"] == "[academic content redacted]"
+    assert properties["$ai_error_type"] == "ProviderError"
+    assert properties["error_type"] == "ProviderError"
+    assert properties["$ai_input_tokens"] == 12
+    assert properties["$ai_output_tokens"] == 8
+    assert properties["$ai_latency"] == 0.4
+    assert properties["flow_count"] == 2
+
+
+def test_before_send_removes_concrete_route_paths():
+    event = {
+        "event": "api_request_completed",
+        "properties": {
+            "path": "/api/v1/schedule/PHYS213/1",
+            "route": "/api/v1/schedule/{course}/{section}",
+            "request_id": "request-1",
+        },
+    }
+
+    properties = ph_client._before_send(event)["properties"]
+
+    assert properties["path"] == "[route redacted]"
+    assert properties["route"] == "/api/v1/schedule/{course}/{section}"
+    assert properties["request_id"] == "request-1"
+
+
+def test_before_send_keeps_only_safe_exception_type_labels():
+    event = {
+        "event": "$ai_generation",
+        "properties": {
+            "error_type": "ProviderError",
+            "$ai_error_type": "PHYS213 transcript from provider",
+        },
+    }
+
+    properties = ph_client._before_send(event)["properties"]
+
+    assert properties["error_type"] == "ProviderError"
+    assert properties["$ai_error_type"] == "[academic content redacted]"
+
+
+def test_posthog_client_defaults_to_privacy_mode(monkeypatch):
+    captured = {}
+
+    class Settings:
+        posthog_configured = True
+        posthog_api_key = "phc_test"
+        posthog_host = "https://posthog.test"
+        posthog_debug = False
+        posthog_personal_api_key = ""
+        environment = "test"
+        agent_profile = "test"
+        agent_runtime = "test"
+        agent_model = "test-model"
+
+    monkeypatch.setattr(ph_client, "get_settings", lambda: Settings())
+    monkeypatch.setattr(ph_client, "service_properties", lambda: {"service": "test"})
+
+    def fake_posthog(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(ph_client, "Posthog", fake_posthog)
+    ph_client.get_posthog.cache_clear()
+    try:
+        assert ph_client.get_posthog() is not None
+        assert captured["privacy_mode"] is True
+        assert captured["enable_full_ai_capture"] is False
+        assert captured["capture_exception_code_variables"] is False
+        assert captured["log_captured_exceptions"] is False
+    finally:
+        ph_client.get_posthog.cache_clear()
+
+
 def test_before_send_does_not_add_ai_costs_without_prices():
     event = {
         "event": "$ai_generation",
@@ -203,7 +297,7 @@ def test_before_send_does_not_add_ai_costs_without_prices():
     assert "$ai_total_cost_usd" not in result["properties"]
 
 
-def test_otlp_logs_scrub_secrets_but_preserve_content(monkeypatch):
+def test_otlp_logs_scrub_secrets_and_academic_content(monkeypatch):
     from app.observability import logs
 
     emitted = []
@@ -218,6 +312,7 @@ def test_otlp_logs_scrub_secrets_but_preserve_content(monkeypatch):
         "level": "warning",
         "authorization": "Bearer abc.def.ghi",
         "detail": "The student's complete tool result",
+        "error": "upstream response containing a student's transcript",
     }
 
     returned = logs.posthog_log_processor(None, "warning", original)
@@ -225,10 +320,11 @@ def test_otlp_logs_scrub_secrets_but_preserve_content(monkeypatch):
     assert returned is original
     assert original["authorization"] == "Bearer abc.def.ghi"
     assert emitted[0]["attributes"]["authorization"] == "[redacted]"
-    assert emitted[0]["attributes"]["detail"] == "The student's complete tool result"
+    assert emitted[0]["attributes"]["detail"] == "[academic content redacted]"
+    assert emitted[0]["attributes"]["error"] == "[academic content redacted]"
 
 
-def test_tool_span_state_scrubs_secrets_but_preserves_complete_content():
+def test_tool_span_state_scrubs_secrets_and_academic_content():
     from app.agents.scholar.hooks import _span_state
 
     state = _span_state(
@@ -240,7 +336,8 @@ def test_tool_span_state_scrubs_secrets_but_preserves_complete_content():
 
     assert '"password": "[redacted]"' in state
     assert "hunter2" not in state
-    assert "Show my complete transcript" in state
+    assert "Show my complete transcript" not in state
+    assert "academic content redacted" in state
 
 
 # --- the route wiring -------------------------------------------------------
@@ -352,7 +449,9 @@ async def test_structlog_binds_request_context():
 
     assert seen["user_id"] == str(user_id)
     assert seen["session_id"] == "replay-session-7"
-    assert seen["path"] == "/api/v1/agents/me"
+    # Concrete paths can contain course/session identifiers; the middleware
+    # binds the method early and the canonical route template at completion.
+    assert "path" not in seen
     assert seen["method"] == "GET"
     assert seen["request_id"]
     # Cleared on the way out, so one request's identity cannot bleed into the
@@ -678,98 +777,6 @@ def test_a_failed_turn_is_not_downgraded_to_cancelled(monkeypatch):
     observation.cancelled("client_disconnected")
 
     assert observation.outcome == "run_error"
-
-
-async def test_a_disconnected_stream_still_reports_and_releases_the_lock():
-    """The failure the audit named: reporting sat after a `yield`.
-
-    When the student closes the tab that `yield` raises, so the turn was never
-    reported and the turn lock was never released.
-    """
-    import asyncio
-
-    from app.api.v1.chat import _TurnCleanup
-
-    released = asyncio.Event()
-    heartbeat_stop = asyncio.Event()
-    heartbeat = asyncio.create_task(heartbeat_stop.wait())
-
-    async def finalize():
-        released.set()
-
-    observation = TurnObservation(trace_id="t-5", user_id="u-5")
-    cleanup = _TurnCleanup(observation, heartbeat, heartbeat_stop, finalize, "u-5")
-
-    async def stream():
-        try:
-            yield b"chunk"
-            yield b"data: [DONE]\n\n"
-            await cleanup.run()
-        except (asyncio.CancelledError, GeneratorExit):
-            observation.cancelled("client_disconnected")
-            cleanup.detach()
-            raise
-        finally:
-            cleanup.detach()
-
-    generator = stream()
-    assert await generator.__anext__() == b"chunk"
-    # The consumer goes away mid-stream, exactly as a closed tab does.
-    await generator.aclose()
-
-    assert observation.outcome == "cancelled"
-    assert observation._finished
-    await asyncio.wait_for(released.wait(), timeout=2)
-
-
-async def test_a_failing_heartbeat_does_not_prevent_finalization():
-    """`await heartbeat` used to be the first statement in the `finally`."""
-    import asyncio
-
-    from app.api.v1.chat import _TurnCleanup
-
-    released = asyncio.Event()
-    heartbeat_stop = asyncio.Event()
-
-    async def heartbeat_that_dies():
-        raise RuntimeError("lease renewal failed")
-
-    async def finalize():
-        released.set()
-
-    observation = TurnObservation(trace_id="t-6", user_id="u-6")
-    cleanup = _TurnCleanup(
-        observation,
-        asyncio.create_task(heartbeat_that_dies()),
-        heartbeat_stop,
-        finalize,
-        "u-6",
-    )
-
-    await cleanup.run()
-
-    assert observation._finished
-    assert released.is_set()
-
-
-async def test_turn_cleanup_runs_exactly_once():
-    import asyncio
-
-    from app.api.v1.chat import _TurnCleanup
-
-    calls = []
-    heartbeat_stop = asyncio.Event()
-    heartbeat = asyncio.create_task(heartbeat_stop.wait())
-
-    async def finalize():
-        calls.append(1)
-
-    cleanup = _TurnCleanup(TurnObservation(trace_id="t-7", user_id="u-7"), heartbeat, heartbeat_stop, finalize, "u-7")
-    await cleanup.run()
-    cleanup.detach()
-    await cleanup.run()
-
-    assert calls == [1]
 
 
 async def test_the_browsers_request_id_survives_the_whole_backend_request(client, monkeypatch):

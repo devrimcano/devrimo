@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+import pytest
 from fastapi import HTTPException
 
 from app.campus import prerequisites
@@ -49,6 +50,11 @@ def test_malformed_catalog_answer_is_not_treated_as_no_prerequisite():
         assert "could not be read" in str(exc)
     else:
         raise AssertionError("malformed prerequisite data was accepted")
+
+
+def test_non_dict_rows_in_a_wrapped_answer_are_not_treated_as_empty():
+    with pytest.raises(ValueError, match="rows could not be read"):
+        prerequisites._rows({"prerequisites": ["garbage"]})
 
 
 async def test_filter_approves_and_rejects_courses_from_transcript(monkeypatch):

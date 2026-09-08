@@ -25,17 +25,26 @@ def test_nothing_stored_is_reported_as_nothing():
 
 
 def test_a_course_is_flattened_into_a_readable_line():
-    out = _timetable(row({
-        "courses": [{
-            "code": "MATH119", "name": "CALCULUS", "section": "1", "credits": 5,
-            "instructor": "PROF X",
-            "meetings": [
-                {"day": "Mon", "start": 8, "duration": 2, "room": "P1"},
-                {"day": "Wed", "start": 11, "duration": 1, "room": ""},
-            ],
-        }],
-        "busy_blocks": [],
-    }))
+    out = _timetable(
+        row(
+            {
+                "courses": [
+                    {
+                        "code": "MATH119",
+                        "name": "CALCULUS",
+                        "section": "1",
+                        "credits": 5,
+                        "instructor": "PROF X",
+                        "meetings": [
+                            {"day": "Mon", "start": 8, "duration": 2, "room": "P1"},
+                            {"day": "Wed", "start": 11, "duration": 1, "room": ""},
+                        ],
+                    }
+                ],
+                "busy_blocks": [],
+            }
+        )
+    )
     course = out["courses"][0]
     assert course["course"] == "MATH119"
     assert course["section"] == "1"
@@ -45,14 +54,22 @@ def test_a_course_is_flattened_into_a_readable_line():
 
 def test_busy_blocks_are_included():
     """A student's own commitments are the reason half the questions get asked."""
-    out = _timetable(row({
-        "courses": [],
-        "busy_blocks": [{"name": "İş", "meetings": [{"day": "Tue", "start": 13, "duration": 3, "room": ""}]}],
-    }))
+    out = _timetable(
+        row(
+            {
+                "courses": [],
+                "busy_blocks": [{"name": "İş", "meetings": [{"day": "Tue", "start": 13, "duration": 3, "room": ""}]}],
+            }
+        )
+    )
     assert out["busy_blocks"] == [{"name": "İş", "when": "Tue 13:40-16:30"}]
 
 
 def test_the_note_distinguishes_it_from_the_sais_schedule():
-    out = _timetable(row({"courses": [{"code": "EE301", "meetings": []}], "busy_blocks": []}))
+    out = _timetable(
+        row(
+            {"courses": [{"code": "EE301", "meetings": [{"day": "Mon", "start": 8, "duration": 1}]}], "busy_blocks": []}
+        )
+    )
     assert "not their registered sais schedule" in out["note"].lower()
     assert out["term"] == "20261"

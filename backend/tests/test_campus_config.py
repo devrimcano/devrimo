@@ -9,9 +9,14 @@ student's credentials reach it.
 
 from uuid import UUID
 
+import pytest
+from pydantic import ValidationError
+
 from app.campus.catalog import CAMPUS_TOOLS, normalize_tool_ids
 from app.campus.credentials import CampusSecrets
 from app.campus.mcp_config import build_server_specs, working_directories
+from app.campus.validation import validate_odtuclass_base_url
+from app.schemas import CampusConnectionIn
 
 MCP_ROOT = "/opt/mcp"
 STATE_ROOT = "/var/lib/devrimo/campus"
@@ -124,3 +129,55 @@ def test_spec_repr_does_not_leak_the_password():
     assert "hunter2" not in repr(spec)
     assert "hunter2" not in repr(spec.describe())
     assert spec.describe()["env_keys"] == ["LOCALE", "SAIS_PASSWORD", "SAIS_USERNAME"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://odtuclass.metu.edu.tr", "https://odtuclass.metu.edu.tr"),
+        (" https://odtuclass2025f.metu.edu.tr/ ", "https://odtuclass2025f.metu.edu.tr"),
+        ("https://odtuclass2025s.metu.edu.tr/", "https://odtuclass2025s.metu.edu.tr"),
+        ("https://odtuclass2025sum.metu.edu.tr", "https://odtuclass2025sum.metu.edu.tr"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_odtuclass_base_url_accepts_only_published_hosts(value, expected):
+    assert validate_odtuclass_base_url(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://odtuclass.metu.edu.tr",
+        "https://evil.example",
+        "https://odtuclass2025x.metu.edu.tr",
+        "https://odtuclass2025f.metu.edu.tr:8443",
+        "https://user:password@odtuclass.metu.edu.tr",
+        "https://odtuclass.metu.edu.tr/?redirect=https://evil.example",
+        "https://odtuclass.metu.edu.tr/#redirect",
+    ],
+)
+def test_odtuclass_base_url_rejects_ssrf_shapes(value):
+    with pytest.raises(ValueError, match="HTTPS|credentials|port"):
+        validate_odtuclass_base_url(value)
+
+
+def test_campus_connection_schema_normalizes_and_rejects_odtuclass_url():
+    connection = CampusConnectionIn(
+        metu_username="e123456",
+        odtuclass_base_url=" https://odtuclass2025f.metu.edu.tr/ ",
+    )
+    assert connection.odtuclass_base_url == "https://odtuclass2025f.metu.edu.tr"
+    with pytest.raises(ValidationError):
+        CampusConnectionIn(metu_username="e123456", odtuclass_base_url="https://evil.example")
+
+
+def test_mcp_launch_boundary_rejects_legacy_odtuclass_url():
+    with pytest.raises(ValueError, match="approved METU ODTUClass host"):
+        specs(["odtuclass"], secrets(odtuclass_token="tok", odtuclass_base_url="https://evil.example"))
+
+
+def test_invalid_legacy_odtuclass_url_does_not_block_other_servers():
+    rendered = specs(["sais"], secrets(odtuclass_base_url="https://evil.example"))
+    assert [spec.tool_id for spec in rendered] == ["sais"]
