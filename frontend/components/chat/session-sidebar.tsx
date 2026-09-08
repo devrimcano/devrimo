@@ -125,6 +125,7 @@ export function SessionSidebar({
                   <Button
                     variant="ghost"
                     size="icon-xs"
+                    data-slot="session-delete"
                     className="relative z-10 mr-1.5 shrink-0 text-muted-foreground opacity-100 transition-[opacity,background-color,color] lg:opacity-0 lg:group-hover:opacity-100 lg:focus-visible:opacity-100"
                     onClick={() => onDelete(session.id)}
                     aria-label={pick({ tr: "Sohbeti sil", en: "Delete chat" })}

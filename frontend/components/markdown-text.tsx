@@ -173,13 +173,18 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   table: ({ className, ...props }) => (
-    <table
-      className={cn(
-        "aui-md-table my-3 w-full border-separate border-spacing-0 overflow-y-auto",
-        className,
-      )}
-      {...props}
-    />
+    // The overflowing axis is x, not y: a four-column schedule table is wider
+    // than 375px, and `overflow-y` on a <table> does nothing for that. The
+    // scroll container is the wrapper, so the table keeps its own column widths.
+    <div className="aui-md-table-scroll -mx-1 my-3 overflow-x-auto px-1">
+      <table
+        className={cn(
+          "aui-md-table w-full border-separate border-spacing-0",
+          className,
+        )}
+        {...props}
+      />
+    </div>
   ),
   th: ({ className, ...props }) => (
     <th

@@ -307,6 +307,31 @@
   }
 }
 
+/* A 24px icon button is a mouse target.
+ *
+ * The chat's own controls were the smallest things on the screen - send at 28px,
+ * copy and refresh at 24px, the per-session delete at 24px and permanently
+ * visible on mobile right beside the row it sits in - while the header next to
+ * them used 40 and 44. The floor is set by input method rather than width,
+ * because a touchscreen laptop is still a thumb.
+ *
+ * `min-height`/`min-width` beat the utilities' fixed `size-*`, so the controls
+ * grow without touching a dozen call sites. */
+@media (pointer: coarse) {
+  .aui-composer-send,
+  .aui-composer-cancel,
+  .aui-composer-dictate,
+  .aui-composer-stop-dictation,
+  .aui-composer-add-attachment,
+  .aui-thread-scroll-to-bottom,
+  [data-slot="tooltip-icon-button"],
+  [data-slot="chat-history-toggle"],
+  [data-slot="session-delete"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

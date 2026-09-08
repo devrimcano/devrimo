@@ -40,7 +40,9 @@ export function AppHeader({ email }: { email?: string | null }) {
       </div>
 
       <div className="flex items-center gap-1.5 lg:hidden">
-        <ThemeSwitcher className="h-10" />
+        {/* The theme is a once-in-a-lifetime decision and it held the only
+            guaranteed slot in a 375px header, while chat history was exiled to a
+            floating button. It moves into the menu with the other settings. */}
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="outline" size="icon" aria-label={pick({ tr: "Hesap menüsünü aç", en: "Open account menu" })} />}>
             <MenuIcon />
@@ -61,7 +63,9 @@ export function AppHeader({ email }: { email?: string | null }) {
             <DropdownMenuItem render={<Link href="/settings" />} className="min-h-10 px-2"><SettingsIcon />{pick({ tr: "Ayarlar", en: "Settings" })}</DropdownMenuItem>
             <DropdownMenuSeparator />
             <div className="space-y-2 p-2">
-              <p className="text-xs font-medium text-muted-foreground">{pick({ tr: "Dil", en: "Language" })}</p>
+              <p className="text-xs font-medium text-muted-foreground">{pick({ tr: "Görünüm", en: "Appearance" })}</p>
+              <ThemeSwitcher className="h-10 w-full justify-center" />
+              <p className="pt-1 text-xs font-medium text-muted-foreground">{pick({ tr: "Dil", en: "Language" })}</p>
               <LocaleSwitcher className="w-full justify-center" />
               <SignOutButton />
             </div>

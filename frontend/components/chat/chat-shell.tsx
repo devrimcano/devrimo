@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { Thread } from "@/components/thread.aui";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { loadSessionMessages, useChatSessions } from "@/hooks/useChat";
-import { Loader2Icon, MenuIcon, OctagonAlertIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { Loader2Icon, MessagesSquareIcon, OctagonAlertIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 import { activityFields } from "@/lib/agent-activity";
 import { CampusStatusNotice } from "@/components/chat/campus-status-notice";
@@ -667,9 +667,10 @@ export function ChatShell() {
             size="icon"
             className="absolute left-3 top-3 z-20 bg-card/90 shadow-sm backdrop-blur"
             onClick={() => setMobileHistoryOpen(true)}
+            data-slot="chat-history-toggle"
             aria-label={pick({ tr: "Sohbet geçmişini aç", en: "Open chat history" })}
           >
-            <MenuIcon />
+            <MessagesSquareIcon />
           </Button>
           {assistantThread}
         </div>

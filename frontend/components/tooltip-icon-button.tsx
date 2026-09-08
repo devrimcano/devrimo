@@ -28,6 +28,7 @@ export const TooltipIconButton = forwardRef<
             <Button
               variant="ghost"
               size="icon"
+              data-slot="tooltip-icon-button"
               {...rest}
               className={cn(
                 "aui-button-icon size-6 p-1 active:scale-90",
