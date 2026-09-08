@@ -207,10 +207,6 @@ bash -lc "
   # browser exception and its source map agree on which build they came from.
   export GIT_COMMIT_SHA='$DEPLOY_SHA'
   export NEXT_PUBLIC_RELEASE='$DEPLOY_SHA'
-  # The production release is the explicitly enabled rollout. Keep the local
-  # example closed by default, but do not let a stale VPS .env.local silently
-  # ship the unavailable-page build.
-  export NEXT_PUBLIC_SCHEDULE_PLANNER_ITERATIVE=true
   cd '$DEPLOY_DIR/frontend'
   rm -rf .next
   npm ci
