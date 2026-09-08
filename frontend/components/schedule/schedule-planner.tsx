@@ -435,8 +435,24 @@ function fromCanonicalSections(value: Record<string, unknown[]>): SectionMap {
   return result;
 }
 
-function canonicalSectionsFromLocal(sections: SectionMap, constraints: ConstraintMap): Record<string, unknown[]> {
-  return Object.fromEntries(Object.entries(sections).map(([key, rows]) => [
+function canonicalSectionsFromLocal(
+  sections: SectionMap,
+  constraints: ConstraintMap,
+  pool: CatalogCourse[],
+): Record<string, unknown[]> {
+  // Only what the current pool can explain. A saved plan otherwise accumulated
+  // a second entry per course under its letter code — written by an older
+  // client, carrying no eligibility, and preserved by every round-trip — and
+  // the solver read both. Every section then had an unjudged twin, which is how
+  // a section flagged red in the pool still landed on the generated week.
+  const wanted = new Set<string>();
+  for (const course of pool) {
+    const raw = courseIdentity(course.rawCode);
+    wanted.add(raw);
+    // A manually added course has no separate raw code; keep its own key then.
+    if (!sections[raw]?.length) wanted.add(courseIdentity(course.code));
+  }
+  return Object.fromEntries(Object.entries(sections).filter(([key]) => wanted.has(key)).map(([key, rows]) => [
     key,
     rows.map((row) => ({
       ...row,
@@ -582,8 +598,8 @@ export function SchedulePlanner() {
   const planningUpdate = planning.update;
 
   const canonicalSections = useMemo(
-    () => canonicalSectionsFromLocal(sectionsByCourse, constraints),
-    [constraints, sectionsByCourse],
+    () => canonicalSectionsFromLocal(sectionsByCourse, constraints, catalogCourses),
+    [catalogCourses, constraints, sectionsByCourse],
   );
   const localCanonicalState = useMemo(() => canonicalStateFromLocal({
     entries,
@@ -1193,13 +1209,13 @@ export function SchedulePlanner() {
           credits: course.credits,
           raw_code: course.rawCode,
         })),
-        sections: canonicalSectionsFromLocal(known, constraints),
+        sections: canonicalSectionsFromLocal(known, constraints, catalogCourses),
       });
       if (!staged) return;
       const solved = await submitPlanningUpdate({ operation: "solve" });
       if (!solved) return;
       const scheduled = new Set(solved.state.entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
-      const sectionPayload = canonicalSectionsFromLocal(known, constraints);
+      const sectionPayload = canonicalSectionsFromLocal(known, constraints, catalogCourses);
       const restricted = catalogCourses
         .filter((course) => {
           const rows = sectionPayload[courseIdentity(course.rawCode)] ?? [];

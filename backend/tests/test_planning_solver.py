@@ -65,6 +65,46 @@ def test_timetable_solver_skips_ineligible_and_empty_day_sections():
     assert all(entry.day != "Tue" for alternative in solved.alternatives for entry in alternative)
 
 
+def test_a_stale_duplicate_section_list_cannot_undo_a_verdict():
+    """A plan holding the same course under two keys still respects the verdicts.
+
+    Production plans carry both: the seven-digit key, which is where the
+    eligibility verdicts are written, and a letter key left by an older client
+    with no verdicts in it at all. Reading both and concatenating gave every
+    blocked section an unjudged twin, so the solver placed sections the pool
+    was flagging red and the restriction check looked switched off.
+    """
+    meetings = [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}]
+    state = PlanState(
+        pool=[{"code": "HIST 2201", "raw_code": "2402201", "name": "History", "credits": 2}],
+        sections={
+            "2402201": [
+                {"section": "31", "eligible": False, "reason": "Surname A-K", "meetings": meetings},
+                {"section": "32", "eligible": True, "meetings": [
+                    {"day": "Wed", "start_minute": 540, "duration_minutes": 60},
+                ]},
+            ],
+            # The same two sections, as the older client stored them.
+            "HIST2201": [
+                {"section": "31", "meetings": meetings},
+                {"section": "32", "meetings": [
+                    {"day": "Wed", "start_minute": 540, "duration_minutes": 60},
+                ]},
+            ],
+        },
+    )
+
+    solved = solve_plan_state(state)
+
+    placed = {(entry.code, entry.section) for entry in solved.entries}
+    assert placed == {("HIST 2201", "32")}
+    assert all(
+        entry.section != "31"
+        for alternative in solved.alternatives
+        for entry in alternative
+    )
+
+
 def test_legacy_projection_keeps_exact_meeting_minutes():
     state = PlanState.from_legacy_payload(
         {

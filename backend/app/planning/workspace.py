@@ -334,17 +334,45 @@ def _meeting_from_value(value: Any) -> tuple[str, int, int, str] | None:
 
 
 def _section_values(state: PlanState, course: Any) -> list[dict[str, Any]]:
-    keys = {_identity(course.code)}
+    """This course's sections, read from the one key that describes it.
+
+    A stored plan can hold the same course's sections twice: under the
+    seven-digit course code and under the letter form. Only the seven-digit key
+    carries eligibility, because that is how the verdicts are keyed; the letter
+    entries are what an older client wrote and every round-trip preserves them.
+    Reading both and concatenating therefore handed the solver a second,
+    unjudged copy of every section, and an ineligible one was placed because
+    its duplicate said nothing about it — the restriction check looked switched
+    off while the same section was flagged red in the pool.
+
+    So: one key wins, the seven-digit one when it has rows. Within it a section
+    number appears once, and a decided verdict beats an undecided one.
+    """
+    keys = []
     if course.raw_code:
-        keys.add(_identity(course.raw_code))
-    values: list[dict[str, Any]] = []
+        keys.append(_identity(course.raw_code))
+    keys.append(_identity(course.code))
+
     for key in keys:
         raw = state.sections.get(key, [])
         if isinstance(raw, dict):
             raw = list(raw.values())
-        if isinstance(raw, list):
-            values.extend(item for item in raw if isinstance(item, dict))
-    return values
+        if not isinstance(raw, list):
+            continue
+        chosen: dict[str, dict[str, Any]] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            number = str(item.get("section") or item.get("section_number") or "").strip()
+            # An unnumbered row cannot be compared with another, so it is kept
+            # on its own rather than collapsing every one of them into one.
+            identity = number or f"#{len(chosen)}"
+            held = chosen.get(identity)
+            if held is None or (held.get("eligible") is None and item.get("eligible") is not None):
+                chosen[identity] = item
+        if chosen:
+            return list(chosen.values())
+    return []
 
 
 def _section_meetings(section: dict[str, Any]) -> list[tuple[str, int, int, str]]:
