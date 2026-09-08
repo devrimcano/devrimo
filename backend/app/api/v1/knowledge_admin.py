@@ -25,7 +25,7 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.knowledge import registry
-from app.knowledge.embeddings import get_embedding_config
+from app.knowledge.embeddings import embedding_endpoint_origin, get_embedding_config
 from app.knowledge.indexes import (
     IndexNotReady,
     activate_generation,
@@ -704,7 +704,11 @@ async def update_embedding_settings(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     organization_id = _org(principal)
-    row = await db.get(KnowledgeEmbeddingSettings, organization_id)
+    row = await db.scalar(
+        select(KnowledgeEmbeddingSettings)
+        .where(KnowledgeEmbeddingSettings.organization_id == organization_id)
+        .with_for_update()
+    )
     if row is None:
         row = KnowledgeEmbeddingSettings(organization_id=organization_id)
         db.add(row)
@@ -714,9 +718,21 @@ async def update_embedding_settings(
     if body.provider == "remote" and not (supplied_key or retained_key):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Remote embedding requires an API key")
 
+    new_base_url = body.base_url.strip().rstrip("/") if body.base_url and body.provider != "disabled" else None
+    if (
+        body.provider == "remote"
+        and retained_key is not None
+        and supplied_key is None
+        and embedding_endpoint_origin(row.base_url) != embedding_endpoint_origin(new_base_url)
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Changing the embedding endpoint origin requires a replacement API key",
+        )
+
     row.provider = body.provider
     row.model = body.model.strip()
-    row.base_url = body.base_url.strip().rstrip("/") if body.base_url and body.provider != "disabled" else None
+    row.base_url = new_base_url
     row.dimensions = body.dimensions
     row.batch_size = body.batch_size
     row.query_prefix = body.query_prefix

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -19,6 +20,30 @@ from app.observability.llm import EVENT_AI_EMBEDDING, observed_ai_operation
 
 SUPPORTED_VECTOR_DIMENSIONS = (384, 768, 1536)
 logger = get_logger(__name__)
+
+
+def embedding_endpoint_origin(value: str | None) -> str | None:
+    """Return the normalized origin used to bind a retained provider key."""
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    scheme = parsed.scheme.casefold()
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    try:
+        hostname = hostname.encode("idna").decode("ascii").casefold().rstrip(".")
+    except UnicodeError:
+        hostname = hostname.casefold().rstrip(".")
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 80 if scheme == "http" else 443
+    if port is not None and port != default_port:
+        authority = f"{authority}:{port}"
+    return f"{scheme}://{authority}"
 
 
 @lru_cache

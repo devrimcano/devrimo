@@ -1,7 +1,5 @@
 """Student-owned editable resources shared by HTTP and assistant adapters."""
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -9,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.digest import stable_digest
 from app.db.models import (
     AccountDirectory,
     CampusKnowledgeRecord,
@@ -93,7 +92,7 @@ async def update_resource(
             raise HTTPException(422, str(exc)) from exc
     elif not changes or set(changes) - {"read", "dismissed"} or any(type(v) is not bool for v in changes.values()):
         raise HTTPException(422, "Update state accepts read and dismissed booleans only")
-    request_hash = hashlib.sha256(json.dumps(changes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    request_hash = stable_digest(changes)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"student-resource:{user_id}:{resource}"},

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -17,6 +18,7 @@ from app.db.models import (
     KnowledgeEmbeddingSettings,
     Organization,
     StudentAcademicSnapshot,
+    StudentContext,
     UserMailFact,
 )
 from app.db.session import SessionLocal
@@ -280,6 +282,35 @@ async def test_source_publish_ingest_search_and_personalized_updates(client, mon
         stored_remote = (await db.execute(select(KnowledgeEmbeddingSettings))).scalar_one()
         assert stored_remote.api_key_enc is not None
         assert b"remote-secret-key" not in stored_remote.api_key_enc
+
+    changed_origin_without_key = await client.put(
+        "/api/v1/admin/embedding-settings",
+        headers=auth_header(admin_id),
+        json={
+            "provider": "remote",
+            "model": "remote-test",
+            "base_url": "https://another-embedding.example/v1",
+            "dimensions": 384,
+            "batch_size": 2,
+        },
+    )
+    assert changed_origin_without_key.status_code == 422
+    assert "remote-secret-key" not in changed_origin_without_key.text
+
+    changed_origin_with_key = await client.put(
+        "/api/v1/admin/embedding-settings",
+        headers=auth_header(admin_id),
+        json={
+            "provider": "remote",
+            "model": "remote-test",
+            "base_url": "https://another-embedding.example/v1",
+            "dimensions": 384,
+            "batch_size": 2,
+            "api_key": "replacement-secret-key",
+        },
+    )
+    assert changed_origin_with_key.status_code == 200, changed_origin_with_key.text
+    assert "replacement-secret-key" not in changed_origin_with_key.text
 
     local = await client.put(
         "/api/v1/admin/embedding-settings",
@@ -565,6 +596,13 @@ def _fake_campus_session(monkeypatch, functions):
     return mcp_bridge
 
 
+async def _ensure_active_account(user_id):
+    from app.admin.directory import touch_account
+
+    async with SessionLocal() as db:
+        await touch_account(db, user_id, "test@example.edu")
+
+
 async def test_sais_context_sync_stores_a_verified_but_unconfirmed_context(client, monkeypatch):
     """Turkish and English field names both map onto the typed context.
 
@@ -574,6 +612,7 @@ async def test_sais_context_sync_stores_a_verified_but_unconfirmed_context(clien
     from app.student import service as student_service
 
     user_id = new_user_id()
+    await _ensure_active_account(user_id)
     bridge = _fake_campus_session(
         monkeypatch,
         {
@@ -606,6 +645,7 @@ async def test_sais_context_sync_stores_a_verified_but_unconfirmed_context(clien
 async def test_sais_context_sync_reports_failure_when_the_tool_is_absent(client, monkeypatch):
     """A student without the SAIS tool enabled is a no-op, not an error."""
     user_id = new_user_id()
+    await _ensure_active_account(user_id)
     bridge = _fake_campus_session(monkeypatch, {})
 
     assert await bridge.sync_student_context_from_sais(user_id) is False
@@ -625,6 +665,7 @@ async def test_sais_context_sync_never_reads_the_transcript(client, monkeypatch)
             return await super().entrypoint()
 
     user_id = new_user_id()
+    await _ensure_active_account(user_id)
     bridge = _fake_campus_session(
         monkeypatch,
         {
@@ -639,6 +680,38 @@ async def test_sais_context_sync_never_reads_the_transcript(client, monkeypatch)
     async with SessionLocal() as db:
         snapshots = (await db.execute(select(StudentAcademicSnapshot))).scalars().all()
     assert [s for s in snapshots if s.user_id == user_id] == []
+
+
+async def test_stale_sais_context_write_is_fenced_after_academic_purge(monkeypatch):
+    """A response fetched before deletion must not recreate the context row."""
+    from app.student.purge import purge_academic_data
+
+    user_id = new_user_id()
+    await _ensure_active_account(user_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingFunction:
+        async def entrypoint(self):
+            started.set()
+            await release.wait()
+            return {"department": "Computer Engineering"}
+
+    bridge = _fake_campus_session(
+        monkeypatch,
+        {"sais_get_student_info": _BlockingFunction()},
+    )
+    sync = asyncio.create_task(bridge.sync_student_context_from_sais(user_id))
+    await started.wait()
+
+    async with SessionLocal() as db:
+        await purge_academic_data(db, user_id)
+        await db.commit()
+    release.set()
+    assert await sync is False
+
+    async with SessionLocal() as db:
+        assert await db.get(StudentContext, user_id) is None
 
 
 async def test_batch_create_sources(client, monkeypatch):

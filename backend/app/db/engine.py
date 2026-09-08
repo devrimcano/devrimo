@@ -8,6 +8,26 @@ from sqlalchemy.engine import URL, make_url
 SEARCH_PATH = "public,extensions"
 
 
+def require_postgres_tls(url: str | URL) -> None:
+    """Reject libpq's opportunistic/plaintext defaults for managed releases."""
+    parsed = postgres_driver_url(url)
+    if parsed.query.get("sslmode") not in {"require", "verify-ca", "verify-full"}:
+        raise ValueError("Production PostgreSQL connections require ssl=require or certificate verification")
+
+
+def database_pool_options(settings, *, agno: bool = False) -> dict:
+    """Bound every process's pools, including Agno's separate sync engine."""
+    return {
+        "pool_size": settings.agno_database_pool_size if agno else (
+            settings.database_pool_size or (8 if settings.database_runtime_role == "api" else 2)
+        ),
+        "max_overflow": 0 if agno else settings.database_max_overflow,
+        "pool_timeout": settings.database_pool_timeout,
+        "pool_recycle": settings.database_pool_recycle,
+        "pool_pre_ping": True,
+    }
+
+
 def postgres_driver_url(url: str | URL, driver: str = "postgresql+psycopg") -> URL:
     """Translate driver-specific TLS parameters without weakening their mode."""
     parsed = make_url(url)

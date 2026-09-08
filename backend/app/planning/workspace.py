@@ -16,12 +16,14 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.digest import stable_digest
 from app.db.models import StudentTimetable, StudentTimetableRevision
 from app.planning.models import (
     PlanChanges,
     PlanConflictError,
     PlanEntry,
     PlanEnvelope,
+    PlanIdempotencyError,
     PlanMeeting,
     PlanState,
     PlanValidationError,
@@ -31,6 +33,10 @@ from app.planning.solver import SolverGroup, enumerate_solutions
 MAX_ALTERNATIVES = 200
 MAX_SOLVER_NODES = 150_000
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri")
+# History written before 0032 has no way to recover the request body from the
+# resulting state snapshot. The migration marks those rows with this value so
+# a retry fails closed and cannot accidentally replay an unknown request.
+LEGACY_REQUEST_DIGEST = "0" * 64
 
 
 def _user_value(user_id: UUID | str) -> UUID | str:
@@ -41,6 +47,21 @@ def _user_value(user_id: UUID | str) -> UUID | str:
 
 def _identity(value: Any) -> str:
     return "".join(str(value or "").upper().split()).replace("-", "")
+
+
+def _request_digest(changes: PlanChanges, expected_revision: int) -> str:
+    """Hash the complete timetable update request under the shared JSON rules."""
+
+    return stable_digest(
+        {
+            "changes": changes.model_dump(mode="json", exclude_none=True),
+            "expected_revision": expected_revision,
+        }
+    )
+
+
+def _undo_request_digest(expected_revision: int) -> str:
+    return stable_digest({"operation": "undo", "expected_revision": expected_revision})
 
 
 def _row_revision(row: Any) -> int:
@@ -225,10 +246,19 @@ def _projection_state(projection: dict[str, Any]) -> PlanState:
 
 def _apply_changes(state: PlanState, changes: PlanChanges) -> PlanState:
     operation = changes.operation
-    if operation in {"replace", "import_legacy"}:
+    if operation == "replace":
         if changes.state is None:
             raise PlanValidationError("replace requires state")
         return PlanState.model_validate(changes.state.model_dump(mode="python"))
+    if operation == "import_legacy":
+        if changes.projection is not None:
+            return _projection_state(changes.projection)
+        # One older browser release sent the already converted state. Keep
+        # accepting that shape while the browser moves to the server-owned
+        # compatibility converter; raw legacy payloads always take precedence.
+        if changes.state is not None:
+            return PlanState.model_validate(changes.state.model_dump(mode="python"))
+        raise PlanValidationError("import_legacy requires projection")
     if operation == "replace_projection":
         if changes.projection is None:
             raise PlanValidationError("replace_projection requires projection")
@@ -419,6 +449,7 @@ async def _commit(
     expected_revision: int,
     idempotency_key: str,
     operation: str,
+    request_digest: str,
 ) -> PlanEnvelope:
     next_revision = expected_revision + 1
     payload = state.to_payload()
@@ -436,6 +467,7 @@ async def _commit(
                 payload=baseline,
                 operation="seed",
                 idempotency_key=f"__seed__:{term}",
+                request_digest=LEGACY_REQUEST_DIGEST,
             )
         )
     if current is None:
@@ -456,6 +488,7 @@ async def _commit(
             payload=payload,
             operation=operation,
             idempotency_key=idempotency_key,
+            request_digest=request_digest,
         )
     )
     await db.flush()
@@ -489,8 +522,12 @@ async def update_timetable(
     # Lock before the idempotency lookup so concurrent first writes are
     # serialized too. The transaction lock is released by commit/rollback.
     await _resource_lock(db, user_id, term)
+    request_digest = _request_digest(changes, expected_revision)
     previous = await _history_for_key(db, user_id, term, idempotency_key)
     if previous is not None:
+        previous_digest = getattr(previous, "request_digest", LEGACY_REQUEST_DIGEST)
+        if previous_digest != request_digest:
+            raise PlanIdempotencyError("Idempotency key was already used for different timetable changes")
         return await _envelope(
             db,
             user_id,
@@ -519,6 +556,7 @@ async def update_timetable(
         expected_revision=current_revision,
         idempotency_key=idempotency_key,
         operation=changes.operation,
+        request_digest=request_digest,
     )
 
 
@@ -534,8 +572,12 @@ async def undo_timetable(
     if not idempotency_key or len(idempotency_key) > 128:
         raise PlanValidationError("idempotency_key is required and must be at most 128 characters")
     await _resource_lock(db, user_id, term)
+    request_digest = _undo_request_digest(expected_revision)
     previous = await _history_for_key(db, user_id, term, idempotency_key)
     if previous is not None:
+        previous_digest = getattr(previous, "request_digest", LEGACY_REQUEST_DIGEST)
+        if previous_digest != request_digest:
+            raise PlanIdempotencyError("Idempotency key was already used for a different undo request")
         return await _envelope(
             db,
             user_id,
@@ -567,6 +609,7 @@ async def undo_timetable(
         expected_revision=current_revision,
         idempotency_key=idempotency_key,
         operation="undo",
+        request_digest=request_digest,
     )
 
 

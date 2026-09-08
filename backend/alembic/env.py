@@ -9,7 +9,9 @@ from alembic import context
 from app.config import get_settings
 from app.db import models  # noqa: F401 -- registers models on Base.metadata
 from app.db.base import Base
-from app.db.engine import postgres_connect_args
+from app.db.engine import postgres_connect_args, require_postgres_tls
+from app.db.release_roles import maintain_backup_access
+from app.db.schema import include_object
 
 config = context.config
 
@@ -29,6 +31,8 @@ if not migration_url:
     migration_url = settings.database_migration_url or settings.database_url
 if make_url(migration_url).get_backend_name() != "postgresql":
     raise RuntimeError("Release migrations require PostgreSQL")
+if os.environ.get("ENVIRONMENT", "").strip().lower() in {"production", "staging"}:
+    require_postgres_tls(migration_url)
 config.set_main_option("sqlalchemy.url", migration_url.replace("%", "%%"))
 
 
@@ -45,7 +49,12 @@ def run_migrations_offline() -> None:
 
 
 def _do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+        on_version_apply=lambda **_: maintain_backup_access(connection),
+    )
     with context.begin_transaction():
         context.run_migrations()
 

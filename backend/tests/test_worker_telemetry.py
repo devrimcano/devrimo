@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -83,8 +84,223 @@ async def test_domain_worker_reports_lifecycle_and_safe_pass_failure(captured, m
     assert outcome["reason"] is None
     assert outcome["retrying"] is True
     assert secret not in repr(events)
-    assert not exceptions
+    assert len(exceptions) == 1
+    issue, properties = exceptions[0]
+    assert issue.args == ("catalog_worker_pass failed (RuntimeError)",)
+    assert issue.__traceback__ is None
+    assert properties["error_type"] == "RuntimeError"
+    assert properties["$exception_fingerprint"] == ["background_job", "catalog_worker_pass", "RuntimeError"]
+    assert secret not in repr(exceptions)
     assert service_name() == "devrimo-catalog-worker"
+
+
+async def test_assistant_finalization_failure_is_unknown_and_safe(captured, monkeypatch):
+    from app.assistant import worker
+    from app.observability import turns
+
+    events, exceptions = captured
+    turn_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(turns, "capture", lambda event, **kw: turn_events.append((event, kw)))
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    user_id = uuid4()
+    run_id = uuid4()
+    secret = "database response with private transcript content"
+    monkeypatch.setattr(worker, "get_session_factory", lambda _owner: lambda: _Session())
+    monkeypatch.setattr(worker, "decrypt_secret", lambda _value: "test-token")
+    monkeypatch.setattr(worker, "verify_access_token", lambda _token: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(worker, "renew_run", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker, "active_account", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        worker,
+        "get_runtime_config",
+        AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
+    )
+    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+
+    async def stream(*_args):
+        yield b"data: {}\n\n"
+
+    monkeypatch.setattr(worker, "_serialize_run", stream)
+    monkeypatch.setattr(worker, "append_event", AsyncMock())
+    monkeypatch.setattr(worker, "finish_run", AsyncMock(side_effect=RuntimeError(secret)))
+
+    run = SimpleNamespace(
+        id=run_id,
+        user_id=user_id,
+        session_id="session-1",
+        kind="chat",
+        payload={"text": "hello", "agno_session_id": "session-1", "request_id": "request-1"},
+        cancel_requested=False,
+        token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        token_enc="encrypted-token",
+        approval_token_enc=None,
+    )
+
+    with pytest.raises(RuntimeError, match="database response"):
+        await worker._execute(run, "worker-1", {})
+
+    turn = next(fields for event, fields in turn_events if event == "chat_turn_completed")
+    assert turn["outcome"] == "run_error"
+    assert turn["durable_status"] == "unknown"
+    assert turn["durable_finalization"] == "failed"
+    assert turn["request_id"] == "request-1"
+    outcome = _events(events, "background_job_completed")[0]
+    assert outcome["outcome"] == "unexpected_failure"
+    assert outcome["durable_status"] == "unknown"
+    assert outcome["durable_finalization"] == "failed"
+    issue, properties = exceptions[0]
+    assert issue.args == ("assistant_run failed (RuntimeError)",)
+    assert issue.__traceback__ is None
+    assert properties["$exception_fingerprint"] == ["background_job", "assistant_run", "RuntimeError"]
+    assert secret not in repr(events)
+    assert secret not in repr(exceptions)
+
+
+async def test_assistant_lease_loss_is_interrupted_without_finalization(captured, monkeypatch):
+    from app.assistant import worker
+    from app.assistant.queue import RunLeaseLost
+    from app.observability import turns
+
+    events, exceptions = captured
+    turn_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(turns, "capture", lambda event, **kw: turn_events.append((event, kw)))
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    user_id = uuid4()
+    run_id = uuid4()
+    monkeypatch.setattr(worker, "get_session_factory", lambda _owner: lambda: _Session())
+    monkeypatch.setattr(worker, "decrypt_secret", lambda _value: "test-token")
+    monkeypatch.setattr(worker, "verify_access_token", lambda _token: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(worker, "renew_run", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker, "active_account", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        worker,
+        "get_runtime_config",
+        AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
+    )
+    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+
+    async def stream(*_args):
+        yield b"data: {}\n\n"
+
+    monkeypatch.setattr(worker, "_serialize_run", stream)
+    monkeypatch.setattr(worker, "append_event", AsyncMock(side_effect=RunLeaseLost("stale lease")))
+    finish = AsyncMock()
+    monkeypatch.setattr(worker, "finish_run", finish)
+
+    run = SimpleNamespace(
+        id=run_id,
+        user_id=user_id,
+        session_id="session-1",
+        kind="chat",
+        payload={"text": "hello", "agno_session_id": "session-1", "request_id": "request-lease"},
+        cancel_requested=False,
+        token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        token_enc="encrypted-token",
+        approval_token_enc=None,
+    )
+
+    with pytest.raises(RunLeaseLost):
+        await worker._execute(run, "worker-lease", {})
+
+    finish.assert_not_awaited()
+    turn = next(fields for event, fields in turn_events if event == "chat_turn_completed")
+    assert turn["outcome"] == "interrupted"
+    assert turn["result"] == "expected_failure"
+    assert turn["durable_status"] == "unknown"
+    assert turn["durable_finalization"] == "lease_lost"
+    assert turn["run_id"] == str(run_id)
+    assert turn["request_id"] == "request-lease"
+    outcome = _events(events, "background_job_completed")[0]
+    assert outcome["outcome"] == "expected_failure"
+    assert outcome["reason"] == "lease_lost"
+    assert outcome["durable_status"] == "unknown"
+    assert outcome["durable_finalization"] == "lease_lost"
+    assert not exceptions
+
+
+async def test_assistant_error_event_append_failure_still_finalizes(captured, monkeypatch):
+    from app.assistant import worker
+    from app.observability import turns
+
+    events, exceptions = captured
+    turn_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(turns, "capture", lambda event, **kw: turn_events.append((event, kw)))
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    user_id = uuid4()
+    run_id = uuid4()
+    append_secret = "private database response"
+    monkeypatch.setattr(worker, "get_session_factory", lambda _owner: lambda: _Session())
+    monkeypatch.setattr(worker, "decrypt_secret", lambda _value: "test-token")
+    monkeypatch.setattr(worker, "verify_access_token", lambda _token: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(worker, "renew_run", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker, "active_account", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        worker,
+        "get_runtime_config",
+        AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
+    )
+    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+
+    async def stream(*_args):
+        raise RuntimeError("model execution failed")
+        yield b""
+
+    monkeypatch.setattr(worker, "_serialize_run", stream)
+    append_event = AsyncMock(side_effect=RuntimeError(append_secret))
+    monkeypatch.setattr(worker, "append_event", append_event)
+    finish = AsyncMock()
+    monkeypatch.setattr(worker, "finish_run", finish)
+
+    run = SimpleNamespace(
+        id=run_id,
+        user_id=user_id,
+        session_id="session-1",
+        kind="chat",
+        payload={"text": "hello", "agno_session_id": "session-1", "request_id": "request-append"},
+        cancel_requested=False,
+        token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        token_enc="encrypted-token",
+        approval_token_enc=None,
+    )
+
+    await worker._execute(run, "worker-append", {})
+
+    append_event.assert_awaited_once()
+    finish.assert_awaited_once()
+    turn = next(fields for event, fields in turn_events if event == "chat_turn_completed")
+    assert turn["outcome"] == "stream_error"
+    assert turn["result"] == "unexpected_failure"
+    assert turn["durable_status"] == "failed"
+    assert turn["durable_finalization"] == "committed"
+    assert turn["request_id"] == "request-append"
+    outcome = _events(events, "background_job_completed")[0]
+    assert outcome["outcome"] == "unexpected_failure"
+    assert outcome["durable_status"] == "failed"
+    assert outcome["durable_finalization"] == "committed"
+    assert outcome["error_event_append_error_type"] == "RuntimeError"
+    assert append_secret not in repr(events)
+    assert append_secret not in repr(exceptions)
 
 
 async def test_domain_worker_cancels_an_active_pass_on_requested_stop(captured, monkeypatch):

@@ -19,7 +19,6 @@ from app.config import get_settings
 from app.db.models import AgentStatus
 from app.db.session import get_db
 from app.logging import get_logger
-from app.observability import capture_exception
 from app.observability.client import report_exception
 from app.planning.mcp_bridge import sync_student_context_from_sais
 from app.schemas import (
@@ -154,12 +153,13 @@ async def _reconfigure_agent_if_running(db: AsyncSession, user_id) -> None:
         # The save still succeeds, so nothing surfaces to the student and
         # nothing surfaced to us either: a campus config that silently never
         # reached the running agent looked identical to one that did.
-        report_exception(exc, distinct_id=str(user_id), handler="campus_apply", operation="apply_campus_config")
-        # The save succeeded and config_dirty stays set, so the student can
-        # retry — but a rebuild that fails every time needs to be visible.
-        capture_exception(
+        # Keep the stable grouping key on the first capture. The report helper
+        # suppresses a later duplicate capture for the same exception object.
+        report_exception(
             exc,
             distinct_id=str(user_id),
+            handler="campus_apply",
+            operation="apply_campus_config",
             **{"$exception_fingerprint": ["campus_apply_failed"]},
         )
 
@@ -184,9 +184,5 @@ async def _sync_student_context(user_id, *, verified: bool) -> None:
             handler="campus_connect",
             operation="sync_student_context_from_sais",
             dependency="sais",
-        )
-        capture_exception(
-            exc,
-            distinct_id=str(user_id),
             **{"$exception_fingerprint": ["student_context_sync_failed"]},
         )

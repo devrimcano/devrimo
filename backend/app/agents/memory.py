@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import json
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -10,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 
 from app.agents.store import get_agno_db
+from app.core.digest import stable_digest
 from app.db.session import get_session_factory
 from app.student.service import SENSITIVE_TERMS
 from app.workspace.models import WorkspaceMemoryMutation
@@ -65,12 +65,9 @@ async def mutate_memories(
             raise HTTPException(422, "Memory identifiers must be unique")
         if any(term in item.content.lower() for item in parsed.memories for term in SENSITIVE_TERMS):
             raise HTTPException(422, "Sensitive information cannot be stored as memory")
-    digest = hashlib.sha256(
-        json.dumps(
-            {"changes": parsed.model_dump() if parsed else None, "revision": expected_revision, "undo": undo},
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    digest = stable_digest(
+        {"changes": parsed.model_dump() if parsed else None, "revision": expected_revision, "undo": undo}
+    )
     async with get_session_factory("assistant")() as db:
         lock = int.from_bytes(hashlib.sha256(f"memory:{user_id}".encode()).digest()[:8], "big", signed=True)
         await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock})

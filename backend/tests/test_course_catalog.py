@@ -226,6 +226,58 @@ def test_a_caller_giving_up_does_not_cancel_the_shared_fill():
     asyncio.run(scenario())
 
 
+def test_purge_cancels_an_in_flight_fill_before_it_can_reinsert_private_data():
+    cache = TTLCache(ttl_seconds=60, max_entries=10)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow():
+        started.set()
+        await release.wait()
+        return {"private": "academic"}
+
+    async def scenario():
+        fill = asyncio.create_task(cache.run(("alice", "courses"), slow))
+        await started.wait()
+        cache.purge(lambda key: key[0] == "alice")
+        with pytest.raises(asyncio.CancelledError):
+            await fill
+        assert cache.get(("alice", "courses")) is None
+
+    asyncio.run(scenario())
+
+
+def test_purge_blocks_a_cancellation_resistant_fill_and_preserves_a_replacement():
+    cache = TTLCache(ttl_seconds=60, max_entries=10)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release_stale = asyncio.Event()
+
+    async def stale():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release_stale.wait()
+            return {"private": "stale"}
+
+    async def fresh():
+        return {"private": "fresh"}
+
+    async def scenario():
+        old_fill = asyncio.create_task(cache.run(("alice", "courses"), stale))
+        await started.wait()
+        cache.purge(lambda key: key[0] == "alice")
+        await cancelled.wait()
+        assert await cache.run(("alice", "courses"), fresh) == {"private": "fresh"}
+        release_stale.set()
+        assert await old_fill == {"private": "stale"}
+        assert cache.get(("alice", "courses")) == {"private": "fresh"}
+
+    asyncio.run(scenario())
+
+
 # --- the department picker's options ----------------------------------------
 
 

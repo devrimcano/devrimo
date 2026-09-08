@@ -3,37 +3,16 @@ import { apiFetch } from "@/lib/api/client";
 import { getApiBaseUrl } from "@/lib/env";
 import { apiErrorFromResponse } from "@/lib/api/fetcher";
 import type { ChatCompletionsRequest, ChatMessage, ChatSession } from "@/lib/types";
-
-export type ChatConfirmationRequirement = {
-  id: string;
-  tool: string;
-  arguments: Record<string, unknown>;
-};
-
-export type ChatConfirmation = {
-  run_id: string;
-  session_id: string;
-  requirements: ChatConfirmationRequirement[];
-};
-
-export type ChatToolEvent = {
-  status: "started" | "completed" | "error";
-  tool: string | null;
-  server: string | null;
-  message: string | null;
-};
-
-export type ChatStreamError = {
-  code: string | null;
-  message: string;
-};
-
-export type ChatStreamEvent =
-  | { type: "run"; runId: string }
-  | { type: "text"; delta: string }
-  | { type: "confirmation"; confirmation: ChatConfirmation }
-  | { type: "tool"; tool: ChatToolEvent }
-  | { type: "error"; error: ChatStreamError };
+import { parseSseEvent, type ChatConfirmation, type ChatStreamEvent } from "./chat-stream-parser";
+export {
+  ChatStreamParseError,
+  parseSseEvent,
+  type ChatConfirmation,
+  type ChatConfirmationRequirement,
+  type ChatStreamError,
+  type ChatStreamEvent,
+  type ChatToolEvent,
+} from "./chat-stream-parser";
 
 export type ChatContinuation = {
   text: string;
@@ -61,77 +40,22 @@ export function deleteAllChatSessions(token: string) {
   return apiFetch<{ deleted: number }>("/chat/sessions", { method: "DELETE", token });
 }
 
-const TOOL_EVENT_STATUS: Record<string, ChatToolEvent["status"]> = {
-  tool_call_started: "started",
-  tool_call_completed: "completed",
-  tool_call_error: "error",
-};
-
-function parseSseEvent(data: string): ChatStreamEvent | null {
-  if (!data || data === "[DONE]") return null;
-  try {
-    const json = JSON.parse(data) as {
-      choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
-      devrimo?: {
-        type?: string;
-        code?: string;
-        message?: string;
-        tool?: string;
-        server?: string;
-        run_id?: string;
-        session_id?: string;
-        requirements?: ChatConfirmationRequirement[];
-      };
-    };
-    if (
-      json.devrimo?.type === "confirmation_required" &&
-      json.devrimo.run_id &&
-      json.devrimo.session_id
-    ) {
-      return {
-        type: "confirmation",
-        confirmation: {
-          run_id: json.devrimo.run_id,
-          session_id: json.devrimo.session_id,
-          requirements: json.devrimo.requirements ?? [],
-        },
-      };
-    }
-    // Tool activity and typed errors were previously parsed away here, so a
-    // failing campus tool was invisible to the student and to analytics alike.
-    const toolStatus = json.devrimo?.type ? TOOL_EVENT_STATUS[json.devrimo.type] : undefined;
-    if (toolStatus) {
-      return {
-        type: "tool",
-        tool: {
-          status: toolStatus,
-          tool: json.devrimo?.tool ?? null,
-          server: json.devrimo?.server ?? null,
-          message: json.devrimo?.message ?? null,
-        },
-      };
-    }
-    if (json.devrimo?.type === "error") {
-      return {
-        type: "error",
-        error: { code: json.devrimo.code ?? null, message: json.devrimo.message ?? "Chat failed" },
-      };
-    }
-    const delta = json.choices?.[0]?.delta?.content ?? json.choices?.[0]?.message?.content ?? "";
-    return delta ? { type: "text", delta } : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Resume only persisted frames. Reconnecting never repeats a model or email command. */
-async function* readRunStream(initial: Response, token: string): AsyncGenerator<ChatStreamEvent> {
+async function* readRunStream(
+  initial: Response,
+  token: string,
+  tracingHeaders: Record<string, string> = {},
+): AsyncGenerator<ChatStreamEvent> {
   if (!initial.ok || !initial.body) throw await apiErrorFromResponse(initial);
   const runId = initial.headers.get("X-Run-ID");
   if (runId) yield { type: "run", runId };
   for await (const data of readPersistedFrames(initial, {
     resume: runId ? (cursor) => fetch(`${getApiBaseUrl()}/api/v1/chat/runs/${runId}/events?after=${cursor}`, {
-      headers: { Accept: "text/event-stream", Authorization: `Bearer ${token}` },
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${token}`,
+        ...tracingHeaders,
+      },
     }) : undefined,
     responseError: apiErrorFromResponse,
   })) {
@@ -159,7 +83,7 @@ export async function* streamChatCompletions(
       stream: true,
     }),
   });
-  yield* readRunStream(response, token);
+  yield* readRunStream(response, token, tracingHeaders);
 }
 
 export async function continueChatRun(
@@ -182,7 +106,7 @@ export async function continueChatRun(
   });
   let text = "";
   let nextConfirmation: ChatConfirmation | null = null;
-  for await (const event of readRunStream(response, token)) {
+  for await (const event of readRunStream(response, token, tracingHeaders)) {
     if (event.type === "text") text += event.delta;
     if (event.type === "confirmation") nextConfirmation = event.confirmation;
     if (event.type === "error") throw new Error(event.error.message);

@@ -49,6 +49,14 @@ async def test_timetable_revision_idempotency_conflict_undo_and_user_scope(clien
     assert replay.json()["revision"] == 1
     assert replay.json()["idempotency_key"] == "planner-test-1"
 
+    collision = await client.patch(
+        f"/api/v1/schedule/timetable?term={term}",
+        headers=headers,
+        json={**request, "changes": {"operation": "add_entry", "entry": _entry("different-entry")}},
+    )
+    assert collision.status_code == 409
+    assert "different timetable changes" in collision.json()["detail"]
+
     conflict = await client.patch(
         f"/api/v1/schedule/timetable?term={term}",
         headers=headers,

@@ -8,6 +8,7 @@ working and the only evidence was a warning line in a container log.
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -179,8 +180,48 @@ async def test_worker_treats_a_lost_lease_as_expected(captured, monkeypatch):
     assert not exceptions
 
 
+async def test_knowledge_worker_reports_lifecycle_until_cancelled(captured, monkeypatch):
+    from app.knowledge import worker
+
+    events, _ = captured
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(knowledge_worker_poll_seconds=0.01))
+    monkeypatch.setattr(worker, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(worker, "enqueue_due_sources", _resolved)
+    monkeypatch.setattr(worker, "claim_job", _resolved_none)
+    monkeypatch.setattr(worker, "posthog_initialize", lambda: None)
+    monkeypatch.setattr(worker, "posthog_shutdown", lambda: None)
+    monkeypatch.setattr(worker, "posthog_logs_shutdown", lambda: None)
+
+    running = asyncio.create_task(worker.run())
+    for _ in range(20):
+        if _events := [item for event, item in events if event == "background_worker_lifecycle"]:
+            break
+        await asyncio.sleep(0)
+    assert _events and _events[0]["worker"] == "devrimo-knowledge-worker"
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    lifecycle = [item for event, item in events if event == "background_worker_lifecycle"]
+    assert [item["state"] for item in lifecycle] == ["started", "stopped"]
+    assert lifecycle[1]["stop_reason"] == "cancelled"
+
+
 async def _resolved(value):
     return value
+
+
+async def _resolved_none(*_args, **_kwargs):
+    return None
 
 
 # --- embedding calls --------------------------------------------------------

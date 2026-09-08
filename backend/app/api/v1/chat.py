@@ -20,6 +20,7 @@ from app.auth.jwt import AuthenticatedUser
 from app.db.models import ChatSession
 from app.db.session import get_db
 from app.observability.client import capture
+from app.observability.context import current_request_id
 from app.schemas import ChatCompletionsRequestIn, ChatConfirmationIn
 from app.workspace.approvals import issue_approval
 
@@ -79,7 +80,12 @@ async def chat_completions(
             user_id=user.id,
             session_id=session.id,
             kind="chat",
-            payload={"text": text, "dependencies": dependencies, "agno_session_id": session.agno_session_id},
+            payload={
+                "text": text,
+                "dependencies": dependencies,
+                "agno_session_id": session.agno_session_id,
+                "request_id": current_request_id.get(),
+            },
             access_token=request.headers["authorization"].split(" ", 1)[1],
             idempotency_key=key,
         )
@@ -128,6 +134,7 @@ async def confirm_tool_call(
         "approved": body.approved,
         "agno_session_id": agno_session_id,
         "dependencies": await build_run_dependencies(db, user.id),
+        "request_id": current_request_id.get(),
     }
     execution = requirement.tool_execution
     if body.approved and execution.tool_name == "send_email":

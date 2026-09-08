@@ -50,7 +50,10 @@ def test_staged_release_uses_only_explicit_migration_identity():
         cwd=Path(__file__).resolve().parents[1],
         env={
             **os.environ,
-            "ENVIRONMENT": "production",
+            # Local fixture PostgreSQL has no TLS certificate. The explicit
+            # release-identity path must still ignore inconsistent runtime URLs;
+            # production TLS rejection is exercised in test_database_hardening.
+            "ENVIRONMENT": "test",
             "DATABASE_MIGRATION_URL": get_settings().database_url,
             "DATABASE_URL": "postgresql+asyncpg://postgres:unused@old-runtime.invalid/old",
             "ASSISTANT_DATABASE_URL": "postgresql+asyncpg://unused:unused@other.invalid/old",

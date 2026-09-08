@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.db.session import SessionLocal
 from app.logging import get_logger
 from app.planning.service import upsert_academic_snapshot
+from app.student.fence import capture_academic_data_fence, lock_current_academic_data_fence
 from app.student.service import apply_verified_context
 
 logger = get_logger(__name__)
@@ -543,9 +544,14 @@ def _schedule_matches_term(schedule: Any, term: str) -> bool:
 
 
 async def refresh_from_sais(
-    user_id: UUID, term: str, connected: list[MCPTools], *, optional_timeout: float | None = None
+    user_id: UUID,
+    term: str,
+    connected: list[MCPTools],
+    *,
+    optional_timeout: float | None = None,
+    expected_fence: int | None = None,
 ) -> bool:
-    """Store what SAIS will give us. ``False`` only when it gave nothing at all.
+    """Store what SAIS will give us, unless deletion fences the response.
 
     The student card is read *first* and stored on its own. It is the cheapest
     call and the one the planner and chat depend on most — department, campus,
@@ -556,8 +562,18 @@ async def refresh_from_sais(
 
     Each call is independent now. An *empty* transcript is still an answer, not
     a failure — a first-semester student has no completed courses — so only
-    getting nothing from any call at all returns False.
+    getting nothing from any call at all returns False. A deletion fence also
+    returns False so callers do not report erased data as refreshed.
     """
+    if expected_fence is None:
+        # Capture before the first campus request. The write-side check below
+        # locks the account row, so a purge either commits before this result or
+        # waits for this whole short write transaction and deletes it afterward.
+        async with SessionLocal() as db:
+            expected_fence = await capture_academic_data_fence(db, user_id)
+        if expected_fence is None:
+            return False
+
     # Retried: this is the one call whose result the planner, the chat tools
     # and the schedule page all depend on, and it is the cheapest to repeat.
     student_info = await _payload(
@@ -565,6 +581,10 @@ async def refresh_from_sais(
     )
     if student_info is not None:
         async with SessionLocal() as db:
+            if not await lock_current_academic_data_fence(db, user_id, expected_fence):
+                await db.rollback()
+                logger.info("academic_data_write_fenced", user_id=str(user_id), kind="context")
+                return False
             await _apply_student_info(db, user_id, student_info)
 
     transcript_fn = _function(connected, "sais_get_transcript")
@@ -604,6 +624,10 @@ async def refresh_from_sais(
     )
     cgpa = _number(_find_value(transcript, {"cgpa", "cumulative_gpa", "gpa", "genel_not_ortalamasi"}))
     async with SessionLocal() as db:
+        if not await lock_current_academic_data_fence(db, user_id, expected_fence):
+            await db.rollback()
+            logger.info("academic_data_write_fenced", user_id=str(user_id), kind="snapshot", term=term)
+            return False
         await upsert_academic_snapshot(
             db,
             user_id,
@@ -649,6 +673,10 @@ async def sync_student_context_from_sais(user_id: UUID) -> bool:
     marked verified but unconfirmed, so the student still confirms it before
     anything uses it.
     """
+    async with SessionLocal() as db:
+        expected_fence = await capture_academic_data_fence(db, user_id)
+    if expected_fence is None:
+        return False
     async with _campus_session(user_id) as connected:
         student_info = await _payload(
             _function(connected, "sais_get_student_info"), tool="sais_get_student_info", attempts=2
@@ -656,6 +684,10 @@ async def sync_student_context_from_sais(user_id: UUID) -> bool:
         if student_info is None:
             return False
         async with SessionLocal() as db:
+            if not await lock_current_academic_data_fence(db, user_id, expected_fence):
+                await db.rollback()
+                logger.info("academic_data_write_fenced", user_id=str(user_id), kind="context")
+                return False
             await _apply_student_info(db, user_id, student_info)
     logger.info("student_context_synced", user_id=str(user_id))
     return True
@@ -668,7 +700,15 @@ async def sync_planning_snapshot_from_sais(user_id: UUID, term: str) -> bool:
     optional reads may be abandoned rather than allowed to run out the clock on
     a student waiting for an answer.
     """
+    async with SessionLocal() as db:
+        expected_fence = await capture_academic_data_fence(db, user_id)
+    if expected_fence is None:
+        return False
     async with _campus_session(user_id) as connected:
         return await refresh_from_sais(
-            user_id, term, connected, optional_timeout=get_settings().sais_optional_read_seconds
+            user_id,
+            term,
+            connected,
+            optional_timeout=get_settings().sais_optional_read_seconds,
+            expected_fence=expected_fence,
         )

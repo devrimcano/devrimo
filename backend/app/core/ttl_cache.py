@@ -30,7 +30,7 @@ class TTLCache:
         self._ttl = ttl_seconds
         self._max_entries = max_entries
         self._entries: OrderedDict[Hashable, tuple[float, object]] = OrderedDict()
-        self._flights: dict[Hashable, asyncio.Future] = {}
+        self._flights: dict[Hashable, tuple[asyncio.Future, object]] = {}
 
     def get(self, key: Hashable, default: object = None) -> object:
         entry = self._entries.get(key)
@@ -55,10 +55,19 @@ class TTLCache:
 
         Deleting a student's stored academic data has to reach the cache too,
         or their department keeps being served from memory after they asked for
-        it to be removed.
+        it to be removed. Cancel a matching single-flight as well: otherwise a
+        campus response that was already in progress would put the value back
+        immediately after this method returned. A unique flight token also
+        stops a cancellation-resistant fill from overwriting a replacement.
         """
-        for key in [key for key in self._entries if matches(key)]:
-            del self._entries[key]
+        keys = {key for key in (*self._entries, *self._flights) if matches(key)}
+        for key in keys:
+            self._entries.pop(key, None)
+            entry = self._flights.pop(key, None)
+            if entry is not None:
+                flight = entry[0]
+                if not flight.done():
+                    flight.cancel()
 
     async def run(self, key: Hashable, factory: Callable[[], Awaitable]) -> object:
         """Return the value for ``key``, calling ``factory`` at most once.
@@ -70,21 +79,28 @@ class TTLCache:
         cached = self.get(key, _MISSING)
         if cached is not _MISSING:
             return cached
-        flight = self._flights.get(key)
-        if flight is None:
-            flight = asyncio.ensure_future(self._fill(key, factory))
-            self._flights[key] = flight
+        entry = self._flights.get(key)
+        if entry is None:
+            token = object()
+            flight = asyncio.ensure_future(self._fill(key, factory, token))
+            self._flights[key] = (flight, token)
+        else:
+            flight = entry[0]
         return await asyncio.shield(flight)
 
-    async def _fill(self, key: Hashable, factory: Callable[[], Awaitable]) -> object:
+    async def _fill(self, key: Hashable, factory: Callable[[], Awaitable], token: object) -> object:
         try:
             value = await factory()
-            self.set(key, value)
+            entry = self._flights.get(key)
+            if entry is not None and entry[1] is token:
+                self.set(key, value)
             return value
         finally:
             # Stored before the flight is forgotten, so the next caller sees a
             # hit rather than starting a second fill for the same key.
-            self._flights.pop(key, None)
+            entry = self._flights.get(key)
+            if entry is not None and entry[1] is token:
+                self._flights.pop(key, None)
 
     def _drop_expired(self) -> None:
         now = time.monotonic()

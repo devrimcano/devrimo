@@ -83,3 +83,26 @@ def test_legacy_projection_keeps_exact_meeting_minutes():
     assert state.entries[0].start_minute == 520
     assert state.entries[0].duration_minutes == 110
     assert state.to_payload()["entries"][0]["start_minute"] == 520
+
+
+def test_server_legacy_converter_owns_aliases_clamps_and_generated_entries():
+    state = PlanState.from_legacy_payload(
+        {
+            "courses": [
+                {
+                    "code": "MATH101",
+                    "name": "Math",
+                    "section": "1",
+                    "credits": 3,
+                    "meetings": [{"day": "not-a-day", "startMinute": 1500, "durationMinutes": 1440}],
+                }
+            ],
+            "pool": [{"code": "MATH101", "rawCode": "2360101"}],
+            "favorites": [[{"code": "MATH101", "day": "Tue", "start": 9, "duration": 1}]],
+        }
+    )
+
+    entry = state.entries[0]
+    assert (entry.day, entry.start_minute, entry.duration_minutes) == ("Mon", 1439, 1)
+    assert state.pool[0].raw_code == "2360101"
+    assert state.favorites[0][0].start_minute == 580

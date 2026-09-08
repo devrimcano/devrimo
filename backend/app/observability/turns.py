@@ -32,6 +32,9 @@ from app.observability.context import (
     OUTCOME_CANCELLED as RESULT_CANCELLED,
 )
 from app.observability.context import (
+    OUTCOME_EXPECTED_FAILURE as RESULT_EXPECTED_FAILURE,
+)
+from app.observability.context import (
     OUTCOME_SUCCESS as RESULT_SUCCESS,
 )
 from app.observability.context import (
@@ -46,6 +49,7 @@ OUTCOME_PAUSED = "paused"
 OUTCOME_RUN_ERROR = "run_error"
 OUTCOME_STREAM_ERROR = "stream_error"
 OUTCOME_CANCELLED = "cancelled"
+OUTCOME_INTERRUPTED = "interrupted"
 
 # How each turn outcome maps onto the vocabulary every other surface reports in,
 # so one query spans chat turns, API requests and background jobs.
@@ -53,6 +57,7 @@ _RESULTS = {
     OUTCOME_COMPLETED: RESULT_SUCCESS,
     OUTCOME_PAUSED: RESULT_SUCCESS,
     OUTCOME_CANCELLED: RESULT_CANCELLED,
+    OUTCOME_INTERRUPTED: RESULT_EXPECTED_FAILURE,
     OUTCOME_RUN_ERROR: RESULT_UNEXPECTED_FAILURE,
     OUTCOME_STREAM_ERROR: RESULT_UNEXPECTED_FAILURE,
 }
@@ -111,6 +116,11 @@ class TurnObservation:
     user_id: str
     session_id: str | None = None
     kind: str = "chat_turn"
+    # Durable queue and worker identifiers let a turn be joined to the job
+    # that produced it after the worker process has gone away.
+    run_id: str | None = None
+    request_id: str | None = None
+    worker_id: str | None = None
     started: float = field(default_factory=time.monotonic)
     tool_calls: int = 0
     tool_errors: int = 0
@@ -120,6 +130,8 @@ class TurnObservation:
     error_message: str | None = None
     error_type: str | None = None
     metrics: Any = None
+    durable_status: str | None = None
+    durable_finalization: str | None = None
     # Tools that failed and were recovered from. Kept separately from the turn
     # outcome: the agent retrying a failed campus call and then answering
     # correctly is a successful turn that contains a failure, and flattening
@@ -179,6 +191,15 @@ class TurnObservation:
         self.outcome = OUTCOME_CANCELLED
         self.error_message = reason
 
+    def interrupted(self, reason: str | None = None) -> None:
+        """The worker lost ownership before the durable run was finalized."""
+        # Ownership loss takes precedence over a prior model/stream error: the
+        # queue's durable terminal state is now unknown, so reporting only the
+        # earlier error would falsely imply that finalization was committed.
+        self.outcome = OUTCOME_INTERRUPTED
+        self.error_message = reason
+        self.error_type = None
+
     def stream_failed(self, exc: BaseException) -> None:
         self.outcome = OUTCOME_STREAM_ERROR
         self.error_message = str(exc)
@@ -205,30 +226,44 @@ class TurnObservation:
                 "$ai_latency": self.duration_seconds,
                 "$ai_span_name": self.kind,
             }
+            if self.run_id:
+                shared["run_id"] = self.run_id
+            if self.request_id:
+                shared["request_id"] = self.request_id
+            if self.worker_id:
+                shared["worker_id"] = self.worker_id
+            if self.durable_status:
+                shared["durable_status"] = self.durable_status
+            if self.durable_finalization:
+                shared["durable_finalization"] = self.durable_finalization
             if self.failed:
                 shared["$ai_is_error"] = True
                 shared["$ai_error"] = self.error_message or self.error_type or "unknown"
 
             capture("$ai_trace", distinct_id=self.user_id, **shared)
 
-            capture(
-                "chat_turn_completed",
-                distinct_id=self.user_id,
-                turn_kind=self.kind,
-                outcome=self.outcome,
-                duration_seconds=self.duration_seconds,
-                tool_calls=self.tool_calls,
-                tool_errors=self.tool_errors,
-                tools_used=self.tools_used,
-                recovered_tool_errors=self.recovered_tool_errors,
-                paused_for_confirmation=self.paused,
-                error_type=self.error_type,
-                error_message=self.error_message,
-                result=self.result,
-                trace_id=self.trace_id,
-                chat_session_id=self.session_id,
+            turn_properties = {
+                "turn_kind": self.kind,
+                "outcome": self.outcome,
+                "duration_seconds": self.duration_seconds,
+                "tool_calls": self.tool_calls,
+                "tool_errors": self.tool_errors,
+                "tools_used": self.tools_used,
+                "recovered_tool_errors": self.recovered_tool_errors,
+                "paused_for_confirmation": self.paused,
+                "error_type": self.error_type,
+                "error_message": self.error_message,
+                "result": self.result,
+                "trace_id": self.trace_id,
+                "chat_session_id": self.session_id,
+                "run_id": self.run_id,
+                "request_id": self.request_id,
+                "worker_id": self.worker_id,
+                "durable_status": self.durable_status,
+                "durable_finalization": self.durable_finalization,
                 **_token_totals(self.metrics),
-            )
+            }
+            capture("chat_turn_completed", distinct_id=self.user_id, **turn_properties)
         except Exception as exc:  # pragma: no cover - observation must not break a turn
             from app.observability.diagnostics import report_local
 

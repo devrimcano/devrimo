@@ -15,24 +15,36 @@ flock -n 9 || { echo "Another Devrimo deployment is already running"; exit 1; }
 test -f "$RELEASE_ARCHIVE"
 test -f "$DEPLOY_DIR/backend/.env"
 test -f "$DEPLOY_DIR/backend/.env.migrations"
+test -f "$DEPLOY_DIR/backend/.env.backups"
 test -f "$DEPLOY_DIR/frontend/.env.local"
 
 # Release-only credentials may target the staged database before runtime cutover.
 # Translate asyncpg's TLS query option for libpq without modifying credentials.
-PG_URL="$(
+pg_environment="$(
   set -a
+  source "$DEPLOY_DIR/backend/.env.backups"
   source "$DEPLOY_DIR/backend/.env.migrations"
   set +a
   python3 - <<'PYURL'
 import os
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import shlex
+from urllib.parse import parse_qsl, unquote, urlsplit
 
-value = os.environ.get("DATABASE_MIGRATION_URL")
+value = os.environ.get("DATABASE_BACKUP_URL")
 if not value:
-    raise SystemExit("DATABASE_MIGRATION_URL is required in backend/.env.migrations")
+    raise SystemExit("DATABASE_BACKUP_URL is required in backend/.env.backups")
 url = urlsplit(value)
 if url.scheme.split("+", 1)[0] != "postgresql":
     raise SystemExit("Release backup requires PostgreSQL")
+if not all((url.hostname, url.username, url.password, url.path.lstrip("/"))):
+    raise SystemExit("Backup URL requires an explicit host, database, username, and password")
+migration = urlsplit(os.environ.get("DATABASE_MIGRATION_URL", ""))
+if (url.hostname, url.port or 5432, unquote(url.path)) != (
+    migration.hostname, migration.port or 5432, unquote(migration.path)
+):
+    raise SystemExit("Backup and migration identities must target the same database endpoint")
+if unquote(url.username) == unquote(migration.username or ""):
+    raise SystemExit("Backup and migration identities must use separate logins")
 query = dict(parse_qsl(url.query, keep_blank_values=True))
 if "ssl" in query:
     mode = query.pop("ssl")
@@ -41,9 +53,22 @@ if "ssl" in query:
     if "sslmode" in query and query["sslmode"] != mode:
         raise SystemExit("Conflicting PostgreSQL TLS modes")
     query["sslmode"] = mode
-print(urlunsplit(("postgresql", url.netloc, url.path, urlencode(query), url.fragment)))
+if query.get("sslmode") not in {"require", "verify-ca", "verify-full"}:
+    raise SystemExit("Release backup requires PostgreSQL TLS")
+values = {"PGHOST": url.hostname, "PGPORT": str(url.port or 5432), "PGDATABASE": unquote(url.path.lstrip("/")),
+          "PGUSER": unquote(url.username or ""), "PGPASSWORD": unquote(url.password or "")}
+allowed = {"sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT", "sslcert": "PGSSLCERT",
+           "sslkey": "PGSSLKEY", "connect_timeout": "PGCONNECT_TIMEOUT", "options": "PGOPTIONS"}
+for key, value in query.items():
+    if key not in allowed:
+        raise SystemExit("Unsupported release backup connection option")
+    values[allowed[key]] = value
+for key, value in values.items():
+    print("export " + key + "=" + shlex.quote(value))
 PYURL
 )"
+eval "$pg_environment"
+unset pg_environment
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP_DIR"
@@ -73,7 +98,7 @@ chmod 600 "$BACKUP_DIR/source-$stamp.tar.gz"
 # keeps serving. The custom format restores with pg_restore and compresses.
 # Ubuntu's default client can be older than Supabase. Prefer the installed
 # client matching the server without changing the host's default PostgreSQL tools.
-server_version_num="$(psql "$PG_URL" -AtXqc 'SHOW server_version_num')"
+server_version_num="$(psql -AtXqc 'SHOW server_version_num')"
 case "$server_version_num" in
   (''|*[!0-9]*)
     echo "Could not determine the PostgreSQL server version" >&2
@@ -85,8 +110,11 @@ pg_dump_bin="/usr/lib/postgresql/$server_major/bin/pg_dump"
 if [ ! -x "$pg_dump_bin" ]; then
   pg_dump_bin="$(command -v pg_dump)"
 fi
-"$pg_dump_bin" --format=custom --no-owner --file="$BACKUP_DIR/devrimo-$stamp.dump" "$PG_URL"
+"$pg_dump_bin" --format=custom --no-owner --no-acl \
+  --schema=public --schema=ai --schema=extensions --extension=vector --extension=pg_trgm \
+  --enable-row-security --file="$BACKUP_DIR/devrimo-$stamp.dump"
 chmod 600 "$BACKUP_DIR/devrimo-$stamp.dump"
+unset PGPASSWORD PGUSER PGHOST PGPORT PGDATABASE PGSSLMODE PGSSLROOTCERT PGSSLCERT PGSSLKEY PGOPTIONS PGCONNECT_TIMEOUT
 
 stage_dir="$(mktemp -d "$DEPLOY_DIR/.release.XXXXXX")"
 trap 'rm -rf "$stage_dir"' EXIT
@@ -183,7 +211,7 @@ bash -lc "
 # Keep the migration/restart window short. Alembic migrations in this project
 # may change ownership and remove retired columns; keep the recovery snapshot.
 sudo /usr/bin/systemctl stop devrimo-api.service
-if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && .venv/bin/python -m alembic upgrade head"; then
+if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export ENVIRONMENT=production && .venv/bin/python -m alembic upgrade head && .venv/bin/python -m alembic check"; then
   sudo /usr/bin/systemctl start devrimo-api.service
   exit 1
 fi

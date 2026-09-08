@@ -4,12 +4,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
-from app.db.engine import postgres_connect_args
+from app.db.engine import database_pool_options, postgres_connect_args
 from app.db.ownership import permitted_write
 
 settings = get_settings()
 engine = create_async_engine(
-    settings.database_url, pool_pre_ping=True, connect_args=postgres_connect_args(settings.database_url)
+    settings.database_url,
+    **database_pool_options(settings),
+    connect_args=postgres_connect_args(settings.database_url),
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
