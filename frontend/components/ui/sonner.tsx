@@ -10,6 +10,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={theme as ToasterProps["theme"]}
+      // Top on purpose. The default bottom placement put every message over the
+      // chat composer on a phone - the one control the student is reaching for
+      // when a toast appears.
+      position="top-center"
       className="toaster group"
       icons={{
         success: (

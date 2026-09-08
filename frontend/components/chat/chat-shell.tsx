@@ -1,16 +1,17 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore } from "react";
-import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from "react";
+import { AssistantRuntimeProvider, useAuiState } from "@assistant-ui/react";
 import { AssistantChatTransport, useChatRuntime } from "@assistant-ui/ai-sdk";
 import type { DataUIPart, UIMessage } from "ai";
 import { toast } from "sonner";
 import { Thread } from "@/components/thread.aui";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { loadSessionMessages, useChatSessions } from "@/hooks/useChat";
-import { Loader2Icon, MenuIcon, Trash2Icon } from "lucide-react";
+import { Loader2Icon, MenuIcon, OctagonAlertIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 import { activityFields } from "@/lib/agent-activity";
+import { CampusStatusNotice } from "@/components/chat/campus-status-notice";
 import { cn } from "@/lib/utils";
 import {
   AlertDialog,
@@ -151,16 +152,42 @@ class ChatTelemetry {
   }
 }
 
+/**
+ * Reports whether a run is in flight to a parent outside the runtime provider.
+ *
+ * Selecting a session while an answer was streaming used to remount the thread
+ * and drop the answer with no warning, because the only component that knew a
+ * run was open was inside the provider and the sidebar is not.
+ */
+function RunStateWatcher({ onChange }: { onChange?: (running: boolean) => void }) {
+  const running = useAuiState((s) => s.thread.isRunning);
+  useEffect(() => {
+    onChange?.(running);
+  }, [running, onChange]);
+  return null;
+}
+
+type StreamFailure = { text: string; kind: "busy" | "network" | "other" };
+
 function AssistantThread({
   threadId,
   initialMessages,
   onThreadReady,
+  onRunningChange,
+  cancelRef,
 }: {
   threadId?: string;
   initialMessages?: UIMessage[];
   onThreadReady: (id: string | undefined) => void;
+  onRunningChange?: (running: boolean) => void;
+  cancelRef?: MutableRefObject<(() => Promise<void>) | null>;
 }) {
   const [telemetry] = useState(() => new ChatTelemetry());
+  // A failed run is kept until the student does something about it. It used to
+  // be a four-second toast carrying the raw error, positioned over the composer
+  // on mobile, so the one state with the least design in the surface was also
+  // the one a campus failure lands in.
+  const [streamFailure, setStreamFailure] = useState<StreamFailure | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatConfirmation | null>(null);
   const [confirmationPending, setConfirmationPending] = useState(false);
   const { pick } = useLocale();
@@ -182,6 +209,8 @@ function AssistantThread({
     },
     onData: (part: DataUIPart<Record<string, unknown>>) => {
       if (part.type === "data-run") {
+        // A new run is the student's answer to the last failure.
+        setStreamFailure(null);
         if (telemetry.attachRun((part.data as { runId: string }).runId)) void cancelCurrentRun();
         return;
       }
@@ -230,12 +259,36 @@ function AssistantThread({
         error_code: streamError?.code ?? null,
         request_id: telemetry.currentRequestId(),
       });
-      toast.error(
-        busy
-          ? pick({ tr: "Asistan şu anda önceki yanıtını hazırlıyor. Lütfen bekle.", en: "Your assistant is still responding to the previous message. Please wait." })
-          : message,
-      );
+      setStreamFailure({
+        kind: busy ? "busy" : network ? "network" : "other",
+        // The broker's own sentence is kept whole. It is what the student can
+        // quote when they report this, and clipping it was how the half naming
+        // the campus system went missing.
+        text: message,
+      });
     },
+  });
+
+  // The exact question again, rather than asking the student to retype it.
+  // `append` and `getState` are the runtime's own API; nothing here reconstructs
+  // a message the student did not send.
+  function retryLastQuestion() {
+    const messages = runtime.thread.getState().messages;
+    const lastUser = [...messages].reverse().find((message) => message.role === "user");
+    const text = (lastUser?.content ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("\n")
+      .trim();
+    setStreamFailure(null);
+    if (text) runtime.thread.append(text);
+  }
+
+  useEffect(() => {
+    if (!cancelRef) return;
+    cancelRef.current = cancelCurrentRun;
+    return () => {
+      cancelRef.current = null;
+    };
   });
 
   const requirement = pendingConfirmation?.requirements[0];
@@ -327,7 +380,62 @@ function AssistantThread({
   return (
     <>
       <AssistantRuntimeProvider runtime={runtime}>
-        <Thread onCancelRun={() => void cancelCurrentRun()} />
+        <RunStateWatcher onChange={onRunningChange} />
+        <Thread
+          onCancelRun={() => void cancelCurrentRun()}
+          notice={
+            <>
+              <CampusStatusNotice />
+              {streamFailure ? (
+                <div
+                  role="alert"
+                  data-slot="chat-stream-failure"
+                  className="border-destructive/40 bg-destructive/10 text-destructive flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border px-3 py-2.5 text-xs leading-5"
+                >
+                  <OctagonAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium">
+                      {streamFailure.kind === "busy"
+                        ? pick({ tr: "Önceki yanıt hâlâ hazırlanıyor", en: "The previous answer is still being written" })
+                        : streamFailure.kind === "network"
+                          ? pick({ tr: "Bağlantı koptu, yanıt tamamlanamadı", en: "The connection dropped before the answer finished" })
+                          : pick({ tr: "Yanıt tamamlanamadı", en: "The answer could not be finished" })}
+                    </p>
+                    <p className="mt-0.5">
+                      {streamFailure.kind === "busy"
+                        ? pick({ tr: "Bitmesini bekle ya da yukarıdaki durdur düğmesiyle iptal et.", en: "Wait for it to finish, or stop it with the button above." })
+                        : pick({
+                            tr: "Sorunu tekrar sorabilirsin; yazdıkların kaybolmadı.",
+                            en: "You can ask again; nothing you typed was lost.",
+                          })}
+                    </p>
+                    <p className="mt-1 break-words opacity-80">{streamFailure.text}</p>
+                  </div>
+                  {streamFailure.kind === "busy" ? null : (
+                    <Button
+                      size="sm"
+                      variant="default"
+                      className="min-h-9 shrink-0 rounded-full px-3.5"
+                      onClick={retryLastQuestion}
+                    >
+                      <RotateCcwIcon className="size-3.5" />
+                      {pick({ tr: "Tekrar dene", en: "Try again" })}
+                    </Button>
+                  )}
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="text-destructive size-9 shrink-0 rounded-full"
+                    onClick={() => setStreamFailure(null)}
+                    aria-label={pick({ tr: "Uyarıyı kapat", en: "Dismiss" })}
+                  >
+                    <XIcon className="size-4" />
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          }
+        />
       </AssistantRuntimeProvider>
       <AlertDialog open={Boolean(pendingConfirmation)}>
         <AlertDialogContent>
@@ -404,6 +512,34 @@ export function ChatShell() {
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
+  const [runInFlight, setRunInFlight] = useState(false);
+  const cancelRunRef = useRef<(() => Promise<void>) | null>(null);
+  // A switch the student asked for while an answer was streaming, held until
+  // they say what should happen to that answer.
+  const [pendingSwitch, setPendingSwitch] = useState<{ run: () => void } | null>(null);
+
+  /**
+   * Run a thread switch, or ask first when it would throw away a live answer.
+   *
+   * Both switches remount the thread, and the run keeps going on the server, so
+   * doing this silently spent the student's wait and then discarded the result.
+   */
+  function guardThreadSwitch(action: () => void) {
+    if (runInFlight) {
+      setPendingSwitch({ run: action });
+      return;
+    }
+    action();
+  }
+
+  async function confirmPendingSwitch() {
+    const pending = pendingSwitch;
+    setPendingSwitch(null);
+    if (!pending) return;
+    // Cancel before switching: an abandoned run still costs campus requests.
+    await cancelRunRef.current?.();
+    pending.run();
+  }
   const pendingDeleteSession = sessions.find((session) => session.id === pendingDeleteId);
 
   async function selectSession(sessionId: string) {
@@ -464,6 +600,8 @@ export function ChatShell() {
       key={chatKey}
       threadId={threadId}
       initialMessages={seedMessages}
+      onRunningChange={setRunInFlight}
+      cancelRef={cancelRunRef}
       onThreadReady={(nextId) => {
         setThreadId(nextId);
         if (!selectedSessionId && nextId) setSelectedSessionId(nextId);
@@ -507,8 +645,8 @@ export function ChatShell() {
               error={sessionsError}
               onRetry={refetch}
               activeId={selectedSessionId}
-              onNewChat={startNewChat}
-              onSelect={selectSession}
+              onNewChat={() => guardThreadSwitch(startNewChat)}
+              onSelect={(sessionId) => guardThreadSwitch(() => void selectSession(sessionId))}
               onDelete={requestDelete}
               onDeleteAll={() => setConfirmDeleteAll(true)}
             />
@@ -550,8 +688,8 @@ export function ChatShell() {
             error={sessionsError}
             onRetry={refetch}
             activeId={selectedSessionId}
-            onNewChat={() => { startNewChat(); setMobileHistoryOpen(false); }}
-            onSelect={(sessionId) => { void selectSession(sessionId); setMobileHistoryOpen(false); }}
+            onNewChat={() => { guardThreadSwitch(startNewChat); setMobileHistoryOpen(false); }}
+            onSelect={(sessionId) => { guardThreadSwitch(() => void selectSession(sessionId)); setMobileHistoryOpen(false); }}
             onDelete={(sessionId) => {
               requestDelete(sessionId);
               setMobileHistoryOpen(false);
@@ -635,6 +773,41 @@ export function ChatShell() {
             >
               {removeAll.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
               {pick({ tr: "Hepsini sil", en: "Delete all" })}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Asked, not assumed. Tapping the sidebar while an answer streams is what
+          an impatient student does, and it used to discard that answer without a
+          word while the run kept costing campus requests on the server. */}
+      <AlertDialog
+        open={Boolean(pendingSwitch)}
+        onOpenChange={(open) => {
+          if (!open) setPendingSwitch(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-primary/10 text-primary">
+              <Loader2Icon className="animate-spin motion-reduce:animate-none" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>
+              {pick({ tr: "Yanıt hâlâ hazırlanıyor", en: "The answer is still being written" })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pick({
+                tr: "Şimdi başka bir sohbete geçersen bu yanıt yarıda kalır ve kaydedilmez.",
+                en: "Switching now leaves this answer unfinished, and it will not be saved.",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {pick({ tr: "Beklemeye devam et", en: "Keep waiting" })}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={() => void confirmPendingSwitch()}>
+              {pick({ tr: "Yanıtı bırak ve geç", en: "Leave it and switch" })}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

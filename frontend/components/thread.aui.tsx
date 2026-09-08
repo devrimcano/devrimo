@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import {
   ComposerAddAttachment,
   ComposerAttachments,
@@ -79,6 +80,13 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
   onCancelRun?: () => void;
+  /**
+   * Anything the student has to see before they type again: the campus
+   * connection's health, a run that failed. It sits directly above the composer
+   * rather than in a toast, because a four-second message over the send button
+   * is not where you put the reason an answer never arrived.
+   */
+  notice?: ReactNode;
 };
 
 const CancelRunContext = createContext<(() => void) | undefined>(undefined);
@@ -129,21 +137,23 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
   onCancelRun,
+  notice,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <CancelRunContext.Provider value={onCancelRun}>
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} notice={notice} />
     </ThreadComponentsContext.Provider>
     </CancelRunContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
+const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; notice?: ReactNode }> = ({
   isEmpty,
   autoFocus,
+  notice,
 }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
 
@@ -192,6 +202,11 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             )}
           >
             <ThreadScrollToBottom />
+            {notice ? (
+              <div data-slot="aui_thread-notice" className="flex flex-col gap-2">
+                {notice}
+              </div>
+            ) : null}
             <ThreadFollowupSuggestions />
             <Composer autoFocus={autoFocus} />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -284,7 +299,9 @@ const MessageError: FC = () => {
   return (
     <MessagePrimitive.Error>
       <ErrorPrimitive.Root className="aui-message-error-root border-destructive bg-destructive/10 text-destructive dark:bg-destructive/5 mt-2 rounded-md border p-3 text-sm dark:text-red-200">
-        <ErrorPrimitive.Message className="aui-message-error-message line-clamp-2" />
+        {/* Unclipped on purpose: the two-line clamp hid the half of a campus
+            error that named which system refused and what to do about it. */}
+        <ErrorPrimitive.Message className="aui-message-error-message break-words" />
       </ErrorPrimitive.Root>
     </MessagePrimitive.Error>
   );
