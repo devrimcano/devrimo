@@ -53,6 +53,16 @@ async def test_repeated_reads_share_one_connection(monkeypatch):
     assert opened == [1]
 
 
+async def test_parallel_session_reads_authorize_once(monkeypatch):
+    authorize = AsyncMock()
+    monkeypatch.setattr(course_info, "require_catalog_access", authorize)
+    session = CatalogSession(None, uuid.uuid4())
+
+    await asyncio.gather(*(session.authorize() for _ in range(20)))
+
+    authorize.assert_awaited_once()
+
+
 async def test_the_connection_is_closed_even_when_the_caller_raises(monkeypatch):
     opened = _count_connections(monkeypatch)
     session_seen: list[CatalogSession] = []

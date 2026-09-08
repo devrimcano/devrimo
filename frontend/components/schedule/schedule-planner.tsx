@@ -38,7 +38,7 @@ type SectionMap = Record<string, CatalogSection[]>;
 type ConstraintRow = { given_dept?: string; start_char?: string; end_char?: string; min_cgpa?: string; max_cgpa?: string; min_year?: string; max_year?: string };
 type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean; reason: string };
 type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
-type DepartmentOption = { code: string; name: string };
+type StudentDepartment = { code: string; label: string };
 type AiPlanCourse = { code?: string; display_code?: string; name?: string; credits?: number; sections?: unknown };
 type PrerequisiteRejection = {
   course_code?: string;
@@ -435,8 +435,24 @@ function fromCanonicalSections(value: Record<string, unknown[]>): SectionMap {
   return result;
 }
 
-function canonicalSectionsFromLocal(sections: SectionMap, constraints: ConstraintMap): Record<string, unknown[]> {
-  return Object.fromEntries(Object.entries(sections).map(([key, rows]) => [
+function canonicalSectionsFromLocal(
+  sections: SectionMap,
+  constraints: ConstraintMap,
+  pool: CatalogCourse[],
+): Record<string, unknown[]> {
+  // Only what the current pool can explain. A saved plan otherwise accumulated
+  // a second entry per course under its letter code — written by an older
+  // client, carrying no eligibility, and preserved by every round-trip — and
+  // the solver read both. Every section then had an unjudged twin, which is how
+  // a section flagged red in the pool still landed on the generated week.
+  const wanted = new Set<string>();
+  for (const course of pool) {
+    const raw = courseIdentity(course.rawCode);
+    wanted.add(raw);
+    // A manually added course has no separate raw code; keep its own key then.
+    if (!sections[raw]?.length) wanted.add(courseIdentity(course.code));
+  }
+  return Object.fromEntries(Object.entries(sections).filter(([key]) => wanted.has(key)).map(([key, rows]) => [
     key,
     rows.map((row) => ({
       ...row,
@@ -498,15 +514,9 @@ export function SchedulePlanner() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
-  const [department, setDepartment] = useState("");
-  const [departmentLabel, setDepartmentLabel] = useState("");
+  const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
-  const [departmentQuery, setDepartmentQuery] = useState("");
-  const [departmentOptions, setDepartmentOptions] = useState<DepartmentOption[]>([]);
-  const [departmentSearching, setDepartmentSearching] = useState(false);
-  const [departmentStatus, setDepartmentStatus] = useState<"ok" | "unknown" | "failed" | "disconnected">("ok");
-  const [departmentCodeDraft, setDepartmentCodeDraft] = useState("");
-  const departmentKnown = Boolean(department.trim());
+  const department = studentDepartment?.code ?? "";
   const [emptyDays, setEmptyDays] = useState<Day[]>([]);
   const [avoidConflicts, setAvoidConflicts] = useState(true);
   const [ignoreConstraints, setIgnoreConstraints] = useState(false);
@@ -544,6 +554,7 @@ export function SchedulePlanner() {
   const saveTracker = useRef(new PlanSaveTracker());
   const localFingerprintRef = useRef("");
   const initialConstraintsFetched = useRef(false);
+  const constraintFlights = useRef(new Map<string, Promise<void>>());
   const poolRef = useRef<CatalogCourse[]>([]);
   useEffect(() => { poolRef.current = catalogCourses; }, [catalogCourses]);
   useEffect(() => {
@@ -567,8 +578,6 @@ export function SchedulePlanner() {
     setEntries(nextEntries);
     setCatalogCourses(nextPool);
     setSectionsByCourse(nextSections);
-    setDepartment(state.department);
-    setDepartmentLabel(state.department_label);
     setEmptyDays(state.empty_days.filter((day): day is Day => DAYS.includes(day)));
     setAvoidConflicts(state.avoid_conflicts);
     setIgnoreConstraints(state.ignore_constraints);
@@ -589,13 +598,13 @@ export function SchedulePlanner() {
   const planningUpdate = planning.update;
 
   const canonicalSections = useMemo(
-    () => canonicalSectionsFromLocal(sectionsByCourse, constraints),
-    [constraints, sectionsByCourse],
+    () => canonicalSectionsFromLocal(sectionsByCourse, constraints, catalogCourses),
+    [catalogCourses, constraints, sectionsByCourse],
   );
   const localCanonicalState = useMemo(() => canonicalStateFromLocal({
     entries,
     department,
-    departmentLabel,
+    departmentLabel: studentDepartment?.label ?? department,
     emptyDays,
     avoidConflicts,
     ignoreConstraints,
@@ -612,12 +621,12 @@ export function SchedulePlanner() {
     canonicalSections,
     catalogCourses,
     department,
-    departmentLabel,
     emptyDays,
     entries,
     favoriteIndex,
     favorites,
     ignoreConstraints,
+    studentDepartment?.label,
   ]);
 
   const localFingerprint = useMemo(() => canonicalStateFingerprint(localCanonicalState), [localCanonicalState]);
@@ -684,70 +693,20 @@ export function SchedulePlanner() {
         // The AI planner accepts that verified SAIS value, so do not leave the
         // actionable state empty while displaying a valid department label.
         const resolved = context.department_code ?? context.department_query ?? "";
-        // Only overwrite a restored manual choice when SAIS actually knows: a
-        // student who picked their department by hand keeps that pick.
         if (resolved) {
-          setDepartment(resolved);
-          setDepartmentLabel(context.department_query ?? resolved);
+          setStudentDepartment({ code: resolved, label: context.department_query ?? resolved });
         } else {
-          setDepartmentStatus("unknown");
+          setStudentDepartment(null);
         }
       })
       .catch((error) => {
-        // Distinguished from "SAIS answered and had nothing": the picker is the
-        // way out of both, but a student whose campus connection has expired
-        // needs to be told that rather than left guessing why their department
-        // vanished.
-        if (!cancelled) setDepartmentStatus(error instanceof Error && /401|403|connect/i.test(error.message) ? "disconnected" : "failed");
+        captureRequestFailure(error, { operation: "schedule.student_context", kind: "query" });
+        if (!cancelled) setStudentDepartment(null);
       })
       .finally(() => { if (!cancelled) setDepartmentBusy(false); });
     // The student context is stable for the lifetime of this page.
     return () => { cancelled = true; };
   }, []);
-
-  // --- department picker --------------------------------------------------
-
-  // What the server already holds, so an unchanged value is not re-sent.
-  const searchToken = useRef(0);
-  useEffect(() => {
-    const query = departmentQuery.trim();
-    // A token rather than an abort: a slow first response must not be allowed
-    // to land after a later one and replace the list the student is reading.
-    // Every state change happens inside the debounce, so a keystroke costs no
-    // synchronous render of its own.
-    const token = ++searchToken.current;
-    const timer = window.setTimeout(() => {
-      if (departmentKnown || query.length < 2) {
-        setDepartmentOptions([]);
-        setDepartmentSearching(false);
-        return;
-      }
-      setDepartmentSearching(true);
-      void jsonFetch<{ departments?: DepartmentOption[] }>(`/api/schedule/departments/search?query=${encodeURIComponent(query)}`)
-        .then((response) => { if (token === searchToken.current) setDepartmentOptions(response.departments ?? []); })
-        .catch((error) => {
-        // The planner is driven imperatively rather than through TanStack
-        // Query, so none of its failures reached the central query reporter.
-        captureRequestFailure(error, { operation: "schedule.student_context", kind: "query" }); if (token === searchToken.current) setDepartmentOptions([]); })
-        .finally(() => { if (token === searchToken.current) setDepartmentSearching(false); });
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [departmentQuery, departmentKnown]);
-
-  function chooseDepartment(option: DepartmentOption) {
-    setDepartment(option.code);
-    setDepartmentLabel(option.name || option.code);
-    setDepartmentQuery("");
-    setDepartmentOptions([]);
-    setDepartmentCodeDraft("");
-    setDepartmentStatus("ok");
-  }
-
-  function applyDepartmentCode() {
-    const code = departmentCodeDraft.replace(/\D/g, "");
-    if (code.length !== 3) return toast.error(t("Bölüm kodu üç haneli olmalı.", "A department code is three digits."));
-    chooseDepartment({ code, name: code });
-  }
 
   // --- derived ------------------------------------------------------------
 
@@ -989,44 +948,52 @@ export function SchedulePlanner() {
    * course from here meant one request each; the broker does them together
    * over a single catalog connection instead.
    */
-  const fetchAllConstraints = useCallback(async (courses: CatalogCourse[]) => {
+  const fetchAllConstraints = useCallback((courses: CatalogCourse[]): Promise<void> => {
     const wanted = courses.map((course) => course.rawCode).filter(Boolean);
-    if (!wanted.length) return;
+    if (!wanted.length) return Promise.resolve();
+    const flightKey = `${term}:${[...new Set(wanted)].sort().join(",")}`;
+    const active = constraintFlights.current.get(flightKey);
+    if (active) return active;
     setConstraintsBusy(true);
     // In small groups rather than one request. A cold read is one SAIS page
     // per section and a course can have forty-five, so a whole curriculum in
     // one call would run for minutes and show nothing until it finished.
     // Chunked, the red flags appear as they are decided, and no single
     // request is long enough to be cut off.
-    try {
-      for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
-        const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
-        try {
-          const response = await jsonFetch<{ courses?: Record<string, { sections?: Record<string, SectionVerdict> }> }>(
-            "/api/schedule/constraints",
-            { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
-          );
-          setConstraints((current) => {
-            const updated = { ...current };
-            for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
-              const identity = courseIdentity(rawCode);
-              // Ignore if the course was removed from the pool during the request
-              if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
-              const sections = payload?.sections ?? {};
-              // Never replace verdicts we already hold with an empty answer
-              if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
-              updated[identity] = sections;
-            }
-            return updated;
-          });
-        } catch {
-          // One failed group must not cost the rest their verdicts. A course
-          // with none is treated as unrestricted, exactly as before.
+    const request = (async () => {
+      try {
+        for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
+          const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
+          try {
+            const response = await jsonFetch<{ courses?: Record<string, { sections?: Record<string, SectionVerdict> }> }>(
+              "/api/schedule/constraints",
+              { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
+            );
+            setConstraints((current) => {
+              const updated = { ...current };
+              for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
+                const identity = courseIdentity(rawCode);
+                // Ignore if the course was removed from the pool during the request
+                if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
+                const sections = payload?.sections ?? {};
+                // Never replace verdicts we already hold with an empty answer
+                if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
+                updated[identity] = sections;
+              }
+              return updated;
+            });
+          } catch {
+            // One failed group must not cost the rest their verdicts. A course
+            // with none is treated as unrestricted, exactly as before.
+          }
         }
+      } finally {
+        constraintFlights.current.delete(flightKey);
+        if (!constraintFlights.current.size) setConstraintsBusy(false);
       }
-    } finally {
-      setConstraintsBusy(false);
-    }
+    })();
+    constraintFlights.current.set(flightKey, request);
+    return request;
   }, [department, term]);
 
   /**
@@ -1090,10 +1057,7 @@ export function SchedulePlanner() {
     try {
       response = await jsonFetch<CurriculumResponse>("/api/schedule/curriculum", {
         method: "POST",
-        // Omitted rather than sent empty: the broker reads the department from
-        // the stored campus context when the client has none, so a page whose
-        // own state is empty still gets a plan instead of a validation error.
-        body: { department: department.trim() || undefined, semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
+        body: { semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
       });
     } catch (error) {
       captureProductEvent("schedule_plan_completed", {
@@ -1130,9 +1094,10 @@ export function SchedulePlanner() {
   }
 
   async function loadRequiredCourses() {
-    // No department gate any more. The broker resolves it from the stored
-    // campus context when the request omits it, and answers with a specific
-    // 422 when it genuinely has none — which is more than this check knew.
+    // No department gate here. The broker owns that value now — it reads the
+    // setup-cached StudentContext and answers with a specific 422 when there is
+    // genuinely none — and a client-side gate on a field that hydrates
+    // asynchronously refused the request in the first moments after load.
     setPlanBusy(true); setCurriculumNotice(""); setCurriculumFailed(false); setExpandedCourse(null);
     try {
       const result = await requestCurriculum([]);
@@ -1244,13 +1209,13 @@ export function SchedulePlanner() {
           credits: course.credits,
           raw_code: course.rawCode,
         })),
-        sections: canonicalSectionsFromLocal(known, constraints),
+        sections: canonicalSectionsFromLocal(known, constraints, catalogCourses),
       });
       if (!staged) return;
       const solved = await submitPlanningUpdate({ operation: "solve" });
       if (!solved) return;
       const scheduled = new Set(solved.state.entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
-      const sectionPayload = canonicalSectionsFromLocal(known, constraints);
+      const sectionPayload = canonicalSectionsFromLocal(known, constraints, catalogCourses);
       const restricted = catalogCourses
         .filter((course) => {
           const rows = sectionPayload[courseIdentity(course.rawCode)] ?? [];
@@ -1457,59 +1422,6 @@ export function SchedulePlanner() {
         <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
             <Card><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 p-4">
-              {/* The department is not a setting. It is read once from SAIS and
-                  the broker keeps it, so in the normal case there is nothing
-                  here to show or decide — this whole block appears only when
-                  the campus systems gave us nothing to go on. */}
-              {departmentBusy || departmentKnown ? null : (
-                <Field id="planner-department" label={t("Bölüm", "Department")}>
-                  <div className="space-y-2">
-                    {!departmentKnown ? (
-                      <p className="text-xs text-muted-foreground">
-                        {departmentStatus === "disconnected"
-                          ? t("ODTÜ bağlantın yenilenmeli; bölümün SAIS'ten okunamadı. Aşağıdan seçebilirsin.", "Your METU connection needs renewing, so your department could not be read from SAIS. Pick it below.")
-                          : departmentStatus === "failed"
-                            ? t("SAIS'e ulaşılamadı. Bölümünü aşağıdan seç.", "SAIS could not be reached. Pick your department below.")
-                            : t("SAIS bir bölüm bildirmedi. Aşağıdan seç.", "SAIS did not report a department. Pick one below.")}
-                      </p>
-                    ) : null}
-                    <div className="relative">
-                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input id="planner-department" value={departmentQuery} onChange={(e) => setDepartmentQuery(e.target.value)} className="pl-9" placeholder={t("Bölüm ara (ör. Bilgisayar)", "Search department (e.g. Computer)")} aria-label={t("Bölüm ara", "Search department")} />
-                    </div>
-                    {departmentSearching ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2Icon className="size-3.5 animate-spin" />{t("Aranıyor…", "Searching…")}</p> : null}
-                    {departmentOptions.length ? (
-                      <select
-                        value=""
-                        onChange={(e) => { const found = departmentOptions.find((option) => option.code === e.target.value); if (found) chooseDepartment(found); }}
-                        className="h-10 w-full rounded-md border bg-background px-2 text-sm"
-                        aria-label={t("Bölüm seç", "Select department")}
-                      >
-                        <option value="" disabled>{t(`${departmentOptions.length} bölüm bulundu — seç`, `${departmentOptions.length} departments found — select`)}</option>
-                        {departmentOptions.map((option) => <option key={option.code} value={option.code}>{option.name} ({option.code})</option>)}
-                      </select>
-                    ) : !departmentSearching && departmentQuery.trim().length >= 2 ? (
-                      <p className="text-xs text-muted-foreground">{t("Eşleşen bölüm bulunamadı.", "No matching department was found.")}</p>
-                    ) : null}
-                    {/* Last resort, and the only branch that needs no campus
-                        server at all: the catalog search goes through the
-                        student's own Course Info connection, so when that is
-                        what is broken the search cannot be the only way in. */}
-                    <div className="flex items-center gap-2">
-                      <Input
-                        value={departmentCodeDraft}
-                        onChange={(e) => setDepartmentCodeDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
-                        onKeyDown={(e) => { if (e.key === "Enter") applyDepartmentCode(); }}
-                        inputMode="numeric"
-                        className="h-9"
-                        placeholder={t("veya üç haneli kod (567)", "or three-digit code (567)")}
-                        aria-label={t("Bölüm kodunu elle gir", "Enter department code manually")}
-                      />
-                      <Button size="sm" variant="outline" className="shrink-0" onClick={applyDepartmentCode} disabled={departmentCodeDraft.length !== 3}>{t("Kullan", "Use")}</Button>
-                    </div>
-                  </div>
-                </Field>
-              )}
               <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
                 {/* Five fixed options, so toggles rather than a multi-select:
                     every choice is visible and one click wide, and a dropdown

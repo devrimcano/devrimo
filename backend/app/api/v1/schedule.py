@@ -10,6 +10,7 @@ seconds in production and made opening the planner during a chat turn fail with
 a 409. It now reads the student's own curriculum listing directly.
 """
 
+import asyncio
 import re
 import time
 from typing import Any, Literal
@@ -31,7 +32,6 @@ from app.campus.course_info import (
     catalog_session,
     department_options,
     prefetch,
-    resolve_department,
     section_numbers,
 )
 from app.campus.warmer import record_wanted_courses
@@ -41,7 +41,6 @@ from app.core.ttl_cache import TTLCache
 from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
-from app.observability.client import report_exception
 from app.planning.catalog import normalize_sections
 from app.planning.catalog_service import (
     StudentProfile,
@@ -51,7 +50,6 @@ from app.planning.catalog_service import (
     section_verdict,
 )
 from app.planning.catalog_service import expand_course_code as expand_catalog_course_code
-from app.planning.mcp_bridge import sync_student_context_from_sais
 from app.planning.models import (
     PlanChanges,
     PlanConflictError,
@@ -68,13 +66,8 @@ from app.planning.workspace import update_timetable as update_canonical_timetabl
 router = APIRouter()
 logger = get_logger(__name__)
 
-# Filling a student's context spawns their whole campus toolkit as subprocesses,
-# so the schedule page mounting must not be able to start one per render. The
-# outcome is remembered either way: a student whose SAIS reports no department
-# would otherwise pay for four subprocess launches on every page view.
-_context_syncs = TTLCache(ttl_seconds=5 * 60, max_entries=1024)
-
 _PLAN_CACHE_SECONDS = 6 * 60 * 60
+_NOT_PRELOADED = object()
 
 
 class AiScheduleCourse(BaseModel):
@@ -82,12 +75,8 @@ class AiScheduleCourse(BaseModel):
 
 
 class AiScheduleRequest(BaseModel):
-    # Optional because the broker already knows it. The department is read from
-    # ``sais_get_student_info`` during the same sync that fills the transcript
-    # snapshot, so requiring the client to send it back was asking the browser
-    # to restate a value the server had all along — and made the request fail
-    # outright whenever the page's own state happened to be empty.
-    # Official SAIS abbreviations such as EE are two characters long.
+    # Kept for compatibility with already-open browser tabs. The server ignores
+    # it and reads the setup-owned StudentContext instead.
     department: str | None = Field(default=None, max_length=20)
     semester: str = Field(min_length=4, max_length=20)
     courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
@@ -127,32 +116,19 @@ class CourseSectionsResponse(BaseModel):
     data: Any
     sections: list[PlanSection] = Field(default_factory=list)
 
-async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
-    """The department to plan against: what the client sent, else what SAIS said.
 
-    The client's value wins when present, because a student who picked their
-    department by hand in the planner is correcting exactly this. Otherwise it
-    comes from the stored campus context — and if that has never been filled,
-    one single-flighted SAIS sync fills it, the same one the schedule page's
-    own mount would have triggered.
-    """
-    supplied = (provided or "").strip()
-    if len(supplied) >= 2:
-        return supplied
+async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
+    """Read the immutable planning department from the setup cache."""
+    del provided  # Accepted only so older clients remain wire-compatible.
 
     context = await db.get(StudentContext, user_id)
-    if context is None or not (context.department or context.program_code):
-        await _context_syncs.run(str(user_id), lambda: _sync_context(user_id))
-        await db.rollback()
-        context = await db.get(StudentContext, user_id)
-
     query, code = await _student_department(db, user_id, context)
     resolved = (code or query or "").strip()
     if len(resolved) < 2:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "No department is on file for this account and SAIS did not report one. "
-            "Choose your department in the planner and try again.",
+            "No department is stored for this account. Complete METU setup or "
+            "refresh academic data in Settings, then try again.",
         )
     return resolved
 
@@ -171,8 +147,9 @@ async def _student_department(
 
     A program code that already carries the department — three digits, or the
     seven-digit form whose first three are the department — is authoritative.
-    Anything else is a name, and a name is resolved by asking the catalog
-    rather than by pattern-matching digits out of it.
+    Anything else is resolved against the bundled department directory. This
+    path deliberately performs no campus I/O: setup and explicit refresh own
+    the SAIS synchronization lifecycle.
     """
     if context is None:
         return None, None
@@ -184,10 +161,8 @@ async def _student_department(
         return query, digits[:3]
     if not query:
         return None, None
-    try:
-        return query, await resolve_department(db, user_id, query)
-    except HTTPException:
-        return query, None
+    resolved = departments.resolve(query)
+    return query, resolved.code if resolved else None
 
 
 @router.get("/student-context")
@@ -196,13 +171,6 @@ async def student_context(
     db: AsyncSession = Depends(get_db),
 ):
     context = await db.get(StudentContext, user.id)
-    if context is None or not (context.department or context.program_code):
-        # Single-flight: concurrent mounts of the schedule page wait on one
-        # sync instead of each spawning the student's campus servers.
-        await _context_syncs.run(str(user.id), lambda: _sync_context(user.id))
-        await db.rollback()
-        context = await db.get(StudentContext, user.id)
-
     query, code = await _student_department(db, user.id, context)
     return {
         "student": (
@@ -229,23 +197,6 @@ async def student_context(
         # section's surname range compares, so the rest is never stored.
         "surname_prefix": context.surname_prefix if context else None,
     }
-
-
-async def _sync_context(user_id) -> bool:
-    try:
-        return await sync_student_context_from_sais(user_id)
-    except Exception as exc:
-        logger.warning("schedule_context_sync_failed", user_id=str(user_id), error=str(exc))
-        report_exception(
-            exc,
-            distinct_id=str(user_id),
-            handler="schedule_context_sync",
-            operation="sync_student_context_from_sais",
-            dependency="sais",
-        )
-        return False
-
-
 class TimetableMeeting(BaseModel):
     day: Literal["Mon", "Tue", "Wed", "Thu", "Fri"]
     start: int = Field(ge=0, le=23)
@@ -799,14 +750,77 @@ async def bulk_constraints(
             for course, owner in expanded.values()
         )
 
-        for raw, (compact_course, lookup_department) in expanded.items():
+        async def load_course_info(raw: str, compact_course: str, lookup_department: str):
             try:
-                results[raw] = await _constraints_for(
-                    db, user, catalog, raw, compact_course, lookup_department, body.semester, profile
+                info = await call_course_info(
+                    db,
+                    user.id,
+                    "get_course_info",
+                    {
+                        "department": lookup_department,
+                        "semester": body.semester,
+                        "course": compact_course,
+                    },
+                    session=catalog,
                 )
+                return raw, info
             except HTTPException as exc:
                 logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
+                return raw, _NOT_PRELOADED
+
+        loaded = await asyncio.gather(
+            *(
+                load_course_info(raw, compact_course, lookup_department)
+                for raw, (compact_course, lookup_department) in expanded.items()
+            )
+        )
+        course_info = {raw: info for raw, info in loaded if info is not _NOT_PRELOADED}
+
+        # Once the course pages reveal the section numbers, seed every section
+        # restriction from one persistent-cache query. Warm batches then avoid
+        # one database checkout per section (150 in the measured six-course
+        # case) before any verdict can be shown.
+        await prefetch(
+            (
+                "get_section_constraints",
+                {
+                    "department": expanded[raw][1],
+                    "semester": body.semester,
+                    "course": expanded[raw][0],
+                    "section": number,
+                },
+            )
+            for raw, info in course_info.items()
+            for number in section_numbers(info)
+        )
+
+        async def check_course(raw: str, compact_course: str, lookup_department: str):
+            try:
+                answer = await _constraints_for(
+                    db,
+                    user,
+                    catalog,
+                    raw,
+                    compact_course,
+                    lookup_department,
+                    body.semester,
+                    profile,
+                    info=course_info[raw],
+                )
+                return raw, answer
+            except HTTPException as exc:
+                logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
+                return raw, {"course": raw, "error": str(exc.detail), "sections": {}}
+
+        checked = await asyncio.gather(
+            *(
+                check_course(raw, compact_course, lookup_department)
+                for raw, (compact_course, lookup_department) in expanded.items()
+                if raw in course_info
+            )
+        )
+        results.update(checked)
     return {"courses": results}
 
 
@@ -858,14 +872,17 @@ async def _constraints_for(
     lookup_department: str,
     semester: str,
     profile: StudentProfile,
+    *,
+    info: Any = _NOT_PRELOADED,
 ) -> dict:
-    info = await call_course_info(
-        db,
-        user.id,
-        "get_course_info",
-        {"department": lookup_department, "semester": semester, "course": compact_course},
-        session=catalog,
-    )
+    if info is _NOT_PRELOADED:
+        info = await call_course_info(
+            db,
+            user.id,
+            "get_course_info",
+            {"department": lookup_department, "semester": semester, "course": compact_course},
+            session=catalog,
+        )
 
     # A section reserved for students who still need the course is closed to
     # one who has already passed it, and only the transcript knows which.

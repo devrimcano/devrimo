@@ -249,7 +249,15 @@ class CatalogSession:
     connects at all, which is the common case and must stay free.
     """
 
-    __slots__ = ("_db", "_user_id", "_stack", "_toolkit", "_connect_lock")
+    __slots__ = (
+        "_db",
+        "_user_id",
+        "_stack",
+        "_toolkit",
+        "_connect_lock",
+        "_access_lock",
+        "_authorized",
+    )
 
     def __init__(self, db: AsyncSession, user_id: UUID) -> None:
         self._db = db
@@ -257,6 +265,18 @@ class CatalogSession:
         self._stack: AsyncExitStack | None = None
         self._toolkit: Any = None
         self._connect_lock = asyncio.Lock()
+        self._access_lock = asyncio.Lock()
+        self._authorized = False
+
+    async def authorize(self) -> None:
+        """Check catalog consent once for all reads in this request."""
+        if self._authorized:
+            return
+        async with self._access_lock:
+            if self._authorized:
+                return
+            await require_catalog_access(self._db, self._user_id)
+            self._authorized = True
 
     async def toolkit(self) -> Any:
         async with self._connect_lock:
@@ -318,7 +338,10 @@ async def call_course_info(
     Pass ``session`` when a request makes several of these calls, so they share
     one connection instead of spawning a campus server each.
     """
-    await require_catalog_access(db, user_id)
+    if session is None:
+        await require_catalog_access(db, user_id)
+    else:
+        await session.authorize()
     shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
     identity, key_hash = catalog_key(tool_suffix, values)
     # A shared answer must not be keyed by the student who happened to ask for
