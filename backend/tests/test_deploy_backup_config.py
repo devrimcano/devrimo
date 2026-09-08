@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/deploy-vps.sh"
+SCRIPT_TEXT = SCRIPT.read_text()
 
 
 def backup_environment(url: str):
-    code = SCRIPT.read_text().split("<<'PYURL'\n", 1)[1].split("\nPYURL", 1)[0]
+    code = SCRIPT_TEXT.split("<<'PYURL'\n", 1)[1].split("\nPYURL", 1)[0]
     return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={
         **os.environ,
         "DATABASE_BACKUP_URL": url,
@@ -43,3 +44,14 @@ def test_backup_password_is_shell_quoted_and_never_executed():
     shell = subprocess.run(["bash", "-eu", "-c", result.stdout + '\ntest "$PGPASSWORD" = "$EXPECTED"'],
                            env={**os.environ, "EXPECTED": password}, capture_output=True)
     assert shell.returncode == 0
+
+
+def test_old_deploy_artifacts_are_pruned_before_a_new_backup_is_written():
+    prune = SCRIPT_TEXT.index('prune_deploy_files "$BACKUP_DIR"')
+    source_backup = SCRIPT_TEXT.index('tar -czf "$BACKUP_DIR/source-$stamp.tar.gz"')
+    database_backup = SCRIPT_TEXT.index('"$pg_dump_bin" --format=custom')
+
+    assert prune < source_backup < database_backup
+    assert "-name 'source-*.tar.gz' 1" in SCRIPT_TEXT
+    assert "-name 'devrimo-*.dump' 1" in SCRIPT_TEXT
+    assert "-name 'devrimo-release-*.tar.gz'" in SCRIPT_TEXT
