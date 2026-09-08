@@ -71,54 +71,7 @@ chmod 600 "$BACKUP_DIR/source-$stamp.tar.gz"
 
 # pg_dump takes a transactionally consistent snapshot while the old API process
 # keeps serving. The custom format restores with pg_restore and compresses.
-#
-# A PostgreSQL client may connect to a newer server, but pg_dump refuses to
-# create a dump when its major version is older than the server's. The VPS had
-# pg_dump 16 while the production database had moved to 17, so resolve a
-# matching client before starting the release. Prefer a versioned client that
-# is already installed, then install the small client package when the host's
-# PostgreSQL apt repository provides it.
-server_version_num="$(psql "$PG_URL" -AtXqc 'SHOW server_version_num')"
-case "$server_version_num" in
-  (''|*[!0-9]*)
-    echo "Could not determine the PostgreSQL server version" >&2
-    exit 1
-    ;;
-esac
-server_major="$((10#$server_version_num / 10000))"
-
-pg_dump_bin=""
-pg_dump_major() {
-  "$1" --version | sed -nE 's/.*PostgreSQL ([0-9]+)\..*/\1/p'
-}
-
-for candidate in \
-  "$(command -v "pg_dump$server_major" 2>/dev/null || true)" \
-  "/usr/lib/postgresql/$server_major/bin/pg_dump" \
-  "/usr/local/pgsql-$server_major/bin/pg_dump"; do
-  if [ -x "$candidate" ] && [ "$(pg_dump_major "$candidate")" = "$server_major" ]; then
-    pg_dump_bin="$candidate"
-    break
-  fi
-done
-
-if [ -z "$pg_dump_bin" ] && command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-  echo "Installing PostgreSQL $server_major client for the production backup"
-  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "postgresql-client-$server_major"
-  candidate="/usr/lib/postgresql/$server_major/bin/pg_dump"
-  if [ -x "$candidate" ] && [ "$(pg_dump_major "$candidate")" = "$server_major" ]; then
-    pg_dump_bin="$candidate"
-  fi
-fi
-
-if [ -z "$pg_dump_bin" ]; then
-  echo "No PostgreSQL $server_major pg_dump client is available on the VPS" >&2
-  exit 1
-fi
-
-echo "Creating PostgreSQL $server_major backup with $pg_dump_bin"
-"$pg_dump_bin" --format=custom --no-owner --file="$BACKUP_DIR/devrimo-$stamp.dump" "$PG_URL"
+pg_dump --format=custom --no-owner --file="$BACKUP_DIR/devrimo-$stamp.dump" "$PG_URL"
 chmod 600 "$BACKUP_DIR/devrimo-$stamp.dump"
 
 stage_dir="$(mktemp -d "$DEPLOY_DIR/.release.XXXXXX")"
