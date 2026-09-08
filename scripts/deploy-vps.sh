@@ -12,17 +12,37 @@ LOCK_FILE="$DEPLOY_DIR/.deploy.lock"
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "Another Devrimo deployment is already running"; exit 1; }
 
-test -f "$RELEASE_ARCHIVE"
-test -f "$DEPLOY_DIR/backend/.env"
-test -f "$DEPLOY_DIR/backend/.env.migrations"
-test -f "$DEPLOY_DIR/backend/.env.backups"
-test -f "$DEPLOY_DIR/frontend/.env.local"
+# Named, not asserted. A bare `test -f` under `set -e` exits with no output at
+# all, which is exactly how three deploys in a row died two seconds in while
+# the workflow log showed nothing but the exit code.
+for required in \
+  "$RELEASE_ARCHIVE" \
+  "$DEPLOY_DIR/backend/.env" \
+  "$DEPLOY_DIR/backend/.env.migrations" \
+  "$DEPLOY_DIR/frontend/.env.local"
+do
+  test -f "$required" || { echo "Required file is missing: $required"; exit 1; }
+done
+
+# The scoped read-only backup identity that docs/database-ownership.md
+# provisions is preferred and is used whenever it is present. It is not a
+# precondition for deploying: a host that has not been through that
+# provisioning still has to be able to take its pre-release dump, and refusing
+# to deploy at all leaves it running older code indefinitely — which is worse
+# than a dump taken with the migration login. Announced rather than silent, so
+# "this host still owes itself a backup role" is visible in the deploy log.
+BACKUP_ENV="$DEPLOY_DIR/backend/.env.backups"
+if [ ! -f "$BACKUP_ENV" ]; then
+  echo "backend/.env.backups is absent; taking the pre-release dump with the migration identity"
+fi
 
 # Release-only credentials may target the staged database before runtime cutover.
 # Translate asyncpg's TLS query option for libpq without modifying credentials.
 pg_environment="$(
   set -a
-  source "$DEPLOY_DIR/backend/.env.backups"
+  if [ -f "$BACKUP_ENV" ]; then
+    source "$BACKUP_ENV"
+  fi
   source "$DEPLOY_DIR/backend/.env.migrations"
   set +a
   python3 - <<'PYURL'
@@ -31,6 +51,12 @@ import shlex
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 value = os.environ.get("DATABASE_BACKUP_URL")
+# Falling back to the migration login is a deliberate, announced downgrade for a
+# host without the scoped backup role. Every other check below still applies to
+# whichever identity is used; only "these must be two different logins" cannot.
+fell_back = not value
+if fell_back:
+    value = os.environ.get("DATABASE_MIGRATION_URL")
 if not value:
     raise SystemExit("DATABASE_BACKUP_URL is required in backend/.env.backups")
 url = urlsplit(value)
@@ -43,7 +69,7 @@ if (url.hostname, url.port or 5432, unquote(url.path)) != (
     migration.hostname, migration.port or 5432, unquote(migration.path)
 ):
     raise SystemExit("Backup and migration identities must target the same database endpoint")
-if unquote(url.username) == unquote(migration.username or ""):
+if not fell_back and unquote(url.username) == unquote(migration.username or ""):
     raise SystemExit("Backup and migration identities must use separate logins")
 query = dict(parse_qsl(url.query, keep_blank_values=True))
 if "ssl" in query:
