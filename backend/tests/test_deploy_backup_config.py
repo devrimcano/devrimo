@@ -52,6 +52,6 @@ def test_old_deploy_artifacts_are_pruned_before_a_new_backup_is_written():
     database_backup = SCRIPT_TEXT.index('"$pg_dump_bin" --format=custom')
 
     assert prune < source_backup < database_backup
-    assert "-name 'source-*.tar.gz' 1" in SCRIPT_TEXT
-    assert "-name 'devrimo-*.dump' 1" in SCRIPT_TEXT
+    assert "prune_deploy_files \"$BACKUP_DIR\" 'source-*.tar.gz' 1" in SCRIPT_TEXT
+    assert "prune_deploy_files \"$BACKUP_DIR\" 'devrimo-*.dump' 1" in SCRIPT_TEXT
     assert "-name 'devrimo-release-*.tar.gz'" in SCRIPT_TEXT
