@@ -409,7 +409,7 @@ function AssistantThread({
                             en: "You can ask again; nothing you typed was lost.",
                           })}
                     </p>
-                    <p className="mt-1 break-words opacity-80">{streamFailure.text}</p>
+                    <p className="mt-1 break-words">{streamFailure.text}</p>
                   </div>
                   {streamFailure.kind === "busy" ? null : (
                     <Button

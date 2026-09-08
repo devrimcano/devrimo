@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { useLocale } from "@/components/locale-provider";
 import { Loader2Icon } from "lucide-react";
 import { useProfile } from "@/hooks/useProfile";
 import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
@@ -13,13 +14,15 @@ import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
  * Settings.
  */
 export function OnboardingGate({ children }: { children: ReactNode }) {
+  const { pick } = useLocale();
   const { profile, isLoading, error, refetch } = useProfile();
   const [dismissed, setDismissed] = useState(false);
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
+      <div className="flex h-full items-center justify-center" role="status">
+        <Loader2Icon className="size-6 animate-spin text-muted-foreground motion-reduce:animate-none" />
+        <span className="sr-only">{pick({ tr: "Yükleniyor", en: "Loading" })}</span>
       </div>
     );
   }

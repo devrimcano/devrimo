@@ -179,7 +179,7 @@ function ToolFallbackTrigger({
         <span
           data-slot="tool-fallback-trigger-source"
           className={cn(
-            "aui-tool-fallback-trigger-source border-primary/25 bg-primary/10 text-primary shrink-0 rounded-full border px-1.5 py-0.5 text-[11px] leading-4 font-medium",
+            "aui-tool-fallback-trigger-source border-primary/25 bg-primary/10 text-on-primary-tint shrink-0 rounded-full border px-1.5 py-0.5 text-[11px] leading-4 font-medium",
             isCancelled && "border-border bg-muted text-muted-foreground",
             // While the read is open the stamp breathes rather than the sentence
             // flashing: the student is being told which system is being waited

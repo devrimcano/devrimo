@@ -81,7 +81,7 @@ function CampusReadyLine() {
 
   return (
     <p className="motion-enter mt-2 flex items-center justify-center gap-1.5 text-xs leading-5 [animation-delay:120ms]">
-      <span className="border-primary/25 bg-primary/10 text-primary inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium">
+      <span className="border-primary/25 bg-primary/10 text-on-primary-tint inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium">
         <PlugIcon className="size-3 shrink-0" aria-hidden />
         {pick({ tr: "ODTÜ bağlantın çalışıyor", en: "Your METU connection works" })}
       </span>

@@ -36,6 +36,7 @@
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
+  --color-on-primary-tint: var(--on-primary-tint);
   --color-popover-foreground: var(--popover-foreground);
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
@@ -75,6 +76,8 @@
   --popover: #fffefa;
   --popover-foreground: #1e1a18;
   --primary: #d7193f;
+  /* Text on a primary/10 tint. 5.14:1, still oxblood. */
+  --on-primary-tint: #c2152f;
   --primary-foreground: #ffffff;
   --secondary: #ece7de;
   --secondary-foreground: #26211f;
@@ -111,6 +114,8 @@
   --popover: #211e1c;
   --popover-foreground: #faf6f1;
   --primary: #ee3154;
+  /* Text on a primary/10 tint in dark. 7.46:1. */
+  --on-primary-tint: #ff8fa3;
   --primary-foreground: #ffffff;
   --secondary: #292522;
   --secondary-foreground: #faf6f1;
@@ -317,6 +322,47 @@
  *
  * `min-height`/`min-width` beat the utilities' fixed `size-*`, so the controls
  * grow without touching a dozen call sites. */
+/* The surfaces no component owns.
+ *
+ * Selection, the caret, and the scrollbars ship with browser defaults that
+ * belong to no design system - a blue highlight in an oxblood-and-paper product
+ * is the cheapest tell that a page was assembled rather than built. */
+::selection {
+  background-color: color-mix(in oklab, var(--primary) 22%, transparent);
+  color: var(--foreground);
+}
+
+:root {
+  scrollbar-color: color-mix(in oklab, var(--foreground) 24%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+textarea,
+input,
+[contenteditable="true"] {
+  caret-color: var(--primary);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--foreground) 22%, transparent);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--foreground) 34%, transparent);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 @media (pointer: coarse) {
   .aui-composer-send,
   .aui-composer-cancel,

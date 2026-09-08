@@ -325,8 +325,15 @@ const AssistantMessage: FC = () => {
       data-role="assistant"
       className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
     >
+      {/* The answer streams in here, and neither this kit nor
+          @assistant-ui/react declares a live region anywhere - so a screen
+          reader heard the "assistant is working" label and then silence. Polite
+          and additions-only: the reader follows the answer as it arrives instead
+          of re-reading it from the top on every token. */}
       <div
         data-slot="aui_assistant-message-content"
+        aria-live="polite"
+        aria-relevant="additions text"
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
@@ -392,7 +399,11 @@ const AssistantMessage: FC = () => {
               case "indicator":
                 return (
                   <span data-slot="aui_assistant-message-indicator" className="inline-flex gap-1 py-2" role="status" aria-label={pick({ tr: "Asistan yanıtı hazırlıyor", en: "Assistant is working" })}>
-                    {[0, 1, 2].map((index) => <span key={index} className="size-1.5 animate-bounce rounded-full bg-muted-foreground motion-reduce:animate-none" style={{ animationDelay: `${index * 120}ms` }} />)}
+                    {/* Fading rather than bouncing. The source stamp on a tool row
+                        already breathes while a campus read is open, and two
+                        different loaders on one answer is scattered motion, not a
+                        moment - besides which a bounce reads as a toy. */}
+                    {[0, 1, 2].map((index) => <span key={index} className="size-1.5 animate-pulse rounded-full bg-muted-foreground motion-reduce:animate-none" style={{ animationDelay: `${index * 160}ms`, animationDuration: "1.1s" }} />)}
                   </span>
                 );
               default:

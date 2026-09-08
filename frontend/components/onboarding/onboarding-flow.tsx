@@ -327,6 +327,11 @@ export function OnboardingFlow({ onDone }: { onDone?: () => void }) {
                 autoComplete="username"
                 spellCheck={false}
                 placeholder="e123456"
+                // The failure belongs to these two fields, so it is announced
+                // from them: a paragraph further down the form was invisible to
+                // a screen reader and unreachable from the input.
+                aria-invalid={formError ? true : undefined}
+                aria-describedby={formError ? "metu-credentials-error" : undefined}
                 onChange={(event) => setUsernameDraft(event.target.value)}
               />
             </div>
@@ -342,12 +347,18 @@ export function OnboardingFlow({ onDone }: { onDone?: () => void }) {
                     ? pick({ tr: "Kayıtlı — değiştirmek için yaz", en: "Stored — type to replace" })
                     : "••••••••"
                 }
+                aria-invalid={formError ? true : undefined}
+                aria-describedby={formError ? "metu-credentials-error" : undefined}
                 onChange={(event) => setPassword(event.target.value)}
               />
             </div>
 
             {formError ? (
-              <p className="flex items-start gap-2 text-sm text-destructive">
+              <p
+                id="metu-credentials-error"
+                role="alert"
+                className="flex items-start gap-2 text-sm text-destructive"
+              >
                 <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
                 <span className="min-w-0 break-words">{formError}</span>
               </p>

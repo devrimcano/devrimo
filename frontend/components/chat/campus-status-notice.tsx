@@ -95,7 +95,7 @@ export function CampusStatusNotice() {
             quote when they report this, and the only part that says which system
             refused. Never the primary message, never hidden either. */}
         {state === "unverified" && connection.verification_error ? (
-          <p className="mt-1 break-words opacity-80">
+          <p className="mt-1 break-words">
             {pick({ tr: "ODTÜ yanıtı: ", en: "METU said: " })}
             {connection.verification_error}
           </p>
