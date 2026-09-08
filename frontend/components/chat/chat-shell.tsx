@@ -65,6 +65,9 @@ function toUiMessages(sessionId: string, messages: { role: string; content: stri
 }
 
 class ChatTelemetry {
+  private activeRun: string | null = null;
+  private pendingStop = false;
+  private cancellingRun: string | null = null;
   private requestStartedAt: number | null = null;
   private streamError: ChatStreamError | null = null;
   private requestId: string | null = null;
@@ -75,6 +78,9 @@ class ChatTelemetry {
     this.transport = new AssistantChatTransport({
       api: "/api/chat",
       prepareSendMessagesRequest: ({ id, messages }) => {
+        this.activeRun = null;
+        this.pendingStop = false;
+        this.cancellingRun = null;
         const latestMessage = messages.at(-1);
         const textLength = latestMessage?.parts.reduce(
           (total, part) => total + (part.type === "text" ? part.text.length : 0),
@@ -97,6 +103,26 @@ class ChatTelemetry {
         return { body: { id, messages }, headers: { [REQUEST_ID_HEADER]: this.requestId } };
       },
     });
+  }
+
+  attachRun(runId: string) {
+    this.activeRun = runId;
+    return this.pendingStop;
+  }
+
+  requestStop() {
+    this.pendingStop = true;
+    if (!this.activeRun || this.cancellingRun === this.activeRun) return null;
+    this.cancellingRun = this.activeRun;
+    return this.activeRun;
+  }
+
+  isCurrentRun(runId: string) {
+    return this.activeRun === runId;
+  }
+
+  finishStop(runId: string) {
+    if (this.cancellingRun === runId) this.cancellingRun = null;
   }
 
   /** The correlation id of the turn in flight, for the events that report it. */
@@ -141,17 +167,21 @@ function AssistantThread({
     messages: initialMessages,
     transport: telemetry.transport,
     onThreadIdChange: onThreadReady,
-    onFinish: ({ isError }) => {
+    onFinish: ({ isError, isAbort }) => {
       // AI SDK invokes onFinish for both success and failure. Error analytics
       // are emitted by onError, so counting this as completed would corrupt
       // the completion-rate denominator.
-      if (isError) return;
+      if (isError || isAbort) return;
       captureProductEvent("chat_response_completed", {
         duration_seconds: telemetry.finishDuration() ?? 0,
         request_id: telemetry.currentRequestId(),
       });
     },
     onData: (part: DataUIPart<Record<string, unknown>>) => {
+      if (part.type === "data-run") {
+        if (telemetry.attachRun((part.data as { runId: string }).runId)) void cancelCurrentRun();
+        return;
+      }
       if (part.type === "data-tool") {
         // Tool activity the broker streams. The server records the
         // authoritative $ai_span; this is the student-visible half — what the
@@ -257,14 +287,29 @@ function AssistantThread({
     }
   }
 
-  const actionTitle = requirement?.tool?.includes("send_mail")
+  async function cancelCurrentRun() {
+    const runId = telemetry.requestStop();
+    // Keep the UI connection until the queue handshake arrives. Aborting it
+    // earlier would lose the identifier needed to cancel the accepted run.
+    if (!runId) return;
+    try {
+      await jsonFetch(`/api/chat/runs/${runId}/cancel`, { method: "POST" });
+      if (telemetry.isCurrentRun(runId)) runtime.thread.cancelRun();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to stop the run");
+    } finally {
+      telemetry.finishStop(runId);
+    }
+  }
+
+  const actionTitle = requirement?.tool === "send_email"
     ? pick({ tr: "E-posta Gönderme Onayı", en: "Send Email Confirmation" })
     : pick({ tr: "İşlem Onayı", en: "Action Confirmation" });
 
   return (
     <>
       <AssistantRuntimeProvider runtime={runtime}>
-        <Thread />
+        <Thread onCancelRun={() => void cancelCurrentRun()} />
       </AssistantRuntimeProvider>
       <AlertDialog open={Boolean(pendingConfirmation)}>
         <AlertDialogContent>
@@ -307,7 +352,7 @@ function AssistantThread({
 export function ChatShell() {
   const { pick } = useLocale();
   const desktop = useDesktopLayout();
-  const { sessions, remove, removeAll, refetch } = useChatSessions();
+  const { sessions, isLoading: sessionsLoading, isFetching: sessionsFetching, error: sessionsError, remove, removeAll, refetch } = useChatSessions();
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
   const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
   const [seedMessages, setSeedMessages] = useState<UIMessage[] | undefined>(undefined);
@@ -415,6 +460,10 @@ export function ChatShell() {
                 else sidebarPanelRef.current?.collapse();
               }}
               sessions={sessions}
+              isLoading={sessionsLoading}
+              retrying={sessionsFetching}
+              error={sessionsError}
+              onRetry={refetch}
               activeId={selectedSessionId}
               onNewChat={startNewChat}
               onSelect={selectSession}
@@ -454,6 +503,10 @@ export function ChatShell() {
           <SessionSidebar
             className="min-h-0 w-full flex-1 border-r-0"
             sessions={sessions}
+            isLoading={sessionsLoading}
+            retrying={sessionsFetching}
+            error={sessionsError}
+            onRetry={refetch}
             activeId={selectedSessionId}
             onNewChat={() => { startNewChat(); setMobileHistoryOpen(false); }}
             onSelect={(sessionId) => { void selectSession(sessionId); setMobileHistoryOpen(false); }}

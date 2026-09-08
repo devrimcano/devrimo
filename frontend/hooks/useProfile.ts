@@ -22,6 +22,8 @@ export function useProfile() {
   return {
     profile: query.data ?? null,
     isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    queryError: query.error,
     error: query.error ?? update.error,
     refetch: query.refetch,
     update,

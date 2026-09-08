@@ -12,3 +12,4 @@ export const GET = proxy;
 export const POST = proxy;
 // The planner saves its timetable here so chat can talk about it.
 export const PUT = proxy;
+export const PATCH = proxy;

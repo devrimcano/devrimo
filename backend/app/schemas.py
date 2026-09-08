@@ -3,11 +3,12 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.campus.catalog import CAMPUS_TOOLS, CampusTool
 from app.campus.credentials import CampusSecrets
 from app.campus.mcp_config import enabled_tools as resolve_enabled_tools
+from app.campus.validation import validate_odtuclass_base_url
 from app.db.models import Agent, AgentStatus, CampusCredential, ChatSession, UserProfile
 
 ChatRole = Literal["system", "user", "assistant"]
@@ -39,8 +40,9 @@ class ChatMessageIn(BaseModel):
 
 
 class ChatCompletionsRequestIn(BaseModel):
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
     messages: list[ChatMessageIn]
-    session_id: str | None = None
+    session_id: str | None = Field(default=None, min_length=1, max_length=64)
     stream: bool | None = None
     model: str | None = None
 
@@ -190,6 +192,12 @@ class CampusConnectionIn(BaseModel):
     # Skip the live SSO check — useful when METU is down and the student would
     # rather save now and find out later.
     skip_verification: bool = False
+
+    @field_validator("odtuclass_base_url")
+    @classmethod
+    def approved_odtuclass_base_url(cls, value: str | None) -> str | None:
+        return validate_odtuclass_base_url(value)
+
 
 class CampusVerifyIn(BaseModel):
     metu_username: str = Field(min_length=1, max_length=255)

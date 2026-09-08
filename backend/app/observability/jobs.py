@@ -30,6 +30,7 @@ from typing import Any
 from app.logging import get_logger
 from app.observability.context import (
     EVENT_JOB_COMPLETED,
+    EVENT_WORKER_LIFECYCLE,
     OUTCOME_CANCELLED,
     OUTCOME_EXPECTED_FAILURE,
     OUTCOME_SUCCESS,
@@ -48,6 +49,11 @@ class JobObservation:
     job_id: str | None = None
     source_id: str | None = None
     distinct_id: str | None = None
+    # Worker loops often handle provider/parser failures and continue. Their
+    # terminal event should retain the exception class for grouping without
+    # copying an upstream response, URL, or scraped text into telemetry.
+    report_exceptions: bool = True
+    include_failure_reason: bool = True
     started: float = field(default_factory=time.monotonic)
     outcome: str = OUTCOME_SUCCESS
     reason: str | None = None
@@ -83,7 +89,7 @@ class JobObservation:
         """A failure nothing anticipated. Becomes an issue, with job context."""
         self.outcome = OUTCOME_UNEXPECTED_FAILURE
         self.error_type = exc.__class__.__name__
-        self.reason = str(exc) or None
+        self.reason = (str(exc) or None) if self.include_failure_reason else None
         self._exception = exc
         self.detail(**properties)
 
@@ -95,7 +101,7 @@ class JobObservation:
         try:
             from app.observability.client import capture, report_exception
 
-            if self._exception is not None:
+            if self._exception is not None and self.report_exceptions:
                 report_exception(
                     self._exception,
                     distinct_id=self.distinct_id,
@@ -131,6 +137,8 @@ def observed_job(
     source_id: str | None = None,
     distinct_id: str | None = None,
     request_id: str | None = None,
+    report_exceptions: bool = True,
+    include_failure_reason: bool = True,
     **tags: Any,
 ) -> Iterator[JobObservation]:
     """Run a unit of background work inside its own correlation context.
@@ -139,7 +147,14 @@ def observed_job(
     re-raised, so a caller that wants to keep its own retry or logging behaviour
     does not have to choose between that and being observed.
     """
-    observation = JobObservation(kind=kind, job_id=job_id, source_id=source_id, distinct_id=distinct_id)
+    observation = JobObservation(
+        kind=kind,
+        job_id=job_id,
+        source_id=source_id,
+        distinct_id=distinct_id,
+        report_exceptions=report_exceptions,
+        include_failure_reason=include_failure_reason,
+    )
     # Extra tags describe the job, so they belong on the terminal event as well
     # as on everything logged inside it — not only as context the SDK happens
     # to merge in.
@@ -170,3 +185,25 @@ def observed_job(
             raise
         finally:
             observation.finish()
+
+
+def capture_worker_lifecycle(
+    worker: str,
+    state: str,
+    *,
+    worker_id: str | None = None,
+    **properties: Any,
+) -> None:
+    """Record bounded start/stop facts for a standalone worker process.
+
+    Lifecycle events are intentionally separate from pass/job outcomes: a
+    worker can be alive while a pass is failing, and a clean stop should not be
+    mistaken for a failed job. Callers supply only identifiers, states and
+    aggregate counts; this helper never accepts or derives payload content.
+    """
+    from app.observability.client import capture
+
+    payload: dict[str, Any] = {"worker": worker, "state": state, **properties}
+    if worker_id:
+        payload["worker_id"] = worker_id
+    capture(EVENT_WORKER_LIFECYCLE, **payload)

@@ -1,5 +1,7 @@
 "use client";
 
+import { PlanSaveTracker } from "@/lib/planning-sync";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClipboardIcon, DownloadIcon, HeartIcon,
@@ -19,6 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import { jsonFetch } from "@/lib/api/fetcher";
+import { usePlanning, type PlanEntry, type PlanEnvelope, type PlanState } from "@/hooks/use-planning";
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
 import { formatMetuCourseCode } from "@/lib/metu-course-code";
@@ -26,17 +29,16 @@ import { formatMetuCourseCode } from "@/lib/metu-course-code";
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
 // students' browsers and must keep loading.
-type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string };
+type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string };
 type CatalogCourse = { code: string; name: string; credits: number; rawCode: string };
-type SurnameRange = { from: string; to: string };
-type CatalogSection = { section: string; instructor: string; meetings: { day: Day; start: number; duration: number; room: string }[]; constraint: string };
+type CatalogSection = { section: string; instructor: string; meetings: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string }[]; constraint: string; eligible?: boolean; reason?: string };
+type ApiCatalogSection = { section?: unknown; instructor?: unknown; meetings?: unknown; constraint?: unknown; eligible?: unknown; reason?: unknown };
 type SectionMap = Record<string, CatalogSection[]>;
 // Keyed by course identity, then by section number.
 type ConstraintRow = { given_dept?: string; start_char?: string; end_char?: string; min_cgpa?: string; max_cgpa?: string; min_year?: string; max_year?: string };
 type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean; reason: string };
 type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
 type DepartmentOption = { code: string; name: string };
-type SavedPlan = { entries: Entry[]; department: string; departmentLabel: string; emptyDays: Day[]; avoidConflicts: boolean; ignoreConstraints: boolean; pool: CatalogCourse[]; sections: SectionMap; alternatives: Entry[][]; alternativeIndex: number };
 type AiPlanCourse = { code?: string; display_code?: string; name?: string; credits?: number; sections?: unknown };
 type PrerequisiteRejection = {
   course_code?: string;
@@ -44,6 +46,7 @@ type PrerequisiteRejection = {
   prerequisite_course_codes?: string[];
   prerequisite_course_labels?: string[];
 };
+type SubmittedMutation = { term: string; fingerprint: string; idempotencyKey: string };
 
 const DAYS: Day[] = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 const DEFAULT_HOURS = Array.from({ length: 10 }, (_, index) => index + 8);
@@ -81,9 +84,6 @@ const COLORS = [
   "bg-teal-500/20 border-teal-500/45 border-l-teal-500 text-teal-950 dark:bg-teal-500/25 dark:text-teal-50",
   "bg-fuchsia-500/20 border-fuchsia-500/45 border-l-fuchsia-500 text-fuchsia-950 dark:bg-fuchsia-500/25 dark:text-fuchsia-50",
 ];
-const STORAGE_KEY = "devrimo:schedule:v1";
-const PLAN_KEY = `${STORAGE_KEY}:plan`;
-
 // METU term codes are a four-digit year plus a part number, where the year is
 // the one the academic year starts in: 20261 is 2026-2027 Fall, and 20253 is
 // the summer school that runs during calendar 2026. There is exactly one term
@@ -103,22 +103,6 @@ function termLabel(code: string, t: (tr: string, en: string) => string) {
   if (code.endsWith("2")) return `${year}-${year + 1} ${t("Bahar", "Spring")}`;
   if (code.endsWith("3")) return `${year + 1} ${t("Yaz Okulu", "Summer")}`;
   return `${year}-${year + 1} ${t("Güz", "Fall")}`;
-}
-
-const keyValue = (record: Record<string, unknown>, candidates: string[]) => {
-  const key = Object.keys(record).find((item) => candidates.some((candidate) => item.toLowerCase().replace(/[^a-z0-9]/g, "").includes(candidate)));
-  return key ? record[key] : undefined;
-};
-
-function sectionRecords(value: unknown): Record<string, unknown>[] {
-  if (Array.isArray(value)) return value.flatMap(sectionRecords);
-  if (!value || typeof value !== "object") return [];
-  const record = value as Record<string, unknown>;
-  const normalizedKeys = Object.keys(record).map((key) => key.toLowerCase().replace(/[^a-z0-9]/g, ""));
-  const isSectionRow = normalizedKeys.some((key) => ["sectionnumber", "section", "sectionno", "sec"].includes(key));
-  const hasMeetingData = normalizedKeys.some((key) => ["schedule", "meetings", "meeting", "lecturehours", "hours", "time"].includes(key));
-  if (isSectionRow || hasMeetingData) return [record];
-  return Object.values(record).flatMap(sectionRecords);
 }
 
 // Full METU codes are globally unique, so a course's identity is its whole
@@ -231,200 +215,235 @@ function owningDepartment(courseCode: string, fallback: string) {
   return digits.length === 7 ? digits.slice(0, 3) : fallback;
 }
 
-// METU letters, in the order Turkish collation puts them. Ranges in a section
-// note are written against this alphabet, so "Ç" falls inside A-D and "I"
-// inside H-J — which `localeCompare(…, "tr")` gets right and a byte or an
-// English-locale comparison does not.
-const TR_LETTER = "A-Za-zÇĞİıÖŞÜçğöşü";
-
-/**
- * The surname range a section is restricted to, when it states one.
- *
- * `critical_info` is a free-text box a department types into, so this only
- * claims a range it is confident about: either the note says surname, or the
- * whole note *is* a range. A bare "A-K" buried in a longer sentence is left
- * alone — guessing wrong here silently hides sections a student can take.
- */
-function parseSurnameRange(text: string): SurnameRange | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const named = /soyad|soyisim|surname|last\s*name/i.test(trimmed);
-  const bare = new RegExp(`^[\\s(\\[]*[${TR_LETTER}]\\s*[-–—]\\s*[${TR_LETTER}][\\s)\\].]*$`).test(trimmed);
-  if (!named && !bare) return null;
-  const match = trimmed.match(new RegExp(`([${TR_LETTER}])\\s*(?:[-–—]|\\.\\.|to|ile)\\s*([${TR_LETTER}])`));
-  if (!match) return null;
-  return { from: match[1].toLocaleUpperCase("tr"), to: match[2].toLocaleUpperCase("tr") };
+function itemStartMinute(item: { start: number; startMinute?: number }) {
+  return item.startMinute ?? item.start * 60 + 40;
 }
 
-/** Whether this section's stated surname range admits this student. */
-function surnameEligible(section: CatalogSection, surname: string) {
-  const range = parseSurnameRange(section.constraint ?? "");
-  if (!range) return true;
-  const initial = surname.trim().charAt(0).toLocaleUpperCase("tr");
-  // An unknown surname excludes nobody: the student simply has not told us.
-  if (!initial) return true;
-  return initial.localeCompare(range.from, "tr") >= 0 && initial.localeCompare(range.to, "tr") <= 0;
+function itemDurationMinutes(item: { duration: number; durationMinutes?: number }) {
+  return item.durationMinutes ?? Math.max(1, item.duration * 60 - 10);
 }
 
-function parseDay(value: string): Day | null {
-  const text = value.toLowerCase();
-  if (/monday|pazartesi|\bmon\b/.test(text)) return "Mon";
-  if (/tuesday|salı|sali|\btue\b/.test(text)) return "Tue";
-  if (/wednesday|çarşamba|carsamba|\bwed\b/.test(text)) return "Wed";
-  if (/thursday|perşembe|persembe|\bthu\b/.test(text)) return "Thu";
-  if (/friday|cuma|\bfri\b/.test(text)) return "Fri";
-  return null;
+function formatClock(totalMinutes: number) {
+  const minutes = Number.isFinite(totalMinutes) ? Math.max(0, Math.trunc(totalMinutes)) : 0;
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-function parseSections(value: unknown): CatalogSection[] {
-  if (typeof value === "string") {
-    try { return parseSections(JSON.parse(value)); } catch {
-      const chunks = value.split(/(?=^\s*(?:section|şube|sube)\s*(?:no\.?\s*)?[:#-]?\s*\d+)/gim);
-      return chunks.flatMap((chunk, index) => {
-        const section = chunk.match(/(?:section|şube|sube)\s*(?:no\.?\s*)?[:#-]?\s*(\d+)/i)?.[1] ?? String(index + 1);
-        const instructor = chunk.match(/(?:instructor|lecturer|öğretim elemanı|ogretim elemani)\s*[:|-]\s*([^\n|]+)/i)?.[1]?.trim() ?? "";
-        const room = chunk.match(/(?:room|classroom|derslik)\s*[:|-]\s*([^\n|]+)/i)?.[1]?.trim() ?? "";
-        const meetings = [...chunk.matchAll(/(monday|tuesday|wednesday|thursday|friday|pazartesi|salı|sali|çarşamba|carsamba|perşembe|persembe|cuma|mon|tue|wed|thu|fri)[^\n\d]*(\d{1,2})[:.]?(\d{2})\s*[-–]\s*(\d{1,2})[:.]?(\d{2})/gi)].flatMap((match) => {
-          const day = parseDay(match[1]);
-          if (!day) return [];
-          const startMinutes = Number(match[2]) * 60 + Number(match[3]);
-          const endMinutes = Number(match[4]) * 60 + Number(match[5]);
-          return [{ day, start: Math.floor(startMinutes / 60), duration: Math.max(1, Math.ceil((endMinutes - startMinutes) / 60)), room }];
-        });
-        const constraint = chunk.match(/(?:critical|kısıt|kisit|ek bilgi|not)\s*[:|-]\s*([^\n|]+)/i)?.[1]?.trim() ?? "";
-        return [{ section, instructor, meetings, constraint }];
-      });
-    }
-  }
-  return sectionRecords(value).flatMap((record, index) => {
-    const section = String(keyValue(record, ["sectionnumber", "section", "sec"]) ?? index + 1);
-    const instructorValue = keyValue(record, ["instructors", "instructor", "lecturer", "teacher"]);
-    const instructor = Array.isArray(instructorValue) ? instructorValue.filter(Boolean).join(", ") : String(instructorValue ?? "");
-    const scheduleValue = keyValue(record, ["schedule", "meeting", "hours", "time"]);
-    const room = String(keyValue(record, ["room", "classroom", "location"]) ?? "");
-    const scheduleTexts = Array.isArray(scheduleValue) ? scheduleValue.map((item) => typeof item === "string" ? item : JSON.stringify(item)) : [typeof scheduleValue === "string" ? scheduleValue : JSON.stringify(scheduleValue ?? record)];
-    const meetingRecords: Record<string, unknown>[] = [];
-    const visitMeetings = (item: unknown) => {
-      if (Array.isArray(item)) return item.forEach(visitMeetings);
-      if (!item || typeof item !== "object") return;
-      const candidate = item as Record<string, unknown>;
-      // "time" is the shape the catalog actually answers with — {day, time:
-      // "08:40-10:30", room} — and requiring a separate start key rejected all
-      // of them. Every meeting then fell through to a regex over the stringified
-      // record, which found the day and the hours but took the room from the
-      // section instead of the meeting, where it does not exist. That is why
-      // every block read TBA while the catalog was returning "B07".
-      const hasDay = keyValue(candidate, ["day", "weekday", "gun"]);
-      const hasWhen = keyValue(candidate, ["starttime", "start", "begin", "baslangic"])
-        ?? keyValue(candidate, ["time", "hours", "saat"]);
-      if (hasDay && hasWhen) meetingRecords.push(candidate);
-      else Object.values(candidate).forEach(visitMeetings);
-    };
-    visitMeetings(scheduleValue);
-    const structuredMeetings = meetingRecords.flatMap((meeting) => {
-      const day = parseDay(String(keyValue(meeting, ["day", "weekday", "gun"]) ?? ""));
-      const timeText = String(keyValue(meeting, ["time", "hours", "saat"]) ?? "");
-      const range = timeText.match(/(\d{1,2}:\d{2})\s*(?:[-–]|to)\s*(\d{1,2}:\d{2})/i);
-      const startText = String(keyValue(meeting, ["starttime", "start", "begin", "baslangic"]) ?? range?.[1] ?? "");
-      const endText = String(keyValue(meeting, ["endtime", "end", "finish", "bitis"]) ?? range?.[2] ?? "");
-      const startMatch = startText.match(/(\d{1,2})(?::(\d{2}))?/);
-      const endMatch = endText.match(/(\d{1,2})(?::(\d{2}))?/);
-      if (!day || !startMatch || !endMatch) return [];
-      const startMinutes = Number(startMatch[1]) * 60 + Number(startMatch[2] ?? 0);
-      const endMinutes = Number(endMatch[1]) * 60 + Number(endMatch[2] ?? 0);
-      return [{ day, start: Math.floor(startMinutes / 60), duration: Math.max(1, Math.ceil((endMinutes - startMinutes) / 60)), room: String(keyValue(meeting, ["room", "classroom", "location"]) ?? room) }];
-    });
-    const textMeetings = scheduleTexts.flatMap((text) => {
-      const day = parseDay(text);
-      const times = text.match(/(\d{1,2}):\d{2}\s*(?:[-–]|to)\s*(\d{1,2}):\d{2}/i);
-      if (!day || !times) return [];
-      const start = Number(times[1]);
-      return [{ day, start, duration: Math.max(1, Number(times[2]) - start), room }];
-    });
-    const meetings = structuredMeetings.length ? structuredMeetings : textMeetings;
-    // METU calls this "critical info": a free-text box per section, which is
-    // where departments write who the section is actually open to.
-    const constraint = String(keyValue(record, ["criticalinfo", "critical", "constraint", "kisit", "eklenti"]) ?? "").trim();
-    return [{ section, instructor, meetings, constraint }];
+function formatItemTime(item: { start: number; startMinute?: number }) {
+  return formatClock(itemStartMinute(item));
+}
+
+function formatItemRange(item: { start: number; duration: number; startMinute?: number; durationMinutes?: number }) {
+  const start = itemStartMinute(item);
+  return `${formatClock(start)}–${formatClock(start + itemDurationMinutes(item))}`;
+}
+
+/** Convert the server's typed section contract to the view model. */
+function fromTypedSections(value: unknown): CatalogSection[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const row = item as ApiCatalogSection;
+    const section = String(row.section ?? "").trim();
+    if (!section) return [];
+    const meetings = Array.isArray(row.meetings) ? row.meetings.flatMap((rawMeeting) => {
+      if (!rawMeeting || typeof rawMeeting !== "object") return [];
+      const meeting = rawMeeting as Record<string, unknown>;
+      const day = meeting.day;
+      if (!DAYS.includes(day as Day)) return [];
+      const startMinute = Number(meeting.start_minute);
+      const durationMinutes = Number(meeting.duration_minutes);
+      if (!Number.isFinite(startMinute) || !Number.isFinite(durationMinutes) || durationMinutes < 1) return [];
+      return [{
+        day: day as Day,
+        start: Math.floor(startMinute / 60),
+        duration: Math.max(1, Math.ceil(durationMinutes / 60)),
+        startMinute,
+        durationMinutes,
+        room: String(meeting.room ?? ""),
+      }];
+    }) : [];
+    return [{
+      section,
+      instructor: String(row.instructor ?? ""),
+      meetings,
+      constraint: String(row.constraint ?? ""),
+      eligible: typeof row.eligible === "boolean" ? row.eligible : undefined,
+      reason: String(row.reason ?? ""),
+    }];
   });
 }
 
-function overlaps(a: { day: Day; start: number; duration: number }, b: { day: Day; start: number; duration: number }) {
-  return a.day === b.day && a.start < b.start + b.duration && b.start < a.start + a.duration;
+function overlaps(a: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number }, b: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number }) {
+  const aStart = itemStartMinute(a);
+  const bStart = itemStartMinute(b);
+  return a.day === b.day && aStart < bStart + itemDurationMinutes(b) && bStart < aStart + itemDurationMinutes(a);
 }
 
-type CourseOptions = { course: CatalogCourse; options: CatalogSection[] };
-type SectionChoice = { course: CatalogCourse; section: CatalogSection };
-
-// This search is plain local backtracking — no model, no network — so the only
-// real budget is the main thread. The bound on solutions is generous because
-// collecting them is cheap; the bound on visited nodes is what actually keeps
-// a pathological pool from freezing the tab, and it is the one that matters.
-const MAX_ALTERNATIVES = 200;
-const MAX_SEARCH_NODES = 1_000_000;
-
-function sectionConflicts(section: CatalogSection, chosen: SectionChoice[]) {
-  return section.meetings.some((meeting) =>
-    chosen.some((item) => item.section.meetings.some((other) => overlaps(meeting, other))));
+function toCanonicalEntry(entry: Entry): PlanEntry {
+  return {
+    id: entry.id,
+    code: entry.code,
+    name: entry.name,
+    section: entry.section,
+    credits: entry.credits,
+    color: entry.color,
+    kind: entry.kind,
+    instructor: entry.instructor ?? "",
+    day: entry.day,
+    start_minute: itemStartMinute(entry),
+    duration_minutes: itemDurationMinutes(entry),
+    room: entry.room ?? "",
+  };
 }
 
-/** Every way to take all of these courses, up to {@link MAX_ALTERNATIVES}. */
-function buildAlternatives(courses: CourseOptions[], avoidConflicts: boolean): SectionChoice[][] {
-  // Fewest options first. A course with a single section constrains everything
-  // after it, so deciding it early prunes far more of the tree than deciding a
-  // course with eight sections early would.
-  const ordered = [...courses].sort((a, b) => a.options.length - b.options.length);
-  const solutions: SectionChoice[][] = [];
-  const chosen: SectionChoice[] = [];
-  let nodes = 0;
-
-  const exhausted = () => solutions.length >= MAX_ALTERNATIVES || nodes >= MAX_SEARCH_NODES;
-
-  function search(index: number) {
-    if (exhausted()) return;
-    if (index === ordered.length) {
-      solutions.push([...chosen]);
-      return;
-    }
-    for (const section of ordered[index].options) {
-      nodes += 1;
-      if (avoidConflicts && sectionConflicts(section, chosen)) continue;
-      chosen.push({ course: ordered[index].course, section });
-      search(index + 1);
-      chosen.pop();
-      if (exhausted()) return;
-    }
-  }
-
-  search(0);
-  return solutions;
+function fromCanonicalEntry(entry: PlanEntry): Entry {
+  return {
+    ...entry,
+    start: Math.floor(entry.start_minute / 60),
+    duration: Math.max(1, Math.ceil(entry.duration_minutes / 60)),
+    startMinute: entry.start_minute,
+    durationMinutes: entry.duration_minutes,
+  };
 }
 
-/** One section per course, skipping whatever will not fit. The fallback. */
-function greedyPlan(courses: CourseOptions[], avoidConflicts: boolean) {
-  const chosen: SectionChoice[] = [];
-  const skipped: string[] = [];
-  for (const { course, options } of courses) {
-    const section = options.find((candidate) => !avoidConflicts || !sectionConflicts(candidate, chosen));
-    if (section) chosen.push({ course, section });
-    else skipped.push(course.code);
-  }
-  return { chosen, skipped };
+function canonicalStateFromLocal(values: {
+  entries: Entry[];
+  department: string;
+  departmentLabel: string;
+  emptyDays: Day[];
+  avoidConflicts: boolean;
+  ignoreConstraints: boolean;
+  pool: CatalogCourse[];
+  sections: SectionMap;
+  alternatives: Entry[][];
+  alternativeIndex: number;
+  favorites: Entry[][];
+  favoriteIndex: number;
+}): PlanState {
+  return {
+    entries: values.entries.map(toCanonicalEntry),
+    department: values.department,
+    department_label: values.departmentLabel,
+    empty_days: values.emptyDays,
+    avoid_conflicts: values.avoidConflicts,
+    ignore_constraints: values.ignoreConstraints,
+    pool: values.pool.map((course) => ({ ...course, raw_code: course.rawCode })),
+    sections: values.sections,
+    alternatives: values.alternatives.map((alternative) => alternative.map(toCanonicalEntry)),
+    alternative_index: values.alternativeIndex,
+    favorites: values.favorites.map((favorite) => favorite.map(toCanonicalEntry)),
+    favorite_index: values.favoriteIndex,
+  };
 }
 
-function choiceEntries(choices: SectionChoice[]): Entry[] {
-  return choices.flatMap(({ course, section }, courseIndex) =>
-    section.meetings.map((meeting, meetingIndex) => ({
-      id: crypto.randomUUID(),
+/**
+ * Fingerprint only canonical values.  The view keeps hour-shaped aliases for
+ * rendering and the API keeps a few legacy aliases for old clients; neither
+ * should make an acknowledged state look different from the submitted one.
+ */
+function canonicalStateFingerprint(state: PlanState): string {
+  const meeting = (value: Record<string, unknown>) => ({
+    day: value.day,
+    start_minute: Number(value.start_minute ?? value.startMinute ?? (Number(value.start ?? 0) * 60 + 40)),
+    duration_minutes: Number(value.duration_minutes ?? value.durationMinutes ?? Math.max(1, Number(value.duration ?? 1) * 60 - 10)),
+    room: String(value.room ?? ""),
+  });
+  const entry = (value: PlanEntry) => ({
+    id: value.id,
+    code: value.code,
+    name: value.name,
+    section: value.section,
+    credits: value.credits,
+    color: value.color,
+    kind: value.kind,
+    instructor: value.instructor,
+    day: value.day,
+    start_minute: value.start_minute,
+    duration_minutes: value.duration_minutes,
+    room: value.room,
+  });
+  const section = (value: Record<string, unknown>) => ({
+    section: String(value.section ?? value.section_number ?? ""),
+    instructor: String(value.instructor ?? ""),
+    meetings: (Array.isArray(value.meetings) ? value.meetings : []).flatMap((raw) => (
+      raw && typeof raw === "object" ? [meeting(raw as Record<string, unknown>)] : []
+    )),
+    constraint: String(value.constraint ?? ""),
+    eligible: value.eligible === true ? true : value.eligible === false ? false : null,
+    reason: String(value.reason ?? ""),
+  });
+  return JSON.stringify({
+    entries: state.entries.map(entry),
+    department: state.department,
+    department_label: state.department_label,
+    empty_days: state.empty_days,
+    avoid_conflicts: state.avoid_conflicts,
+    ignore_constraints: state.ignore_constraints,
+    pool: state.pool.map((course) => ({
       code: course.code,
       name: course.name,
-      section: section.section,
-      credits: meetingIndex === 0 ? course.credits : 0,
-      color: courseIndex % COLORS.length,
-      kind: "course" as const,
-      instructor: section.instructor,
-      ...meeting,
-    })));
+      credits: course.credits,
+      raw_code: course.raw_code ?? course.rawCode ?? course.code,
+    })),
+    sections: Object.fromEntries(Object.entries(state.sections).map(([key, rows]) => [
+      key,
+      rows.flatMap((raw) => raw && typeof raw === "object" ? [section(raw as Record<string, unknown>)] : []),
+    ])),
+    alternatives: state.alternatives.map((alternative) => alternative.map(entry)),
+    alternative_index: state.alternative_index,
+    favorites: state.favorites.map((favorite) => favorite.map(entry)),
+    favorite_index: state.favorite_index,
+  });
+}
+
+function fromCanonicalSections(value: Record<string, unknown[]>): SectionMap {
+  const result: SectionMap = {};
+  for (const [key, rows] of Object.entries(value)) {
+    result[key] = rows.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as Record<string, unknown>;
+      const meetings = Array.isArray(row.meetings) ? row.meetings.flatMap((meeting) => {
+        if (!meeting || typeof meeting !== "object") return [];
+        const value = meeting as Record<string, unknown>;
+        const startMinute = Number(value.start_minute ?? value.startMinute ?? (Number(value.start ?? 0) * 60 + 40));
+        const durationMinutes = Number(value.duration_minutes ?? value.durationMinutes ?? Math.max(1, Number(value.duration ?? 1) * 60 - 10));
+        if (!Number.isFinite(startMinute) || !Number.isFinite(durationMinutes)) return [];
+        return [{
+          day: value.day as Day,
+          start: Math.floor(startMinute / 60),
+          duration: Math.max(1, Math.ceil(durationMinutes / 60)),
+          startMinute,
+          durationMinutes,
+          room: String(value.room ?? row.room ?? ""),
+        }];
+      }) : [];
+      return [{
+        section: String(row.section ?? row.section_number ?? ""),
+        instructor: String(row.instructor ?? ""),
+        meetings,
+        constraint: String(row.constraint ?? ""),
+        eligible: typeof row.eligible === "boolean" ? row.eligible : undefined,
+        reason: String(row.reason ?? ""),
+      }];
+    });
+  }
+  return result;
+}
+
+function canonicalSectionsFromLocal(sections: SectionMap, constraints: ConstraintMap): Record<string, unknown[]> {
+  return Object.fromEntries(Object.entries(sections).map(([key, rows]) => [
+    key,
+    rows.map((row) => ({
+      ...row,
+      eligible: constraints[key]?.[row.section]?.eligible ?? row.eligible,
+      reason: constraints[key]?.[row.section]?.reason ?? row.reason ?? "",
+      meetings: row.meetings.map((meeting) => ({
+        ...meeting,
+        start_minute: itemStartMinute(meeting),
+        duration_minutes: itemDurationMinutes(meeting),
+      })),
+    })),
+  ]));
 }
 
 /**
@@ -465,25 +484,12 @@ function downloadFile(name: string, blob: Blob) {
   URL.revokeObjectURL(link.href);
 }
 
-function readSavedPlan(): Partial<SavedPlan> | null {
-  // The old explicit Save button wrote to STORAGE_KEY. Autosave writes to
-  // PLAN_KEY, so without this fallback the first load after the change looks
-  // to a returning student exactly like their schedule was deleted.
-  const raw = window.localStorage.getItem(PLAN_KEY) ?? window.localStorage.getItem(STORAGE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as Partial<SavedPlan>) : null;
-  } catch {
-    return null;
-  }
-}
-
 export function SchedulePlanner() {
   const { locale, pick } = useLocale();
   const t = useCallback((tr: string, en: string) => pick({ tr, en }), [pick]);
 
   const [term] = useState(() => upcomingTerm());
+  const planning = usePlanning(term);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
@@ -496,10 +502,6 @@ export function SchedulePlanner() {
   const [departmentStatus, setDepartmentStatus] = useState<"ok" | "unknown" | "failed" | "disconnected">("ok");
   const [departmentCodeDraft, setDepartmentCodeDraft] = useState("");
   const departmentKnown = Boolean(department.trim());
-  // Read from the student context (SAIS), never typed here: it is academic
-  // data that belongs in Settings, and a stale copy in one browser silently
-  // overwriting the registrar's value is not a trade worth one input box.
-  const [surname, setSurname] = useState("");
   const [emptyDays, setEmptyDays] = useState<Day[]>([]);
   const [avoidConflicts, setAvoidConflicts] = useState(true);
   const [ignoreConstraints, setIgnoreConstraints] = useState(false);
@@ -526,116 +528,145 @@ export function SchedulePlanner() {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualBusy, setManualBusy] = useState(false);
   const [draft, setDraft] = useState({ code: "", name: "", section: "1", day: "Mon" as Day, start: 9, duration: 1, room: "", credits: 3 });
-  // Nothing may be written back to storage until the stored plan has been
-  // read, or the empty first render erases the plan it is about to load.
+  // Nothing may be sent back until the canonical server state has been read,
+  // or the empty first render would overwrite the plan it is about to load.
   const [hydrated, setHydrated] = useState(false);
+  const serverStateFingerprint = useRef("");
+  const saveTracker = useRef(new PlanSaveTracker());
+  const localFingerprintRef = useRef("");
   const initialConstraintsFetched = useRef(false);
   const poolRef = useRef<CatalogCourse[]>([]);
   useEffect(() => { poolRef.current = catalogCourses; }, [catalogCourses]);
+  useEffect(() => {
+    saveTracker.current.reset(term);
+    serverStateFingerprint.current = "";
+  }, [term]);
   const busy = planBusy || generateProgress !== null;
 
   // --- persistence --------------------------------------------------------
-
-  // Deferred by a timer, like every other localStorage read in this app: the
-  // stored plan is not part of the server-rendered markup, so restoring it
-  // during the effect body would be a synchronous cascading render over
-  // markup React has only just committed.
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const shared = window.location.hash.startsWith("#plan=") ? window.location.hash.slice(6) : "";
-      const plan = readSavedPlan();
-      if (plan) {
-        // Every field is checked rather than trusted: this is a value the
-        // user's own browser holds, so an older or hand-edited shape must not
-        // be able to push `undefined` into a controlled input.
-        if (Array.isArray(plan.entries)) setEntries(plan.entries.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) })));
-        if (Array.isArray(plan.pool)) setCatalogCourses(plan.pool.map((course) => ({ ...course, code: formatMetuCourseCode(course.code) })));
-        if (plan.sections && typeof plan.sections === "object") setSectionsByCourse(plan.sections);
-        if (typeof plan.department === "string") setDepartment(plan.department);
-        if (typeof plan.departmentLabel === "string") setDepartmentLabel(plan.departmentLabel);
-        if (Array.isArray(plan.emptyDays)) setEmptyDays(plan.emptyDays.filter((day): day is Day => DAYS.includes(day as Day)));
-        // Plans saved when this was a single day still carry `emptyDay`.
-        else if (typeof (plan as { emptyDay?: string }).emptyDay === "string" && DAYS.includes((plan as { emptyDay?: string }).emptyDay as Day)) {
-          setEmptyDays([(plan as { emptyDay?: string }).emptyDay as Day]);
-        }
-        if (typeof plan.avoidConflicts === "boolean") setAvoidConflicts(plan.avoidConflicts);
-        if (typeof plan.ignoreConstraints === "boolean") setIgnoreConstraints(plan.ignoreConstraints);
-        // Kept so a reload does not silently collapse a set of alternatives
-        // back to whichever one happened to be on screen.
-        if (Array.isArray(plan.alternatives)) setAlternatives(plan.alternatives.filter(Array.isArray).map((alternative) =>
-          alternative.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) }))));
-        if (typeof plan.alternativeIndex === "number") setAlternativeIndex(plan.alternativeIndex);
-      }
-      // A shared link is an explicit instruction and outranks the stored plan.
-      if (shared) {
-        try {
-          const sharedEntries = JSON.parse(decodeURIComponent(escape(atob(shared)))) as Entry[];
-          setEntries(sharedEntries.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) })));
-          window.history.replaceState(null, "", window.location.pathname);
-        } catch { /* malformed shared plan */ }
-      }
-      const raw = window.localStorage.getItem(`${STORAGE_KEY}:favorites`);
-      if (raw) try {
-        const storedFavorites = JSON.parse(raw) as Entry[][];
-        setFavorites(storedFavorites.map((favorite) => favorite.map((entry) => ({ ...entry, code: formatMetuCourseCode(entry.code) }))));
-      } catch { /* ignore corrupt local draft */ }
-      setHydrated(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
+  const applyCanonicalState = useCallback((state: PlanState) => {
+    const nextEntries = state.entries.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) }));
+    const nextPool = state.pool.map((course) => ({
+      code: formatMetuCourseCode(course.code),
+      name: course.name,
+      credits: course.credits,
+      rawCode: course.raw_code ?? course.rawCode ?? course.code,
+    }));
+    const nextSections = fromCanonicalSections(state.sections);
+    const nextAlternatives = state.alternatives.map((alternative) => alternative.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })));
+    const nextFavorites = state.favorites.map((favorite) => favorite.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })));
+    setEntries(nextEntries);
+    setCatalogCourses(nextPool);
+    setSectionsByCourse(nextSections);
+    setDepartment(state.department);
+    setDepartmentLabel(state.department_label);
+    setEmptyDays(state.empty_days.filter((day): day is Day => DAYS.includes(day)));
+    setAvoidConflicts(state.avoid_conflicts);
+    setIgnoreConstraints(state.ignore_constraints);
+    setAlternatives(nextAlternatives);
+    setAlternativeIndex(state.alternative_index);
+    setFavorites(nextFavorites);
+    setFavoriteIndex(state.favorite_index);
+    serverStateFingerprint.current = canonicalStateFingerprint(state);
   }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    const payload: SavedPlan = { entries, department, departmentLabel, emptyDays, avoidConflicts, ignoreConstraints, pool: catalogCourses, sections: sectionsByCourse, alternatives, alternativeIndex };
-    try { window.localStorage.setItem(PLAN_KEY, JSON.stringify(payload)); } catch { /* quota, or storage blocked */ }
-  }, [hydrated, entries, department, departmentLabel, emptyDays, avoidConflicts, ignoreConstraints, catalogCourses, sectionsByCourse, alternatives, alternativeIndex]);
+  // Server responses are applied by revision. Local edits keep their current
+  // controls while a save is in flight; a successful response (or undo) then
+  // becomes the new rendered source of truth.
+  const planningReady = planning.ready;
+  const planningRevision = planning.revision;
+  const planningTerm = planning.envelope?.term;
+  const planningIdentity = `${planningTerm ?? ""}:${planningRevision}`;
+  const planningUpdate = planning.update;
 
-  // The timetable also goes to the broker, so chat can answer questions about
-  // the week being built here. Only this projection — the courses, their
-  // sections and when they meet — not the pool, the cached section lists or
-  // the alternatives, which are working state and would be injected into
-  // every chat turn for nothing.
-  //
-  // Debounced well past the drag of a single course: the grid changes on every
-  // click, and each change is not worth a request.
+  const canonicalSections = useMemo(
+    () => canonicalSectionsFromLocal(sectionsByCourse, constraints),
+    [constraints, sectionsByCourse],
+  );
+  const localCanonicalState = useMemo(() => canonicalStateFromLocal({
+    entries,
+    department,
+    departmentLabel,
+    emptyDays,
+    avoidConflicts,
+    ignoreConstraints,
+    pool: catalogCourses,
+    sections: canonicalSections as SectionMap,
+    alternatives,
+    alternativeIndex,
+    favorites,
+    favoriteIndex,
+  }), [
+    alternatives,
+    alternativeIndex,
+    avoidConflicts,
+    canonicalSections,
+    catalogCourses,
+    department,
+    departmentLabel,
+    emptyDays,
+    entries,
+    favoriteIndex,
+    favorites,
+    ignoreConstraints,
+  ]);
+
+  const localFingerprint = useMemo(() => canonicalStateFingerprint(localCanonicalState), [localCanonicalState]);
   useEffect(() => {
-    if (!hydrated) return;
+    localFingerprintRef.current = localFingerprint;
+  }, [localFingerprint]);
+
+  const reconcileResponse = useCallback((next: PlanEnvelope, fingerprint: string) => {
+    const decision = saveTracker.current.acknowledge(next, fingerprint);
+    if (decision === "ignore") return;
+    if (decision === "adopt") applyCanonicalState(next.state);
+    else serverStateFingerprint.current = canonicalStateFingerprint(next.state);
+    setHydrated(true);
+  }, [applyCanonicalState]);
+
+  useEffect(() => {
+    if (planningReady && planning.envelope && planningTerm === term) {
+      reconcileResponse(planning.envelope, localFingerprint);
+    }
+  }, [localFingerprint, planning.envelope, planningReady, planningTerm, reconcileResponse, term]);
+
+  const reconcileSubmittedMutation = useCallback((_submitted: SubmittedMutation, next: PlanEnvelope) => {
+    reconcileResponse(next, localFingerprintRef.current);
+  }, [reconcileResponse]);
+
+  /** Submit an explicit planner mutation and reconcile it with local edits. */
+  const submitPlanningUpdate = useCallback((changes: Parameters<typeof planningUpdate>[0]) => {
+    if (planning.saving || planning.retryable || planning.conflict || planning.saveError) return Promise.resolve(null);
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
+    const result = planningUpdate(changes, submitted.idempotencyKey);
+    void result.then((next) => {
+      if (!next) return;
+      reconcileSubmittedMutation(submitted, next);
+    });
+    return result;
+  }, [planning.conflict, planning.retryable, planning.saveError, planning.saving, planningUpdate, reconcileSubmittedMutation, term]);
+
+  // Every planner edit is persisted as one canonical state update. This is a
+  // short debounce for rapid UI changes, while the server still orders each
+  // request with its revision and idempotency key.
+  useEffect(() => {
+    if (!hydrated || !planningReady || planning.saving || planning.retryable || planning.conflict) return;
+    const fingerprint = localFingerprint;
+    if (fingerprint === serverStateFingerprint.current) return;
     const timer = window.setTimeout(() => {
-      const courses = new Map<string, { code: string; name: string; section: string; credits: number; instructor: string; meetings: { day: Day; start: number; duration: number; room: string }[] }>();
-      const blocks = new Map<string, { name: string; meetings: { day: Day; start: number; duration: number; room: string }[] }>();
-      for (const entry of entries) {
-        const meeting = { day: entry.day, start: entry.start, duration: entry.duration, room: entry.room ?? "" };
-        if (entry.kind === "block") {
-          const key = entry.name || entry.id;
-          (blocks.get(key) ?? blocks.set(key, { name: entry.name, meetings: [] }).get(key)!).meetings.push(meeting);
-          continue;
-        }
-        // One row per course-and-section, carrying every hour it meets.
-        const key = `${entry.code}|${entry.section}`;
-        const existing = courses.get(key)
-          ?? courses.set(key, { code: entry.code, name: entry.name, section: entry.section, credits: 0, instructor: entry.instructor ?? "", meetings: [] }).get(key)!;
-        existing.credits += entry.credits;
-        existing.meetings.push(meeting);
-      }
-      void jsonFetch("/api/schedule/timetable", {
-        method: "PUT",
-        body: { term, courses: [...courses.values()].slice(0, 20), busy_blocks: [...blocks.values()].slice(0, 20) },
-      }).catch(() => { /* the browser copy is the one that matters; chat catches up next change */ });
-    }, 2500);
+      const submitted: SubmittedMutation = { term, fingerprint, idempotencyKey: crypto.randomUUID() };
+      saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
+      void planningUpdate({ operation: "replace", state: localCanonicalState }, submitted.idempotencyKey);
+    }, 350);
     return () => window.clearTimeout(timer);
-  }, [hydrated, entries, term]);
+  }, [hydrated, localCanonicalState, localFingerprint, planning.conflict, planning.retryable, planning.saving, planningIdentity, planningReady, planningUpdate, term]);
 
   useEffect(() => {
     let cancelled = false;
     void jsonFetch<{ department_query: string | null; department_code: string | null; surname_prefix: string | null }>("/api/schedule/student-context")
       .then((context) => {
         if (cancelled) return;
-        // Section restrictions are written as surname ranges, so this is what
-        // makes them apply at all. Only ever fills an empty box: a student who
-        // typed something themselves is not overwritten.
-        if (context.surname_prefix) {
-          setSurname((current) => current.trim() || context.surname_prefix!);
-        }
         // Resolved against the catalog server-side. Scanning the payload here
         // for any three-digit run used to pick up a year or a row count and
         // then quietly load another department's courses.
@@ -728,7 +759,7 @@ export function SchedulePlanner() {
     scheduledCodes.has(courseIdentity(course.code)) || scheduledCodes.has(courseIdentity(course.rawCode))).length;
   const mobileEntries = entries
     .filter((entry) => entry.day === mobileDay)
-    .sort((a, b) => a.start - b.start || a.code.localeCompare(b.code));
+    .sort((a, b) => itemStartMinute(a) - itemStartMinute(b) || a.code.localeCompare(b.code));
 
   const dayLabel = useCallback((day: Day) => ({ Mon: t("Pzt", "Mon"), Tue: t("Sal", "Tue"), Wed: t("Çar", "Wed"), Thu: t("Per", "Thu"), Fri: t("Cum", "Fri") })[day], [t]);
   // What distinguishes one alternative from the next, in the terms a student
@@ -887,8 +918,8 @@ export function SchedulePlanner() {
     const cached = known[identity];
     if (cached?.length) return cached;
     const courseDepartment = owningDepartment(course.rawCode, department);
-    const response = await jsonFetch<{ data: unknown }>(`/api/schedule/courses/${encodeURIComponent(course.rawCode)}?department=${encodeURIComponent(courseDepartment)}&semester=${encodeURIComponent(term)}`);
-    const sections = parseSections(response.data);
+    const response = await jsonFetch<{ sections?: unknown }>(`/api/schedule/courses/${encodeURIComponent(course.rawCode)}?department=${encodeURIComponent(courseDepartment)}&semester=${encodeURIComponent(term)}`);
+    const sections = fromTypedSections(response.sections);
     setSectionsByCourse((current) => ({ ...current, [identity]: sections }));
     return sections;
   }, [department, term]);
@@ -905,14 +936,14 @@ export function SchedulePlanner() {
   const fetchPoolSections = useCallback(async (courses: CatalogCourse[], known: SectionMap): Promise<SectionMap> => {
     const wanted = courses.filter((course) => !known[courseIdentity(course.rawCode)]?.length);
     if (!wanted.length) return known;
-    const response = await jsonFetch<{ courses?: Record<string, { data?: unknown; error?: string }> }>(
+    const response = await jsonFetch<{ courses?: Record<string, { sections?: unknown; error?: string }> }>(
       "/api/schedule/sections",
       { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: wanted.map((course) => course.rawCode) } },
     );
     const found: SectionMap = {};
     for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
       if (payload?.error !== undefined) continue;
-      found[courseIdentity(rawCode)] = parseSections(payload?.data);
+      found[courseIdentity(rawCode)] = fromTypedSections(payload?.sections);
     }
     setSectionsByCourse((current) => ({ ...current, ...found }));
     return { ...known, ...found };
@@ -1010,13 +1041,12 @@ export function SchedulePlanner() {
     }
   }, [hydrated, catalogCourses, fetchAllConstraints]);
 
-  /** Whether the student may register, preferring METU's own table. */
+  /** Display the server's eligibility verdict; the browser never recomputes it. */
   const sectionAllowed = useCallback((course: CatalogCourse, section: CatalogSection) => {
     const verdict = constraints[courseIdentity(course.rawCode)]?.[section.section];
     if (verdict) return { allowed: verdict.eligible, reason: verdict.reason };
-    // No table yet: fall back to the free-text note, which is usually empty.
-    return { allowed: surnameEligible(section, surname), reason: "" };
-  }, [constraints, surname]);
+    return { allowed: section.eligible !== false, reason: section.reason ?? "" };
+  }, [constraints]);
 
   async function requestCurriculum(courses: CatalogCourse[]) {
     // This was the slowest thing a student waited on in the whole app — a
@@ -1047,7 +1077,7 @@ export function SchedulePlanner() {
     const verified = (response.courses ?? []).flatMap((item) => {
       const rawCode = String(item.code ?? "").trim();
       if (!rawCode) return [];
-      sectionMap[courseIdentity(rawCode)] = parseSections(item.sections ?? []);
+      sectionMap[courseIdentity(rawCode)] = fromTypedSections(item.sections);
       return [{
         rawCode,
         code: formatMetuCourseCode(String(item.display_code ?? rawCode)),
@@ -1134,13 +1164,12 @@ export function SchedulePlanner() {
    */
   async function generateSchedule() {
     if (!catalogCourses.length) return toast.error(t("Önce dönem derslerini getir.", "Load semester courses first."));
+    if (!planning.ready) return toast.error(t("Program sunucusu henüz hazır değil.", "The planner server is still loading."));
+    if (planning.saving || planning.retryable || planning.conflict) return toast.error(t("Önce bekleyen program kaydını tamamla.", "Finish the pending schedule save first."));
     setGenerateProgress({ done: 0, total: catalogCourses.length });
     try {
       const unavailable: string[] = [];
       const unpublished: string[] = [];
-      const blocked: string[] = [];
-      const restricted: string[] = [];
-      const placeable: CourseOptions[] = [];
       // One request for everything still missing, rather than one per course
       // inside the loop below. A pool the catalog has already seen this week
       // costs a single call that touches no campus page at all.
@@ -1162,61 +1191,88 @@ export function SchedulePlanner() {
         if (!sections.length) { unavailable.push(course.code); continue; }
         const timed = sections.filter((section) => section.meetings.length > 0);
         if (!timed.length) { unpublished.push(course.code); continue; }
-        // The empty day is a hard filter applied before the search, not a
-        // scoring preference: it holds whether or not conflict prevention is
-        // on, which is what addEntry already does.
-        const withinDay = timed.filter((section) => section.meetings.every((meeting) => !emptyDays.includes(meeting.day)));
-        // Section restrictions are real at METU — a section reserved for
-        // surnames A-K is not one this student can register for — so they
-        // filter the search rather than merely annotating the result. The
-        // override exists because the notes are free text and this only
-        // understands one of the things they can say.
-        const allowed = ignoreConstraints ? withinDay : withinDay.filter((section) => sectionAllowed(course, section).allowed);
-        if (!allowed.length) {
-          if (withinDay.length && !ignoreConstraints) restricted.push(course.code);
-          else blocked.push(course.code);
-          continue;
-        }
-        placeable.push({ course, options: allowed });
       }
 
-      const solutions = buildAlternatives(placeable, avoidConflicts);
-      let ranked: Entry[][];
-      let unplaced = [...blocked];
-
-      if (solutions.length) {
-        ranked = solutions
-          .map((choices) => ({ entries: choiceEntries(choices), shape: scheduleShape(choiceEntries(choices)) }))
-          .sort((a, b) => a.shape.dayCount - b.shape.dayCount || a.shape.gaps - b.shape.gaps)
-          .map((item) => item.entries);
-      } else {
-        // No arrangement takes every course. Rather than showing nothing, fall
-        // back to filling what fits and naming what had to be dropped.
-        const { chosen, skipped } = greedyPlan(placeable, avoidConflicts);
-        ranked = chosen.length ? [choiceEntries(chosen)] : [];
-        unplaced = [...unplaced, ...skipped];
-      }
-
-      setAlternatives(ranked);
-      setAlternativeIndex(0);
-      setEntries(ranked[0] ?? []);
+      // The fetched sections and server generated eligibility verdicts are
+      // inputs to the owner service. Search, conflict checks, ranking and
+      // minute arithmetic all run there, so chat and the browser consume the
+      // same solver result.
+      setSectionsByCourse(known);
+      const staged = await submitPlanningUpdate({
+        operation: "set_pool",
+        pool: catalogCourses.map((course) => ({
+          code: course.code,
+          name: course.name,
+          credits: course.credits,
+          raw_code: course.rawCode,
+        })),
+        sections: canonicalSectionsFromLocal(known, constraints),
+      });
+      if (!staged) return;
+      const solved = await submitPlanningUpdate({ operation: "solve" });
+      if (!solved) return;
+      const scheduled = new Set(solved.state.entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
+      const sectionPayload = canonicalSectionsFromLocal(known, constraints);
+      const restricted = catalogCourses
+        .filter((course) => {
+          const rows = sectionPayload[courseIdentity(course.rawCode)] ?? [];
+          return rows.length > 0 && rows.every((row) => row && typeof row === "object" && (row as { eligible?: boolean }).eligible === false);
+        })
+        .map((course) => course.code);
+      const unplaced = catalogCourses
+        .filter((course) => !scheduled.has(courseIdentity(course.code)))
+        .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !restricted.includes(course.code))
+        .map((course) => course.code);
 
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
       if (restricted.length) toast.warning(t(`${restricted.join(", ")} için soyadına açık şube yok. Kısıtları yok sayarak tekrar dene.`, `No section of ${restricted.join(", ")} is open to your surname. Try again with restrictions ignored.`));
       if (unplaced.length) toast.warning(t(`${unplaced.join(", ")} için boş gün ve çakışma tercihlerine uyan şube yok.`, `No section of ${unplaced.join(", ")} fits your empty-day and conflict preferences.`));
-      if (ranked.length > 1) {
-        const capped = ranked.length >= MAX_ALTERNATIVES;
+      if (solved.state.alternatives.length > 1) {
         toast.success(t(
-          `${capped ? "En az " : ""}${ranked.length} alternatif program bulundu. Oklarla aralarında geçiş yap.`,
-          `${capped ? "At least " : ""}${ranked.length} possible schedules found. Use the arrows to switch between them.`,
+          `${solved.state.alternatives.length} alternatif program bulundu. Oklarla aralarında geçiş yap.`,
+          `${solved.state.alternatives.length} possible schedules found. Use the arrows to switch between them.`,
         ));
-      } else if (ranked.length === 1 && !unavailable.length && !unpublished.length && !unplaced.length) {
+      } else if (solved.state.alternatives.length === 1 && !unavailable.length && !unpublished.length && !unplaced.length) {
         toast.success(t("Tek bir çakışmasız program mümkün.", "Exactly one conflict-free schedule is possible."));
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("Program oluşturulamadı.", "The schedule could not be generated."));
     } finally { setGenerateProgress(null); }
+  }
+
+  async function handleUndo() {
+    if (planning.saving || planning.retryable || planning.conflict || !planning.envelope?.can_undo) return;
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
+    const next = await planning.undo(submitted.idempotencyKey);
+    if (!next) return;
+    reconcileSubmittedMutation(submitted, next);
+  }
+
+  async function handleImportLegacy() {
+    if (!planning.legacyDraft || planning.saving || planning.retryable || planning.conflict) return;
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
+    const next = await planning.importLegacy(submitted.idempotencyKey);
+    if (!next) return;
+    reconcileSubmittedMutation(submitted, next);
+  }
+
+  async function handleRestoreRecovery() {
+    if (!planning.recoveryDraft || planning.saving || planning.retryable || planning.conflict) return;
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
+    const next = await planning.restoreRecovery(submitted.idempotencyKey);
+    if (!next) return;
+    reconcileSubmittedMutation(submitted, next);
+  }
+
+  async function handleRefreshAfterConflict() {
+    // A failed command belongs to the old base revision. A fresh read must be
+    // treated as an explicit replacement, so it cannot consume that marker.
+    saveTracker.current.reset(term);
+    await planning.refreshAfterConflict();
   }
 
   function showAlternative(index: number) {
@@ -1228,26 +1284,9 @@ export function SchedulePlanner() {
 
   function addCatalogSection(course: CatalogCourse, section: CatalogSection) {
     if (!section.meetings.length) return toast.warning(t("Bu şubenin gün ve saati ODTÜ tarafından henüz yayımlanmamış.", "METU has not published this section's day and time yet."));
-    // Refused, not merely flagged. A section the student cannot register for
-    // does not belong on the timetable they are building their week around,
-    // and the verdict now comes from METU's own eligibility table rather than
-    // from reading a free-text note. The override stays because the table can
-    // be missing and because the student is the one who knows their own case.
-    const check = sectionAllowed(course, section);
-    if (!check.allowed && !ignoreConstraints) {
-      const reason = localizedRestrictionReason(check.reason, t);
-      return toast.error(
-        check.reason
-          ? t(`Şube ${section.section} sana kapalı: ${reason}. Eklemek için "Şube kısıtlarını yok say"ı aç.`,
-              `Section ${section.section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
-          : t(`Şube ${section.section} kısıtlarına uymuyorsun. Eklemek için "Şube kısıtlarını yok say"ı aç.`,
-              `You do not meet section ${section.section}'s restrictions. Turn on "Ignore section restrictions" to add it anyway.`),
-      );
-    }
-    if (!check.allowed) {
-      toast.warning(t(`Şube ${section.section} kısıtlara uymuyor, kısıtlar yok sayıldığı için eklendi.`,
-        `Section ${section.section} does not meet its restrictions; added because restrictions are ignored.`));
-    }
+    // Eligibility is checked by the canonical owner when this state is saved.
+    // The browser may show the catalog verdict, but it cannot make the
+    // registration decision that chat and other clients must also observe.
     const additions = section.meetings.map((meeting, index) => ({ id: crypto.randomUUID(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, ...meeting }));
     if (avoidConflicts && additions.some((next) => entries.some((entry) => overlaps(entry, next)))) return toast.error(t("Bu şube mevcut programla çakışıyor.", "This section conflicts with your schedule."));
     setEntries((current) => [...current, ...additions]);
@@ -1260,7 +1299,6 @@ export function SchedulePlanner() {
     if (!entries.length) return;
     const next = [...favorites, entries].slice(-10);
     setFavorites(next); setFavoriteIndex(next.length - 1);
-    try { window.localStorage.setItem(`${STORAGE_KEY}:favorites`, JSON.stringify(next)); } catch { /* quota, or storage blocked */ }
     toast.success(t("Program favorilere eklendi.", "Schedule added to favorites."));
   }
 
@@ -1275,22 +1313,16 @@ export function SchedulePlanner() {
   }
 
   async function copySummary() {
-    const summary = DAYS.map((day) => `${dayLabel(day)}: ${entries.filter((e) => e.day === day).sort((a, b) => a.start - b.start).map((e) => `${String(e.start).padStart(2, "0")}:40 ${e.code}-${e.section} (${e.kind === "course" ? (e.room?.trim() || "TBA") : (e.room?.trim() || "—")})`).join(", ") || "—"}`).join("\n");
+    const summary = DAYS.map((day) => `${dayLabel(day)}: ${entries.filter((e) => e.day === day).sort((a, b) => itemStartMinute(a) - itemStartMinute(b)).map((e) => `${formatItemTime(e)} ${e.code}-${e.section} (${e.kind === "course" ? (e.room?.trim() || "TBA") : (e.room?.trim() || "—")})`).join(", ") || "—"}`).join("\n");
     await navigator.clipboard.writeText(summary); toast.success(t("Program özeti kopyalandı.", "Schedule summary copied."));
-  }
-
-  async function copyShareLink() {
-    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(entries))));
-    await navigator.clipboard.writeText(`${window.location.origin}/schedule#plan=${encoded}`);
-    toast.success(t("Salt okunur paylaşım bağlantısı kopyalandı.", "Read-only share link copied."));
   }
 
   function exportCsv() {
     if (!entries.length) return toast.error(t("Dışa aktarılacak ders yok.", "There is nothing to export yet."));
     const header = [t("Gün", "Day"), t("Başlangıç", "Start"), t("Bitiş", "End"), t("Kod", "Code"), t("Ders adı", "Course name"), t("Şube", "Section"), t("Öğretim elemanı", "Instructor"), t("Derslik", "Room"), t("Kredi", "Credits")];
     const rows = [...entries]
-      .sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || a.start - b.start)
-      .map((entry) => [dayLabel(entry.day), `${String(entry.start).padStart(2, "0")}:40`, `${String(entry.start + entry.duration).padStart(2, "0")}:40`, entry.code, entry.name, entry.section, entry.instructor ?? "", entry.kind === "course" ? (entry.room?.trim() || "TBA") : entry.room, entry.credits]);
+      .sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || itemStartMinute(a) - itemStartMinute(b))
+      .map((entry) => [dayLabel(entry.day), formatItemTime(entry), formatClock(itemStartMinute(entry) + itemDurationMinutes(entry)), entry.code, entry.name, entry.section, entry.instructor ?? "", entry.kind === "course" ? (entry.room?.trim() || "TBA") : entry.room, entry.credits]);
     const csv = [header, ...rows].map((row) => row.map(csvCell).join(";")).join("\r\n");
     downloadFile(`devrimo-${term}.csv`, new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8" }));
     toast.success(t("Program CSV olarak indirildi.", "Schedule downloaded as CSV."));
@@ -1298,7 +1330,15 @@ export function SchedulePlanner() {
 
   function exportWallpaper() {
     const width = 3840, height = 2160;
-    const cells = entries.map((e) => `<rect x="${460 + DAYS.indexOf(e.day) * 650}" y="${330 + (e.start - 8) * 170}" width="610" height="${e.duration * 160}" rx="24" fill="#e31837" opacity=".9"/><text x="${490 + DAYS.indexOf(e.day) * 650}" y="${390 + (e.start - 8) * 170}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")}</text>`).join("");
+    const baseMinute = DEFAULT_HOURS[0] * 60 + 40;
+    const pixelsPerMinute = 170 / 60;
+    const cells = entries.map((e) => {
+      const x = 460 + DAYS.indexOf(e.day) * 650;
+      const y = 330 + (itemStartMinute(e) - baseMinute) * pixelsPerMinute;
+      const height = Math.max(72, itemDurationMinutes(e) * pixelsPerMinute);
+      const labelY = y + Math.min(60, Math.max(34, height - 18));
+      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#e31837" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
+    }).join("");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#171312"/><text x="180" y="170" fill="white" font-size="72" font-family="Arial" font-weight="700">Devrimo · ${termLabel(term, t).replace(/[<>&]/g, "")}</text>${DAYS.map((d, i) => `<text x="${500 + i * 650}" y="285" fill="#aaa" font-size="36" font-family="Arial">${dayLabel(d)}</text>`).join("")}${cells}</svg>`;
     downloadFile("devrimo-schedule-4k.svg", new Blob([svg], { type: "image/svg+xml" }));
   }
@@ -1342,12 +1382,39 @@ export function SchedulePlanner() {
             <h1 className="text-2xl font-semibold tracking-tight">{t("Ders programı", "Schedule")}</h1>
             <p className="truncate text-sm text-muted-foreground">{termLabel(term, t)} · {t("derslerini ekle, çakışmaları gör, paylaş", "add courses, spot conflicts, share")}</p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => setEntries([])}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEntries([])}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
+            <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><RotateCcwIcon />{t("Geri al", "Undo")}</Button>
+          </div>
         </div>
 
         {/* Above both columns: it explains the whole screen, and once dismissed
             it shrinks to a single link rather than taking space forever. */}
         <PlannerIntro className="sm:mb-4" />
+
+        {planning.legacyDraft ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm" role="status">
+            <span className="min-w-0 flex-1">{t("Bu tarayıcıda eski bir program taslağı bulundu. Hesabına aktarmak ister misin?", "An older schedule draft was found in this browser. Import it into this account?")}</span>
+            <Button size="sm" variant="outline" onClick={() => void handleImportLegacy()} disabled={planning.saving || planning.retryable || Boolean(planning.conflict)}>{t("Taslağı içe aktar", "Import draft")}</Button>
+          </div>
+        ) : null}
+        {planning.recoveryDraft ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm" role="status">
+            <span className="min-w-0 flex-1">{t("Bu hesap için sunucu dışında kaydedilmiş bir program bulundu. Geri yüklemek ister misin?", "A confirmed recovery copy for this account was found outside the server. Restore it?")}</span>
+            <Button size="sm" variant="outline" onClick={() => void handleRestoreRecovery()} disabled={planning.saving || planning.retryable || Boolean(planning.conflict)}>{t("Geri yükle", "Restore")}</Button>
+          </div>
+        ) : null}
+        {planning.conflict ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+            <span className="min-w-0 flex-1">{t("Program başka bir sekmede değişti. Kaydetmeye devam etmek için güncel programı yükle.", "The schedule changed in another tab. Reload the current plan before saving again.")}</span>
+            <Button size="sm" variant="outline" onClick={() => void handleRefreshAfterConflict()}>{t("Günceli yükle", "Reload current plan")}</Button>
+          </div>
+        ) : planning.saveError ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+            <span className="min-w-0 flex-1">{planning.saveError}</span>
+            {planning.retryable ? <Button size="sm" variant="outline" onClick={() => void planning.retry()} disabled={planning.saving}>{t("Tekrar dene", "Retry")}</Button> : null}
+          </div>
+        ) : null}
 
         <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
@@ -1357,7 +1424,7 @@ export function SchedulePlanner() {
                   here to show or decide — this whole block appears only when
                   the campus systems gave us nothing to go on. */}
               {departmentBusy || departmentKnown ? null : (
-                <Field label={t("Bölüm", "Department")}>
+                <Field id="planner-department" label={t("Bölüm", "Department")}>
                   <div className="space-y-2">
                     {!departmentKnown ? (
                       <p className="text-xs text-muted-foreground">
@@ -1370,7 +1437,7 @@ export function SchedulePlanner() {
                     ) : null}
                     <div className="relative">
                       <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input value={departmentQuery} onChange={(e) => setDepartmentQuery(e.target.value)} className="pl-9" placeholder={t("Bölüm ara (ör. Bilgisayar)", "Search department (e.g. Computer)")} aria-label={t("Bölüm ara", "Search department")} />
+                      <Input id="planner-department" value={departmentQuery} onChange={(e) => setDepartmentQuery(e.target.value)} className="pl-9" placeholder={t("Bölüm ara (ör. Bilgisayar)", "Search department (e.g. Computer)")} aria-label={t("Bölüm ara", "Search department")} />
                     </div>
                     {departmentSearching ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2Icon className="size-3.5 animate-spin" />{t("Aranıyor…", "Searching…")}</p> : null}
                     {departmentOptions.length ? (
@@ -1405,11 +1472,11 @@ export function SchedulePlanner() {
                   </div>
                 </Field>
               )}
-              <Field label={t("Boş günler", "Empty days")}>
+              <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
                 {/* Five fixed options, so toggles rather than a multi-select:
                     every choice is visible and one click wide, and a dropdown
                     would hide the current selection behind a summary line. */}
-                <div className="flex gap-1">
+                <div id="planner-empty-days" role="group" aria-labelledby="planner-empty-days-label" className="flex gap-1">
                   {DAYS.map((day) => {
                     const chosen = emptyDays.includes(day);
                     return (
@@ -1518,11 +1585,10 @@ export function SchedulePlanner() {
                                   </span>
                                   {!eligible ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
-                                  <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${String(meeting.start).padStart(2, "0")}:40 · ${meeting.room?.trim() || "TBA"}`).join(" / ") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
-                                  {/* Shown verbatim. It is a free-text box a
-                                      department types into, so only the surname
-                                      range is ever interpreted — everything else
-                                      the student has to read for themselves. */}
+                                  <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
+                                  {/* Shown as returned by the server. The
+                                      department's free-text note remains
+                                      context; eligibility is a server verdict. */}
                                   {section.constraint ? <span className="mt-1 block rounded bg-muted/50 px-1.5 py-1 text-[11px] leading-snug text-muted-foreground">{localizedRestrictionReason(section.constraint, t)}</span> : null}
                                 </button>
                               );
@@ -1538,7 +1604,7 @@ export function SchedulePlanner() {
             {entries.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
               {scheduledCourseGroups.map((courseEntries) => { const entry = courseEntries[0]; return (
                 <div key={`${entry.code}-${entry.section}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
-                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${String(meeting.start).padStart(2, "0")}:40`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
+                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)}`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
                   <Button size="icon" variant="ghost" aria-label={t("Dersi kaldır", "Remove course")} onClick={() => removeScheduledCourse(courseEntries)}><Trash2Icon /></Button>
                 </div>
               ); })}
@@ -1550,10 +1616,10 @@ export function SchedulePlanner() {
                 <ChevronDownIcon className={cn("size-4 shrink-0 text-muted-foreground transition-transform", manualOpen && "rotate-180")} />
               </button>
               {manualOpen ? <CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 border-t pt-4">
-                <div className="grid grid-cols-2 gap-2"><Field label={t("Kod", "Code")}><Input value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="MATH 260" /></Field><Field label={t("Şube", "Section")}><Input value={draft.section} onChange={(e) => setDraft({ ...draft, section: e.target.value })} /></Field></div>
-                <Field label={t("Ders adı", "Course name")}><Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder={t("Temel Lineer Cebir", "Basic Linear Algebra")} /></Field>
-                <div className="grid grid-cols-3 gap-2"><Field label={t("Gün", "Day")}><select value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value as Day })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{DAYS.map((d) => <option key={d} value={d}>{dayLabel(d)}</option>)}</select></Field><Field label={t("Başlangıç", "Start")}><select value={draft.start} onChange={(e) => setDraft({ ...draft, start: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{hours.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:40</option>)}</select></Field><Field label={t("Süre", "Hours")}><select value={draft.duration} onChange={(e) => setDraft({ ...draft, duration: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{[1, 2, 3].map((h) => <option key={h}>{h}</option>)}</select></Field></div>
-                <div className="grid grid-cols-2 gap-2"><Field label={t("Derslik", "Room")}><Input value={draft.room} onChange={(e) => setDraft({ ...draft, room: e.target.value })} placeholder="M-13" /></Field><Field label={t("Kredi", "Credits")}><Input type="number" min={0} max={10} value={draft.credits} onChange={(e) => setDraft({ ...draft, credits: Number(e.target.value) })} /></Field></div>
+                <div className="grid grid-cols-2 gap-2"><Field id="planner-course-code" label={t("Kod", "Code")}><Input id="planner-course-code" value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="MATH 260" /></Field><Field id="planner-section" label={t("Şube", "Section")}><Input id="planner-section" value={draft.section} onChange={(e) => setDraft({ ...draft, section: e.target.value })} /></Field></div>
+                <Field id="planner-course-name" label={t("Ders adı", "Course name")}><Input id="planner-course-name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder={t("Temel Lineer Cebir", "Basic Linear Algebra")} /></Field>
+                <div className="grid grid-cols-3 gap-2"><Field id="planner-day" label={t("Gün", "Day")}><select id="planner-day" value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value as Day })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{DAYS.map((d) => <option key={d} value={d}>{dayLabel(d)}</option>)}</select></Field><Field id="planner-start" label={t("Başlangıç", "Start")}><select id="planner-start" value={draft.start} onChange={(e) => setDraft({ ...draft, start: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{hours.map((h) => <option key={h} value={h}>{formatClock(h * 60 + 40)}</option>)}</select></Field><Field id="planner-duration" label={t("Süre", "Hours")}><select id="planner-duration" value={draft.duration} onChange={(e) => setDraft({ ...draft, duration: Number(e.target.value) })} className="h-10 w-full rounded-md border bg-background px-2 text-sm">{[1, 2, 3].map((h) => <option key={h}>{h}</option>)}</select></Field></div>
+                <div className="grid grid-cols-2 gap-2"><Field id="planner-room" label={t("Derslik", "Room")}><Input id="planner-room" value={draft.room} onChange={(e) => setDraft({ ...draft, room: e.target.value })} placeholder="M-13" /></Field><Field id="planner-credits" label={t("Kredi", "Credits")}><Input id="planner-credits" type="number" min={0} max={10} value={draft.credits} onChange={(e) => setDraft({ ...draft, credits: Number(e.target.value) })} /></Field></div>
                 <Button onClick={() => void addEntry()} disabled={manualBusy}>{manualBusy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}{t("Programa ekle", "Add to schedule")}</Button>
               </CardContent> : null}
             </Card>
@@ -1610,7 +1676,7 @@ export function SchedulePlanner() {
                         aria-label={t(`${entry.code} dersini programdan kaldır`, `Remove ${entry.code} from the schedule`)}
                       >
                         <span className="w-24 shrink-0 text-sm font-semibold tabular-nums">
-                          {String(entry.start).padStart(2, "0")}:40–{String(entry.start + entry.duration).padStart(2, "0")}:40
+                          {formatItemRange(entry)}
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}</span>
@@ -1643,11 +1709,11 @@ export function SchedulePlanner() {
                           rule is the sticky day-header's own bottom edge, and a
                           label straddling it is half-hidden behind the header. */}
                       <span className={cn("absolute right-2 text-[11px] font-medium leading-none tabular-nums text-muted-foreground", hour === hours[0] ? "top-1.5" : "top-0 -translate-y-1/2")}>
-                        {String(hour).padStart(2, "0")}:40
+                        {formatClock(hour * 60 + 40)}
                       </span>
                       {hour === hours[hours.length - 1] ? (
                         <span className="absolute bottom-0 right-2 translate-y-1/2 text-[11px] font-medium leading-none tabular-nums text-muted-foreground">
-                          {String(hour + 1).padStart(2, "0")}:40
+                          {formatClock((hour + 1) * 60 + 40)}
                         </span>
                       ) : null}
                     </div>,
@@ -1736,7 +1802,6 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                   <Button size="icon" variant="ghost" className="size-8" aria-label={t("Sonraki alternatif", "Next option")} onClick={() => showAlternative(alternativeIndex + 1)}><ChevronRightIcon /></Button>
                 </div>
               ) : null}
-              <Button variant="outline" onClick={() => void copyShareLink()}><ClipboardIcon />{t("Paylaşım bağlantısı", "Share link")}</Button>
               <Button variant="outline" onClick={exportCsv}><DownloadIcon />{t("CSV olarak indir", "Download as CSV")}</Button>
               <Button variant="outline" onClick={exportWallpaper}><DownloadIcon />{t("4K duvar kâğıdı", "4K wallpaper")}</Button>
               {favorites.length ? <Button variant="ghost" onClick={nextFavorite}>{t("Sonraki favori", "Next favorite")}</Button> : null}
@@ -1749,5 +1814,5 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1.5"><Label>{label}</Label>{children}</div>; }
+function Field({ id, label, children }: { id: string; label: string; children: React.ReactNode }) { return <div className="space-y-1.5"><Label id={`${id}-label`} htmlFor={id}>{label}</Label>{children}</div>; }
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2"><Label className="leading-5">{label}</Label><Switch aria-label={label} checked={checked} onCheckedChange={onChange} /></div>; }

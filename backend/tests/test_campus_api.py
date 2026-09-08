@@ -8,9 +8,9 @@ particular way.
 import pytest
 from sqlalchemy import select
 
-from app.agents.pool import get_pool
 from app.api.v1 import campus as campus_routes
 from app.campus import service as campus_service
+from app.campus.session_pool import session_count
 from app.campus.verify import VerificationResult
 from app.config import get_settings
 from app.db.models import CampusCredential
@@ -220,7 +220,7 @@ async def test_agent_without_a_connection_gets_no_campus_servers(client):
     assert response.status_code == 200
 
 
-async def test_changing_the_connection_drops_the_resident_agent(client, accept_credentials):
+async def test_changing_the_connection_invalidates_integration_sessions(client, accept_credentials, monkeypatch):
     """A revoked tool has to stop being available immediately, not next session."""
     user_id = new_user_id()
     headers = auth_header(user_id)
@@ -230,7 +230,11 @@ async def test_changing_the_connection_drops_the_resident_agent(client, accept_c
         headers=headers,
         json={"messages": [{"role": "user", "content": "hi"}], "session_id": "t1"},
     )
-    assert get_pool().is_resident(user_id)
+    from unittest.mock import AsyncMock
+
+    retired = AsyncMock()
+    monkeypatch.setattr("app.agents.manager.retire_user", retired)
+    assert session_count(user_id) == 0
 
     response = await client.put(
         "/api/v1/campus/connection",
@@ -241,7 +245,8 @@ async def test_changing_the_connection_drops_the_resident_agent(client, accept_c
     # Applied eagerly, so the student doesn't have to restart anything.
     assert response.json()["needs_restart"] is False
 
-    assert not get_pool().is_resident(user_id)
+    retired.assert_awaited_with(user_id)
+    assert session_count(user_id) == 0
     assert {spec.tool_id for spec in await _specs_for(user_id)} == {"sais"}
 
 
@@ -271,18 +276,18 @@ async def test_a_change_made_while_stopped_is_applied_on_restart(client, accept_
     stopped = await client.post("/api/v1/agents/stop", headers=headers)
     assert stopped.json()["status"] == "stopped"
 
-    # Saved while stopped, so there is no resident agent to drop.
+    # Revision-scoped integrations use saved credentials without a model restart.
     saved = await client.put(
         "/api/v1/campus/connection",
         headers=headers,
         json={"metu_username": "e123456", "metu_password": "hunter2", "enabled_tools": ["sais"]},
     )
-    assert saved.json()["needs_restart"] is True
+    assert saved.json()["needs_restart"] is False
 
     started = await client.post("/api/v1/agents/start", headers=headers)
     assert started.json()["status"] == "running"
 
-    # The rebuild on start reads current credentials, so the toolset is fresh.
+    # Starting execution does not rebuild campus processes; reads use current specs.
     assert {spec.tool_id for spec in await _specs_for(user_id)} == {"sais"}
 
     after = await client.get("/api/v1/campus/connection", headers=headers)

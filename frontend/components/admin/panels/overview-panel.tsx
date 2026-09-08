@@ -137,7 +137,7 @@ function OverviewContent({ data }: { data: Overview }) {
         <Card className="surface-raised border-0 ring-1 ring-foreground/8">
           <CardHeader className="border-b">
             <CardTitle>{pick({ tr: "Kullanılabilirlik", en: "Availability" })}</CardTitle>
-            <CardDescription>{pick({ tr: "Hesap hazırlığı ve bu brokerdaki yerleşik çalışma zamanları.", en: "Account readiness and runtimes resident on this broker." })}</CardDescription>
+            <CardDescription>{pick({ tr: "Hesap hazırlığı ve kampüs entegrasyon oturumları.", en: "Account readiness and leased campus integration sessions." })}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <RatioBar value={data.onboarding_completed} total={data.users} label={pick({ tr: "Kurulum tamamlandı", en: "Onboarding complete" })} />
@@ -150,8 +150,12 @@ function OverviewContent({ data }: { data: Overview }) {
                 </div>
               ))}
               <div className="flex items-center justify-between border-t pt-3">
-                <span className="flex items-center gap-2 text-sm"><BotIcon className="size-4 text-primary" />{pick({ tr: "Şu anda yerleşik", en: "Resident now" })}</span>
-                <span className="font-semibold tabular-nums">{data.resident_agents}</span>
+                <span className="flex items-center gap-2 text-sm"><BotIcon className="size-4 text-primary" />{pick({ tr: "Kampüs bağlantıları", en: "Campus sessions" })}</span>
+                <span className="font-semibold tabular-nums">{data.integration_sessions}</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span>{pick({ tr: "Sırada / çalışan istekler", en: "Queued / running requests" })}</span>
+                <span className="font-semibold tabular-nums">{data.assistant_runs.queued ?? 0} / {data.assistant_runs.running ?? 0}</span>
               </div>
             </div>
             <p className="text-xs text-muted-foreground">{pick({ tr: "Son veri", en: "Fresh at" })}: {formatDate(data.fresh_at, locale)}</p>

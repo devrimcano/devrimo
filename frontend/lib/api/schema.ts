@@ -132,11 +132,59 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Confirm Tool Call
-         * @description Approve or reject an Agno-paused tool call, scoped to its owner and session.
-         */
+        /** Confirm Tool Call */
         post: operations["confirm_tool_call_api_v1_chat_confirmations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Run Status */
+        get: operations["run_status_api_v1_chat_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/runs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resume Run */
+        get: operations["resume_run_api_v1_chat_runs__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Run */
+        post: operations["cancel_run_api_v1_chat_runs__run_id__cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -292,19 +340,59 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read Timetable */
+        /**
+         * Read Timetable
+         * @description Read the canonical plan with the legacy projection at the top level.
+         */
         get: operations["read_timetable_api_v1_schedule_timetable_get"];
         /**
          * Save Timetable
-         * @description Store the week the student is building, so chat can answer about it.
+         * @description Compatibility projection writer for one release of old browsers.
          *
-         *     The planner keeps its full working state in the browser; only this
-         *     projection is sent. Replacing the row outright rather than merging is
-         *     deliberate: the browser holds the truth, and a merge would resurrect a
-         *     course the student had just deleted.
+         *     New clients use PATCH with a typed ``PlanChanges`` request.  This route
+         *     still accepts the old courses/blocks projection and routes it through the
+         *     same revisioned owner service, so it cannot create a second write path.
          */
         put: operations["save_timetable_api_v1_schedule_timetable_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Timetable */
+        patch: operations["update_timetable_api_v1_schedule_timetable_patch"];
+        trace?: never;
+    };
+    "/api/v1/schedule/timetable/canonical": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Canonical Timetable Route
+         * @description Read the complete server-owned planner state.
+         */
+        get: operations["read_canonical_timetable_route_api_v1_schedule_timetable_canonical_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/timetable/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Undo Timetable */
+        post: operations["undo_timetable_api_v1_schedule_timetable_undo_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1290,6 +1378,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/embedding/generations/{generation_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate Embedding Index */
+        post: operations["activate_embedding_index_api_v1_admin_embedding_generations__generation_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/ingestion-jobs": {
         parameters: {
             query?: never;
@@ -1710,6 +1815,8 @@ export interface components {
         };
         /** ChatCompletionsRequestIn */
         ChatCompletionsRequestIn: {
+            /** Idempotency Key */
+            idempotency_key?: string | null;
             /** Messages */
             messages: components["schemas"]["ChatMessageIn"][];
             /** Session Id */
@@ -1807,6 +1914,16 @@ export interface components {
             program_code?: string | null;
             /** Campus */
             campus?: string | null;
+        };
+        /**
+         * CourseSectionsResponse
+         * @description Raw catalog data plus the server-normalized section contract.
+         */
+        CourseSectionsResponse: {
+            /** Data */
+            data: unknown;
+            /** Sections */
+            sections?: components["schemas"]["PlanSection"][];
         };
         /** CurriculumCourseOut */
         CurriculumCourseOut: {
@@ -2026,6 +2143,211 @@ export interface components {
             department?: string | null;
             /** Source Url */
             source_url?: string | null;
+        };
+        /** PlanChanges */
+        PlanChanges: {
+            /**
+             * Operation
+             * @enum {string}
+             */
+            operation: "replace" | "replace_projection" | "set_entries" | "add_entry" | "remove_entry" | "set_pool" | "set_options" | "set_alternatives" | "select_alternative" | "favorite" | "next_favorite" | "clear_pool" | "solve" | "import_legacy";
+            state?: components["schemas"]["PlanState"] | null;
+            entry?: components["schemas"]["PlanEntry"] | null;
+            /** Entry Id */
+            entry_id?: string | null;
+            /** Entries */
+            entries?: components["schemas"]["PlanEntry"][] | null;
+            /** Pool */
+            pool?: components["schemas"]["PlanCourse"][] | null;
+            /** Sections */
+            sections?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                }[];
+            } | null;
+            /** Empty Days */
+            empty_days?: ("Mon" | "Tue" | "Wed" | "Thu" | "Fri")[] | null;
+            /** Avoid Conflicts */
+            avoid_conflicts?: boolean | null;
+            /** Ignore Constraints */
+            ignore_constraints?: boolean | null;
+            /** Alternatives */
+            alternatives?: components["schemas"]["PlanEntry"][][] | null;
+            /** Alternative Index */
+            alternative_index?: number | null;
+            /** Projection */
+            projection?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** PlanCourse */
+        PlanCourse: {
+            /** Code */
+            code: string;
+            /**
+             * Name
+             * @default
+             */
+            name?: string;
+            /**
+             * Credits
+             * @default 0
+             */
+            credits?: number;
+            /** Raw Code */
+            raw_code?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** PlanEntry */
+        PlanEntry: {
+            /** Id */
+            id: string;
+            /** Code */
+            code: string;
+            /**
+             * Name
+             * @default
+             */
+            name?: string;
+            /**
+             * Section
+             * @default
+             */
+            section?: string;
+            /**
+             * Credits
+             * @default 0
+             */
+            credits?: number;
+            /**
+             * Color
+             * @default 0
+             */
+            color?: number;
+            /**
+             * Kind
+             * @default course
+             * @enum {string}
+             */
+            kind?: "course" | "block";
+            /**
+             * Instructor
+             * @default
+             */
+            instructor?: string;
+            /**
+             * Day
+             * @enum {string}
+             */
+            day: "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
+            /** Start Minute */
+            start_minute: number;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /**
+             * Room
+             * @default
+             */
+            room?: string;
+        };
+        /** PlanMeeting */
+        PlanMeeting: {
+            /**
+             * Day
+             * @enum {string}
+             */
+            day: "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
+            /** Start Minute */
+            start_minute: number;
+            /** Duration Minutes */
+            duration_minutes: number;
+            /**
+             * Room
+             * @default
+             */
+            room?: string;
+        };
+        /**
+         * PlanSection
+         * @description Catalog section returned to planner clients in one typed shape.
+         */
+        PlanSection: {
+            /** Section */
+            section: string;
+            /**
+             * Instructor
+             * @default
+             */
+            instructor?: string;
+            /** Meetings */
+            meetings?: components["schemas"]["PlanMeeting"][];
+            /**
+             * Constraint
+             * @default
+             */
+            constraint?: string;
+            /** Eligible */
+            eligible?: boolean | null;
+            /**
+             * Reason
+             * @default
+             */
+            reason?: string;
+        };
+        /**
+         * PlanState
+         * @description All student-owned planner state for one academic term.
+         */
+        PlanState: {
+            /** Entries */
+            entries?: components["schemas"]["PlanEntry"][];
+            /**
+             * Department
+             * @default
+             */
+            department?: string;
+            /**
+             * Department Label
+             * @default
+             */
+            department_label?: string;
+            /** Empty Days */
+            empty_days?: ("Mon" | "Tue" | "Wed" | "Thu" | "Fri")[];
+            /**
+             * Avoid Conflicts
+             * @default true
+             */
+            avoid_conflicts?: boolean;
+            /**
+             * Ignore Constraints
+             * @default false
+             */
+            ignore_constraints?: boolean;
+            /** Pool */
+            pool?: components["schemas"]["PlanCourse"][];
+            /** Sections */
+            sections?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                }[];
+            };
+            /** Alternatives */
+            alternatives?: components["schemas"]["PlanEntry"][][];
+            /**
+             * Alternative Index
+             * @default 0
+             */
+            alternative_index?: number;
+            /** Favorites */
+            favorites?: components["schemas"]["PlanEntry"][][];
+            /**
+             * Favorite Index
+             * @default -1
+             */
+            favorite_index?: number;
+        } & {
+            [key: string]: unknown;
         };
         /** PolicyIn */
         PolicyIn: {
@@ -2378,6 +2700,24 @@ export interface components {
              */
             room?: string;
         };
+        /** TimetableUndoIn */
+        TimetableUndoIn: {
+            /** Expected Revision */
+            expected_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /**
+         * TimetableUpdateIn
+         * @description One explicit, revision-checked update to the canonical plan.
+         */
+        TimetableUpdateIn: {
+            /** Expected Revision */
+            expected_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            changes: components["schemas"]["PlanChanges"];
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -2565,6 +2905,101 @@ export interface operations {
                 "application/json": components["schemas"]["ChatConfirmationIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_status_api_v1_chat_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_run_api_v1_chat_runs__run_id__events_get: {
+        parameters: {
+            query?: {
+                after?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_run_api_v1_chat_runs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -2893,7 +3328,9 @@ export interface operations {
     };
     read_timetable_api_v1_schedule_timetable_get: {
         parameters: {
-            query?: never;
+            query?: {
+                term?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2911,6 +3348,15 @@ export interface operations {
                     };
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     save_timetable_api_v1_schedule_timetable_put: {
@@ -2923,6 +3369,113 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TimetableIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_timetable_api_v1_schedule_timetable_patch: {
+        parameters: {
+            query: {
+                term: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimetableUpdateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_canonical_timetable_route_api_v1_schedule_timetable_canonical_get: {
+        parameters: {
+            query: {
+                term: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_timetable_api_v1_schedule_timetable_undo_post: {
+        parameters: {
+            query: {
+                term: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimetableUndoIn"];
             };
         };
         responses: {
@@ -3065,7 +3618,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CourseSectionsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4734,6 +5287,7 @@ export interface operations {
                 q: string;
                 limit?: number;
                 source_id?: string | null;
+                generation_id?: string | null;
                 language?: ("tr" | "en") | null;
                 record_type?: string | null;
             };
@@ -4783,6 +5337,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    activate_embedding_index_api_v1_admin_embedding_generations__generation_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                generation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

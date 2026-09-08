@@ -14,14 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin.audit import record_event
 from app.admin.auth import AdminPermission, AdminPrincipal, get_admin_principal, require
 from app.admin.cleanup import purge_agno_user
-from app.admin.directory import METU_ID, ensure_metu
+from app.admin.directory import METU_ID, ensure_metu, synchronize_directory
 from app.admin.schemas import AgentActionIn, DeleteUserIn, InviteIn, MembershipIn, ReasonIn, RuntimeSettingsIn
 from app.admin.supabase import SupabaseAdmin, parse_auth_time
 from app.agents import manager
-from app.agents.pool import get_pool
 from app.agents.runtime import get_runtime_config
+from app.assistant.models import AssistantRun
 from app.campus.catalog import CAMPUS_TOOLS
 from app.campus.manifest import commits_by_slug
+from app.campus.session_pool import retire_user, session_capacity, session_count
 from app.config import get_settings
 from app.db.models import (
     AccountDirectory,
@@ -67,6 +68,25 @@ def _decode_cursor(value: str) -> tuple[datetime, UUID]:
 
 def _scope(principal: AdminPrincipal):
     return AccountDirectory.organization_id == principal.organization_id if principal.organization_id else text("1=1")
+
+
+async def _integration_count(principal: AdminPrincipal, db: AsyncSession) -> int:
+    if principal.organization_id is None:
+        return session_count()
+    users = await db.scalars(select(AccountDirectory.user_id).where(_scope(principal)))
+    return sum(session_count(user_id) for user_id in users)
+
+
+async def _run_counts(principal: AdminPrincipal, db: AsyncSession) -> dict:
+    rows = (
+        await db.execute(
+            select(AssistantRun.status, func.count(AssistantRun.id))
+            .join(AccountDirectory, AccountDirectory.user_id == AssistantRun.user_id)
+            .where(_scope(principal))
+            .group_by(AssistantRun.status)
+        )
+    ).all()
+    return dict(rows)
 
 
 async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
@@ -144,9 +164,10 @@ async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
     ).all()
     tokens_by_role = {str(role): int(tokens or 0) for role, tokens in role_rows}
     runtime = await get_runtime_config(db)
-    estimated_cost = float(row.input_tokens or 0) * runtime.input_token_price + float(
-        row.output_tokens or 0
-    ) * runtime.output_token_price
+    estimated_cost = (
+        float(row.input_tokens or 0) * runtime.input_token_price
+        + float(row.output_tokens or 0) * runtime.output_token_price
+    )
     return {
         "runs": int(row.runs or 0),
         "input_tokens": int(row.input_tokens or 0),
@@ -224,7 +245,8 @@ async def overview(
         "onboarding_completed": totals[2] or 0,
         "campus_connected": totals[3] or 0,
         "agents": statuses,
-        "resident_agents": get_pool().size(),
+        "integration_sessions": await _integration_count(principal, db),
+        "assistant_runs": await _run_counts(principal, db),
         "usage": usage,
         "attention": [
             {
@@ -368,7 +390,7 @@ async def user_detail(
         "agent": {
             "status": agent.status.value,
             "last_active_at": _iso(agent.last_active_at),
-            "resident": get_pool().is_resident(user_id),
+            "integration_connected": bool(session_count(user_id)),
             "has_error": bool(agent.error_detail),
         }
         if agent
@@ -441,8 +463,11 @@ async def suspend_user(
     account.status = AccountStatus.suspended
     account.suspended_at = datetime.now(UTC)
     account.suspended_reason = body.reason
-    await db.commit()  # local deny takes effect before the remote ban
-    await get_pool().invalidate(user_id)
+    from app.assistant.queue import cancel_account_runs
+
+    await cancel_account_runs(db, user_id)
+    await db.commit()  # local deny and cancellation precede the remote ban
+    await retire_user(user_id)
     result = "success"
     try:
         await SupabaseAdmin().update_user(user_id, ban_duration="876000h")
@@ -537,10 +562,13 @@ async def delete_user(
         if (super_count or 0) <= 1 and not settings.admin_bootstrap_ids:
             raise HTTPException(status.HTTP_409_CONFLICT, "The last super admin cannot be deleted")
     account.status = AccountStatus.deletion_pending
+    from app.assistant.queue import cancel_account_runs
+
+    await cancel_account_runs(db, user_id)
     await db.commit()
     try:
         await SupabaseAdmin().delete_user(user_id)
-        await get_pool().invalidate(user_id)
+        await retire_user(user_id)
         await purge_agno_user(str(user_id))
         await db.execute(delete(ChatSession).where(ChatSession.user_id == user_id))
         await db.execute(delete(CampusCredential).where(CampusCredential.user_id == user_id))
@@ -606,7 +634,7 @@ async def agents(
                 "email": email,
                 "display_name": name,
                 "status": agent.status.value,
-                "resident": get_pool().is_resident(agent.user_id),
+                "integration_connected": bool(session_count(agent.user_id)),
                 "last_active_at": _iso(agent.last_active_at),
                 "has_error": bool(agent.error_detail),
             }
@@ -633,7 +661,7 @@ async def agent_action(
     elif body.action == "destroy":
         await manager.destroy(db, agent)
     else:
-        await get_pool().invalidate(user_id)
+        await retire_user(user_id)
         agent.status = AgentStatus.running
         agent.error_detail = None
         await db.commit()
@@ -895,7 +923,6 @@ async def put_runtime_settings(
     row.revision = (row.revision or 0) + 1
     row.updated_by = principal.user.id
     await db.commit()
-    await get_pool().close_all()
     after = (await get_runtime_config(db)).as_dict()
     await record_event(
         db,
@@ -922,29 +949,7 @@ async def sync_directory_endpoint(
 
 
 async def sync_directory(db: AsyncSession) -> int:
-    await ensure_metu(db)
-    admin = SupabaseAdmin()
-    users: list[dict] = []
-    page = 1
-    while True:
-        batch = await admin.list_users(page=page, per_page=1000)
-        users.extend(batch)
-        if len(batch) < 1000:
-            break
-        page += 1
-    for auth_user in users:
-        user_id = UUID(auth_user["id"])
-        account = await db.get(AccountDirectory, user_id)
-        email = auth_user.get("email")
-        if account is None:
-            account = AccountDirectory(user_id=user_id, organization_id=METU_ID)
-            db.add(account)
-        if account.status != AccountStatus.deleted:
-            account.email = email
-            account.email_normalized = email.strip().lower() if email else None
-            account.auth_created_at = parse_auth_time(auth_user.get("created_at"))
-    await db.commit()
-    return len(users)
+    return await synchronize_directory(db)
 
 
 @router.get("/system")
@@ -966,8 +971,9 @@ async def system_health(
         "posthog_dashboard_url": settings.posthog_dashboard_url or None,
         "supabase_admin": "configured" if settings.supabase_secret_key else "not_configured",
         "agent_runtime": settings.agent_runtime,
-        "resident_agents": get_pool().size(),
-        "pool_capacity": settings.agent_pool_max_size,
+        "integration_sessions": await _integration_count(principal, db),
+        "assistant_runs": await _run_counts(principal, db),
+        "integration_capacity": session_capacity(),
         "campus_commits": commits_by_slug(settings.campus_mcp_root),
         "checked_at": datetime.now(UTC).isoformat(),
     }

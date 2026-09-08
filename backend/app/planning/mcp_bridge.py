@@ -15,8 +15,6 @@ from uuid import UUID
 from agno.tools.mcp import MCPTools
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.toolset import close_toolkits, connect_campus_toolkits
-from app.campus import service as campus_service
 from app.campus.eligibility import grade_token, tr_upper
 from app.campus.mcp_results import mcp_payload, parse_json_document
 from app.config import get_settings
@@ -631,23 +629,10 @@ async def refresh_from_sais(
 
 @asynccontextmanager
 async def _campus_session(user_id: UUID) -> AsyncIterator[list[MCPTools]]:
-    """Connect this student's campus servers for one read outside a turn.
-
-    The pool owns the long-lived connections, but it only builds them for a
-    chat turn. This is the short-lived equivalent for a request that has to
-    read SAIS without one: it spawns the servers, yields them, and always
-    closes them, because a leaked subprocess holds the student's credentials
-    in memory.
-    """
-    settings = get_settings()
-    async with SessionLocal() as db:
-        specs = await campus_service.campus_server_specs(db, user_id)
-    # Same transient spawn failure as the pool's path, so the same retry.
-    connected = await connect_campus_toolkits(specs, timeout_seconds=settings.campus_sync_timeout_seconds)
-    try:
+    """Lease only SAIS, checking current consent before each refresh."""
+    from app.campus.sessions import integration_session
+    async with integration_session(user_id, "sais") as connected:
         yield connected
-    finally:
-        await close_toolkits(connected)
 
 
 async def sync_student_context_from_sais(user_id: UUID) -> bool:

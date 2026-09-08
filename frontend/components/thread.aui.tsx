@@ -78,7 +78,10 @@ export type ThreadComponents = {
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  onCancelRun?: () => void;
 };
+
+const CancelRunContext = createContext<(() => void) | undefined>(undefined);
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
@@ -122,13 +125,16 @@ const ThreadHistorySkeleton: FC = () => (
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
+  onCancelRun,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
+    <CancelRunContext.Provider value={onCancelRun}>
     <ThreadComponentsContext.Provider value={components}>
       <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
     </ThreadComponentsContext.Provider>
+    </CancelRunContext.Provider>
   );
 };
 
@@ -240,6 +246,7 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
 };
 
 const ComposerAction: FC = () => {
+  const cancelRun = useContext(CancelRunContext);
   const { pick } = useLocale();
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
@@ -257,7 +264,13 @@ const ComposerAction: FC = () => {
           <ComposerPrimitive.Send render={<TooltipIconButton tooltip={pick({ tr: "Mesajı gönder", en: "Send message" })} side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-7 rounded-full" aria-label={pick({ tr: "Mesajı gönder", en: "Send message" })} />}><ArrowUpIcon className="aui-composer-send-icon size-4" /></ComposerPrimitive.Send>
         </AuiIf>
         <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel render={<Button type="button" variant="default" size="icon" className="aui-composer-cancel size-7 rounded-full" aria-label={pick({ tr: "Yanıtı durdur", en: "Stop generating" })} />}><SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" /></ComposerPrimitive.Cancel>
+          {cancelRun ? (
+            <Button type="button" onClick={cancelRun} variant="default" size="icon" className="aui-composer-cancel size-7 rounded-full" aria-label={pick({ tr: "Yanıtı durdur", en: "Stop generating" })}>
+              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
+            </Button>
+          ) : (
+            <ComposerPrimitive.Cancel render={<Button type="button" variant="default" size="icon" className="aui-composer-cancel size-7 rounded-full" aria-label={pick({ tr: "Yanıtı durdur", en: "Stop generating" })} />}><SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" /></ComposerPrimitive.Cancel>
+          )}
         </AuiIf>
       </div>
     </div>

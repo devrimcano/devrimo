@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.config import get_settings
+from app.db.engine import postgres_connect_args
 from app.logging import configure_logging
 from app.observability.client import shutdown
 from app.observability.logs import shutdown as shutdown_logs
@@ -61,7 +62,9 @@ async def execute(args):
             return {"dry_run": True, "discovery": discovery, "profiles": previews, "requests": client.requests}
     if not settings.database_url.startswith("postgresql+"):
         raise ImportFailure("AVESIS requires the project's PostgreSQL DATABASE_URL; SQLite is not supported")
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        settings.database_url, pool_pre_ping=True, connect_args=postgres_connect_args(settings.database_url)
+    )
     try:
         if args.command == "status":
             async with AsyncSession(engine) as db:

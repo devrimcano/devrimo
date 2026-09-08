@@ -36,17 +36,17 @@ export function AgentsPanel({ principal, title, description }: { principal: Admi
   const client = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
-  const [residency, setResidency] = useState("all");
+  const [connectionStatus, setConnectionStatus] = useState("all");
   const [selection, setSelection] = useState<{ agent: AgentRow; action: AgentAction } | null>(null);
   const query = useQuery({ queryKey: ["admin", "agents"], queryFn: () => adminGet<{ items: AgentRow[] }>("agents") });
   const agents = useMemo(() => (query.data?.items ?? []).filter((agent) => {
     const needle = search.trim().toLowerCase();
     const matchesSearch = !needle || agent.email?.toLowerCase().includes(needle) || agent.display_name?.toLowerCase().includes(needle) || agent.user_id.includes(needle);
     const matchesStatus = status === "all" || agent.status === status || (status === "error" && agent.has_error);
-    const matchesResidency = residency === "all" || (residency === "resident" ? agent.resident : !agent.resident);
-    return matchesSearch && matchesStatus && matchesResidency;
-  }), [query.data?.items, residency, search, status]);
-  const hasFilters = search || status !== "all" || residency !== "all";
+    const matchesConnection = connectionStatus === "all" || (connectionStatus === "connected" ? agent.integration_connected : !agent.integration_connected);
+    return matchesSearch && matchesStatus && matchesConnection;
+  }), [query.data?.items, connectionStatus, search, status]);
+  const hasFilters = search || status !== "all" || connectionStatus !== "all";
 
   return (
     <>
@@ -58,11 +58,11 @@ export function AgentsPanel({ principal, title, description }: { principal: Admi
             <SelectTrigger className="h-9 w-full bg-card sm:w-44"><SelectValue /></SelectTrigger>
             <SelectContent align="start"><SelectItem value="all">{pick({ tr: "Tüm durumlar", en: "All statuses" })}</SelectItem><SelectItem value="running">{pick({ tr: "Çalışıyor", en: "Running" })}</SelectItem><SelectItem value="stopped">{pick({ tr: "Durduruldu", en: "Stopped" })}</SelectItem><SelectItem value="error">{pick({ tr: "Hata", en: "Error" })}</SelectItem></SelectContent>
           </Select>
-          <Select value={residency} onValueChange={(value) => setResidency(value ?? "all")}>
+          <Select value={connectionStatus} onValueChange={(value) => setConnectionStatus(value ?? "all")}>
             <SelectTrigger className="h-9 w-full bg-card sm:w-44"><SelectValue /></SelectTrigger>
-            <SelectContent align="start"><SelectItem value="all">{pick({ tr: "Tüm çalışma zamanları", en: "All runtimes" })}</SelectItem><SelectItem value="resident">{pick({ tr: "Yerleşik", en: "Resident" })}</SelectItem><SelectItem value="remote">{pick({ tr: "Yerleşik değil", en: "Not resident" })}</SelectItem></SelectContent>
+            <SelectContent align="start"><SelectItem value="all">{pick({ tr: "Tüm bağlantılar", en: "All connections" })}</SelectItem><SelectItem value="connected">{pick({ tr: "Bağlı", en: "Connected" })}</SelectItem><SelectItem value="disconnected">{pick({ tr: "Bağlı değil", en: "Disconnected" })}</SelectItem></SelectContent>
           </Select>
-          {hasFilters ? <Button variant="ghost" onClick={() => { setSearch(""); setStatus("all"); setResidency("all"); }}><RotateCcwIcon />{pick({ tr: "Temizle", en: "Clear" })}</Button> : null}
+          {hasFilters ? <Button variant="ghost" onClick={() => { setSearch(""); setStatus("all"); setConnectionStatus("all"); }}><RotateCcwIcon />{pick({ tr: "Temizle", en: "Clear" })}</Button> : null}
         </div>
 
         {query.isLoading ? <Skeleton className="h-80 rounded-xl" /> : query.error ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : (
@@ -72,11 +72,11 @@ export function AgentsPanel({ principal, title, description }: { principal: Admi
                 <>
                   <div className="hidden md:block">
                     <Table>
-                      <TableHeader className="bg-muted/45"><TableRow><TableHead className="pl-4">{pick({ tr: "Kullanıcı", en: "User" })}</TableHead><TableHead>{pick({ tr: "Durum", en: "Status" })}</TableHead><TableHead>{pick({ tr: "Çalışma zamanı", en: "Runtime" })}</TableHead><TableHead>{pick({ tr: "Son etkinlik", en: "Last active" })}</TableHead><TableHead className="pr-4 text-right">{pick({ tr: "İşlemler", en: "Actions" })}</TableHead></TableRow></TableHeader>
-                      <TableBody>{agents.map((agent) => <TableRow key={agent.user_id}><TableCell className="max-w-80 pl-4"><p className="truncate font-medium">{agent.display_name || agent.email}</p><p className="truncate text-xs text-muted-foreground">{agent.email}</p></TableCell><TableCell><StatusBadge value={agent.has_error ? "error" : agent.status} /></TableCell><TableCell>{agent.resident ? <Badge variant="secondary">{pick({ tr: "Yerleşik", en: "Resident" })}</Badge> : <span className="text-muted-foreground">{pick({ tr: "Uzak", en: "Remote" })}</span>}</TableCell><TableCell className="text-muted-foreground">{formatDate(agent.last_active_at, locale)}</TableCell><TableCell className="pr-4"><AgentButtons agent={agent} principal={principal} onAction={(action) => setSelection({ agent, action })} /></TableCell></TableRow>)}</TableBody>
+                      <TableHeader className="bg-muted/45"><TableRow><TableHead className="pl-4">{pick({ tr: "Kullanıcı", en: "User" })}</TableHead><TableHead>{pick({ tr: "Durum", en: "Status" })}</TableHead><TableHead>{pick({ tr: "Kampüs bağlantısı", en: "Campus connection" })}</TableHead><TableHead>{pick({ tr: "Son etkinlik", en: "Last active" })}</TableHead><TableHead className="pr-4 text-right">{pick({ tr: "İşlemler", en: "Actions" })}</TableHead></TableRow></TableHeader>
+                      <TableBody>{agents.map((agent) => <TableRow key={agent.user_id}><TableCell className="max-w-80 pl-4"><p className="truncate font-medium">{agent.display_name || agent.email}</p><p className="truncate text-xs text-muted-foreground">{agent.email}</p></TableCell><TableCell><StatusBadge value={agent.has_error ? "error" : agent.status} /></TableCell><TableCell>{agent.integration_connected ? <Badge variant="secondary">{pick({ tr: "Bağlı", en: "Connected" })}</Badge> : <span className="text-muted-foreground">{pick({ tr: "Bağlı değil", en: "Disconnected" })}</span>}</TableCell><TableCell className="text-muted-foreground">{formatDate(agent.last_active_at, locale)}</TableCell><TableCell className="pr-4"><AgentButtons agent={agent} principal={principal} onAction={(action) => setSelection({ agent, action })} /></TableCell></TableRow>)}</TableBody>
                     </Table>
                   </div>
-                  <div className="divide-y md:hidden">{agents.map((agent) => <div key={agent.user_id} className="space-y-3 p-4"><div><p className="font-medium">{agent.display_name || agent.email}</p><p className="text-xs text-muted-foreground">{agent.email}</p></div><div className="flex flex-wrap gap-2"><StatusBadge value={agent.has_error ? "error" : agent.status} />{agent.resident ? <Badge variant="secondary">{pick({ tr: "Yerleşik", en: "Resident" })}</Badge> : null}</div><p className="text-xs text-muted-foreground">{pick({ tr: "Son etkinlik", en: "Last active" })}: {formatDate(agent.last_active_at, locale)}</p><AgentButtons agent={agent} principal={principal} onAction={(action) => setSelection({ agent, action })} mobile /></div>)}</div>
+                  <div className="divide-y md:hidden">{agents.map((agent) => <div key={agent.user_id} className="space-y-3 p-4"><div><p className="font-medium">{agent.display_name || agent.email}</p><p className="text-xs text-muted-foreground">{agent.email}</p></div><div className="flex flex-wrap gap-2"><StatusBadge value={agent.has_error ? "error" : agent.status} />{agent.integration_connected ? <Badge variant="secondary">{pick({ tr: "Bağlı", en: "Connected" })}</Badge> : null}</div><p className="text-xs text-muted-foreground">{pick({ tr: "Son etkinlik", en: "Last active" })}: {formatDate(agent.last_active_at, locale)}</p><AgentButtons agent={agent} principal={principal} onAction={(action) => setSelection({ agent, action })} mobile /></div>)}</div>
                 </>
               ) : <EmptyState title={pick({ tr: "Eşleşen ajan yok", en: "No matching agents" })} description={pick({ tr: "Filtreleri değiştirerek tekrar dene.", en: "Try changing the filters." })} icon={<BotIcon className="size-4" />} />}
             </CardContent>

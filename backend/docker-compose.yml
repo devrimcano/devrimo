@@ -21,16 +21,67 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build: .
+    restart: "no"
+    command: ["sh", "-c", "alembic upgrade head && python -m app.db.bootstrap_local"]
+    environment:
+      ENVIRONMENT: development
+      DEVRIMO_ENV_FILE: ""
+      DATABASE_URL: postgresql+asyncpg://devrimo:devrimo@postgres:5432/devrimo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [devrimo-internal]
+
   broker:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://devrimo:devrimo@postgres:5432/devrimo
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: broker
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000}"
+      DATABASE_URL: postgresql+asyncpg://devrimo_api_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: api
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: postgresql+asyncpg://devrimo_assistant_local:devrimo_local@postgres:5432/devrimo
+      WORKSPACE_GATEWAY_ALLOWED_HOSTS: broker:8000
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_JWT_SECRET: "${SUPABASE_JWT_SECRET:-}"
+      SUPABASE_SECRET_KEY: "${SUPABASE_SECRET_KEY:-}"
+      ADMIN_BOOTSTRAP_USER_IDS: "${ADMIN_BOOTSTRAP_USER_IDS:-}"
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:-}"
+      AGENT_RUNTIME: "${AGENT_RUNTIME:-agno}"
+      AGENT_PROFILE: "${AGENT_PROFILE:-scholar}"
+      AGENT_MODEL: "${AGENT_MODEL:-muse-spark-1.2-contributor}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_PERSONAL_API_KEY: "${POSTHOG_PERSONAL_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      POSTHOG_INPUT_TOKEN_PRICE: "${POSTHOG_INPUT_TOKEN_PRICE:-0}"
+      POSTHOG_OUTPUT_TOKEN_PRICE: "${POSTHOG_OUTPUT_TOKEN_PRICE:-0}"
       # The local .env uses a relative path for non-container development;
       # inside Docker MCP working directories must use the writable volume.
+      CAMPUS_MCP_ROOT: "${CAMPUS_MCP_ROOT:-/opt/mcp}"
       CAMPUS_STATE_ROOT: /var/lib/devrimo/campus
+      CAMPUS_MCP_TIMEOUT_SECONDS: "${CAMPUS_MCP_TIMEOUT_SECONDS:-30}"
+      CAMPUS_SYNC_TIMEOUT_SECONDS: "${CAMPUS_SYNC_TIMEOUT_SECONDS:-120}"
+      SAIS_OPTIONAL_READ_SECONDS: "${SAIS_OPTIONAL_READ_SECONDS:-12}"
+      CAMPUS_SESSION_IDLE_SECONDS: "${CAMPUS_SESSION_IDLE_SECONDS:-300}"
+      CAMPUS_SESSION_MAX_SIZE: "${CAMPUS_SESSION_MAX_SIZE:-256}"
+      CAMPUS_CONTEXT_SYNC_ON_CONNECT: "${CAMPUS_CONTEXT_SYNC_ON_CONNECT:-true}"
+      COURSE_INFO_SESSION_CACHE: "${COURSE_INFO_SESSION_CACHE:-true}"
+      KNOWLEDGE_FETCH_TIMEOUT_SECONDS: "${KNOWLEDGE_FETCH_TIMEOUT_SECONDS:-20}"
+      KNOWLEDGE_FETCH_MAX_BYTES: "${KNOWLEDGE_FETCH_MAX_BYTES:-5000000}"
+      KNOWLEDGE_FETCH_USER_AGENT: "${KNOWLEDGE_FETCH_USER_AGENT:-DevrimoCampusIndexer/1.0 (+https://devrimo.app)}"
+      KNOWLEDGE_EMBEDDING_ENABLED: "${KNOWLEDGE_EMBEDDING_ENABLED:-false}"
+      KNOWLEDGE_EMBEDDING_MODEL: "${KNOWLEDGE_EMBEDDING_MODEL:-text-embedding-3-small}"
+      KNOWLEDGE_EMBEDDING_DIMENSIONS: "${KNOWLEDGE_EMBEDDING_DIMENSIONS:-1536}"
+      KNOWLEDGE_EMBEDDING_BASE_URL: "${KNOWLEDGE_EMBEDDING_BASE_URL:-https://api.openai.com/v1}"
+      KNOWLEDGE_EMBEDDING_API_KEY: "${KNOWLEDGE_EMBEDDING_API_KEY:-}"
       # The Agent is constructed with telemetry=False; this is the second
       # belt. Agno otherwise posts run telemetry to os-api.agno.com, and these
       # runs are students' campus conversations.
@@ -44,6 +95,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     healthcheck:
@@ -61,14 +114,14 @@ services:
     networks:
       - devrimo-internal
     volumes:
-      # Per-student MCP working directories (CAMPUS_STATE_ROOT). Servers that
+      # Integration gateway per-student MCP working directories (CAMPUS_STATE_ROOT). Servers that
       # cache a campus session token relative to their CWD write here, so this
       # has to outlive a container restart or every student re-authenticates
       # to ODTÜClass on every deploy.
       - devrimo-campus-state:/var/lib/devrimo/campus
     # The campus MCP servers are subprocesses of this container, so the limits
     # that used to be per-agent-container now apply to the broker as a whole.
-    # AGENT_POOL_MAX_SIZE bounds how many students can be resident at once;
+    # CAMPUS_SESSION_MAX_SIZE bounds reusable authenticated integrations;
     # size these together.
     mem_limit: 4g
     pids_limit: 4096
@@ -81,32 +134,54 @@ services:
   knowledge-worker:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
     command: ["python", "-m", "app.knowledge.worker"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://devrimo:devrimo@postgres:5432/devrimo
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: knowledge
+      DATABASE_URL: postgresql+asyncpg://devrimo_knowledge_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: knowledge
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      KNOWLEDGE_WORKER_POLL_SECONDS: "${KNOWLEDGE_WORKER_POLL_SECONDS:-15}"
+      KNOWLEDGE_WORKER_LEASE_SECONDS: "${KNOWLEDGE_WORKER_LEASE_SECONDS:-120}"
+      KNOWLEDGE_FETCH_TIMEOUT_SECONDS: "${KNOWLEDGE_FETCH_TIMEOUT_SECONDS:-20}"
+      KNOWLEDGE_FETCH_MAX_BYTES: "${KNOWLEDGE_FETCH_MAX_BYTES:-5000000}"
+      KNOWLEDGE_FETCH_USER_AGENT: "${KNOWLEDGE_FETCH_USER_AGENT:-DevrimoCampusIndexer/1.0 (+https://devrimo.app)}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
       AGNO_TELEMETRY: "false"
     depends_on:
-      postgres:
-        condition: service_healthy
-      broker:
-        condition: service_healthy
-    networks:
-      - devrimo-internal
-    security_opt:
-      - no-new-privileges
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
 
   agentos:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
     command: ["python", "-m", "app.agentos.main"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://devrimo:devrimo@postgres:5432/devrimo
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: agentos
+      DATABASE_URL: postgresql+asyncpg://devrimo_assistant_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: assistant
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
       AGENTOS_ENABLED: "true"
       AGENTOS_HOST: "0.0.0.0"
+      AGENTOS_PORT: "${AGENTOS_PORT:-7777}"
+      AGENTOS_JWT_VERIFICATION_KEY: "${AGENTOS_JWT_VERIFICATION_KEY:-}"
+      AGENTOS_JWKS_FILE: "${AGENTOS_JWKS_FILE:-}"
+      AGENTOS_JWT_ALGORITHM: "${AGENTOS_JWT_ALGORITHM:-RS256}"
+      AGENTOS_JWT_AUDIENCE: "${AGENTOS_JWT_AUDIENCE:-devrimo}"
+      AGENTOS_ADMIN_SCOPE: "${AGENTOS_ADMIN_SCOPE:-agentos:admin}"
+      AGENTOS_CORS_ORIGINS: "${AGENTOS_CORS_ORIGINS:-https://os.agno.com}"
       AGNO_TELEMETRY: "false"
     ports:
       # Host-only by default. Put this behind authenticated TLS/VPN when the
@@ -122,10 +197,211 @@ services:
     security_opt:
       - no-new-privileges
 
+  embedding-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.knowledge.embedding_worker"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: embedding
+      DATABASE_URL: postgresql+asyncpg://devrimo_embedding_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: embedding
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:-}"
+      KNOWLEDGE_EMBEDDING_ENABLED: "${KNOWLEDGE_EMBEDDING_ENABLED:-false}"
+      KNOWLEDGE_EMBEDDING_MODEL: "${KNOWLEDGE_EMBEDDING_MODEL:-text-embedding-3-small}"
+      KNOWLEDGE_EMBEDDING_DIMENSIONS: "${KNOWLEDGE_EMBEDDING_DIMENSIONS:-1536}"
+      KNOWLEDGE_EMBEDDING_BASE_URL: "${KNOWLEDGE_EMBEDDING_BASE_URL:-https://api.openai.com/v1}"
+      KNOWLEDGE_EMBEDDING_API_KEY: "${KNOWLEDGE_EMBEDDING_API_KEY:-}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+
+  researcher-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.runtime", "researcher"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: researcher
+      DATABASE_URL: postgresql+asyncpg://devrimo_researcher_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: researcher
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      AVESES_PROXY_URL: "${AVESES_PROXY_URL:-}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+
+  directory-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.runtime", "directory"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: directory
+      DATABASE_URL: postgresql+asyncpg://devrimo_directory_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: directory
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_SECRET_KEY: "${SUPABASE_SECRET_KEY:-}"
+      ADMIN_DIRECTORY_SYNC_SECONDS: "${ADMIN_DIRECTORY_SYNC_SECONDS:-300}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+
+  catalog-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.runtime", "catalog"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: catalog
+      DATABASE_URL: postgresql+asyncpg://devrimo_catalog_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: catalog
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:-}"
+      CAMPUS_MCP_ROOT: "${CAMPUS_MCP_ROOT:-/opt/mcp}"
+      CAMPUS_STATE_ROOT: /var/lib/devrimo/campus
+      CAMPUS_MCP_TIMEOUT_SECONDS: "${CAMPUS_MCP_TIMEOUT_SECONDS:-30}"
+      CAMPUS_SYNC_TIMEOUT_SECONDS: "${CAMPUS_SYNC_TIMEOUT_SECONDS:-120}"
+      CAMPUS_SESSION_IDLE_SECONDS: "${CAMPUS_SESSION_IDLE_SECONDS:-300}"
+      CAMPUS_SESSION_MAX_SIZE: "${CAMPUS_SESSION_MAX_SIZE:-256}"
+      COURSE_INFO_SESSION_CACHE: "${COURSE_INFO_SESSION_CACHE:-true}"
+      CATALOG_WARM_ENABLED: "${CATALOG_WARM_ENABLED:-true}"
+      CATALOG_WARM_INTERVAL_SECONDS: "${CATALOG_WARM_INTERVAL_SECONDS:-20}"
+      CATALOG_WARM_JITTER_SECONDS: "${CATALOG_WARM_JITTER_SECONDS:-10}"
+      CATALOG_WARM_DAILY_LIMIT: "${CATALOG_WARM_DAILY_LIMIT:-200}"
+      CATALOG_WARM_COURSES_PER_PASS: "${CATALOG_WARM_COURSES_PER_PASS:-3}"
+      CATALOG_WARM_BATCH: "${CATALOG_WARM_BATCH:-15}"
+      CATALOG_WARM_HOURS: "${CATALOG_WARM_HOURS:-1-7}"
+      CATALOG_WARM_POLL_SECONDS: "${CATALOG_WARM_POLL_SECONDS:-900}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+    volumes:
+      # Catalog warming keeps a separate per-user state tree from the API
+      # gateway, even though both trees are backed by named volumes.
+      - devrimo-campus-catalog-state:/var/lib/devrimo/campus
+
+  retention-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.runtime", "retention"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: retention
+      DATABASE_URL: postgresql+asyncpg://devrimo_catalog_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: catalog
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      SCHEDULE_CACHE_SWEEP_SECONDS: "${SCHEDULE_CACHE_SWEEP_SECONDS:-3600}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+
+  assistant-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.assistant.worker"]
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      RELEASE: "${RELEASE:-}"
+      DEVRIMO_ENV_FILE: ""
+      DEVRIMO_RUNTIME_COMPONENT: assistant
+      DATABASE_URL: postgresql+asyncpg://devrimo_assistant_local:devrimo_local@postgres:5432/devrimo
+      DATABASE_RUNTIME_ROLE: assistant
+      DATABASE_MIGRATION_URL: ""
+      ASSISTANT_DATABASE_URL: ""
+      WORKSPACE_GATEWAY_URL: http://broker:8000/mcp/
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_JWT_SECRET: "${SUPABASE_JWT_SECRET:-}"
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:-}"
+      AGENT_RUNTIME: "${AGENT_RUNTIME:-agno}"
+      AGENT_PROFILE: "${AGENT_PROFILE:-scholar}"
+      AGENT_MODEL: "${AGENT_MODEL:-muse-spark-1.2-contributor}"
+      AGENT_OPENAI_BASE_URL: "${AGENT_OPENAI_BASE_URL:-https://opencode.ai/zen/go/v1}"
+      AGENT_OPENAI_API_KEY: "${AGENT_OPENAI_API_KEY:-}"
+      AGENT_MAX_TOKENS: "${AGENT_MAX_TOKENS:-32768}"
+      AGENT_HISTORY_RUNS: "${AGENT_HISTORY_RUNS:-10}"
+      SCHOLAR_HISTORY_RUNS: "${SCHOLAR_HISTORY_RUNS:-3}"
+      AGENT_TOOL_CALL_LIMIT: "${AGENT_TOOL_CALL_LIMIT:-10}"
+      AGENT_COMPRESS_TOOL_RESULTS: "${AGENT_COMPRESS_TOOL_RESULTS:-false}"
+      AGENT_COMPRESS_TOOL_RESULTS_LIMIT: "${AGENT_COMPRESS_TOOL_RESULTS_LIMIT:-3}"
+      AGENT_LEARNING_ENABLED: "${AGENT_LEARNING_ENABLED:-true}"
+      AGENT_RETRIES: "${AGENT_RETRIES:-2}"
+      AGENT_STORE_EVENTS: "${AGENT_STORE_EVENTS:-false}"
+      AGENT_TRACING_ENABLED: "${AGENT_TRACING_ENABLED:-false}"
+      ASSISTANT_WORKER_CONCURRENCY: "${ASSISTANT_WORKER_CONCURRENCY:-4}"
+      POSTHOG_HOST: "${POSTHOG_HOST:-https://eu.i.posthog.com}"
+      POSTHOG_API_KEY: "${POSTHOG_API_KEY:-}"
+      POSTHOG_PERSONAL_API_KEY: "${POSTHOG_PERSONAL_API_KEY:-}"
+      POSTHOG_ENABLED: "${POSTHOG_ENABLED:-true}"
+      POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
+      POSTHOG_INPUT_TOKEN_PRICE: "${POSTHOG_INPUT_TOKEN_PRICE:-0}"
+      POSTHOG_OUTPUT_TOKEN_PRICE: "${POSTHOG_OUTPUT_TOKEN_PRICE:-0}"
+      AGNO_TELEMETRY: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      broker:
+        condition: service_healthy
+    networks: [devrimo-internal]
+    security_opt: [no-new-privileges]
+
+
 networks:
   devrimo-internal:
-    # Postgres <-> broker. There is no longer a second network: the agents that
-    # used to live on it are now threads and subprocesses inside the broker.
+    # Local development Postgres, API, and independently scoped workers.
+    # Production connects all identities to the one Supabase database.
     #
     # Deliberately no egress allowlist here, despite an earlier note in this
     # file saying one belonged here. Compose can express an allowlist only as an
@@ -162,3 +438,4 @@ networks:
 volumes:
   devrimo-postgres:
   devrimo-campus-state:
+  devrimo-campus-catalog-state:

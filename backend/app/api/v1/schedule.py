@@ -14,8 +14,10 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,11 +41,18 @@ from app.campus.warmer import record_wanted_courses
 from app.core.digest import owner_digest, stable_digest
 from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
-from app.db.models import StudentAcademicSnapshot, StudentContext, StudentTimetable
+from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability.client import report_exception
+from app.planning.catalog import normalize_sections
 from app.planning.mcp_bridge import sync_student_context_from_sais
+from app.planning.models import PlanChanges, PlanConflictError, PlanSection, PlanValidationError
+from app.planning.service import current_term
+from app.planning.workspace import projection_from_state
+from app.planning.workspace import read_timetable as read_canonical_timetable
+from app.planning.workspace import undo_timetable as undo_canonical_timetable
+from app.planning.workspace import update_timetable as update_canonical_timetable
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -95,6 +104,13 @@ class CurriculumPlanResponse(BaseModel):
     source: str
     cache_hit: bool
     duration_ms: int
+
+
+class CourseSectionsResponse(BaseModel):
+    """Raw catalog data plus the server-normalized section contract."""
+
+    data: Any
+    sections: list[PlanSection] = Field(default_factory=list)
 
 async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
     """The department to plan against: what the client sent, else what SAIS said.
@@ -244,41 +260,137 @@ class TimetableIn(BaseModel):
     busy_blocks: list[TimetableBlock] = Field(default_factory=list, max_length=20)
 
 
+class TimetableUpdateIn(BaseModel):
+    """One explicit, revision-checked update to the canonical plan."""
+
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    changes: PlanChanges
+
+
+class TimetableUndoIn(BaseModel):
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+def _canonical_response(envelope) -> dict[str, Any]:
+    """Expose the resource envelope plus the old chat projection."""
+
+    body = envelope.model_dump(mode="json")
+    projection = projection_from_state(envelope.state)
+    body.update(projection)
+    return body
+
+
+def _conflict_response(exc: PlanConflictError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "error": "revision_conflict",
+            "detail": str(exc),
+            "current": _canonical_response(exc.current),
+        },
+    )
+
+
 @router.put("/timetable")
 async def save_timetable(
     body: TimetableIn,
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Store the week the student is building, so chat can answer about it.
+    """Compatibility projection writer for one release of old browsers.
 
-    The planner keeps its full working state in the browser; only this
-    projection is sent. Replacing the row outright rather than merging is
-    deliberate: the browser holds the truth, and a merge would resurrect a
-    course the student had just deleted.
+    New clients use PATCH with a typed ``PlanChanges`` request.  This route
+    still accepts the old courses/blocks projection and routes it through the
+    same revisioned owner service, so it cannot create a second write path.
     """
-    row = await db.get(StudentTimetable, user.id)
-    payload = {"courses": [course.model_dump() for course in body.courses],
-               "busy_blocks": [block.model_dump() for block in body.busy_blocks]}
-    if row is None:
-        row = StudentTimetable(user_id=user.id, term=body.term, payload=payload)
-        db.add(row)
-    else:
-        row.term = body.term
-        row.payload = payload
-    await db.commit()
-    return {"saved": True, "courses": len(body.courses)}
+    current = await read_canonical_timetable(db, user.id, body.term)
+    payload = {
+        "term": body.term,
+        "courses": [course.model_dump() for course in body.courses],
+        "busy_blocks": [block.model_dump() for block in body.busy_blocks],
+    }
+    try:
+        envelope = await update_canonical_timetable(
+            db,
+            user.id,
+            body.term,
+            PlanChanges(operation="replace_projection", projection=payload),
+            current.revision,
+            f"legacy-put:{uuid4()}",
+        )
+    except PlanConflictError as exc:  # pragma: no cover - current was just read
+        return _conflict_response(exc)
+    return {"saved": True, "courses": len(body.courses), **_canonical_response(envelope)}
+
+
+@router.get("/timetable/canonical")
+async def read_canonical_timetable_route(
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Read the complete server-owned planner state."""
+
+    return _canonical_response(await read_canonical_timetable(db, user.id, term))
+
+
+@router.patch("/timetable")
+async def update_timetable(
+    body: TimetableUpdateIn,
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        envelope = await update_canonical_timetable(
+            db,
+            user.id,
+            term,
+            body.changes,
+            body.expected_revision,
+            body.idempotency_key,
+        )
+    except PlanConflictError as exc:
+        return _conflict_response(exc)
+    except PlanValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    return _canonical_response(envelope)
+
+
+@router.post("/timetable/undo")
+async def undo_timetable(
+    body: TimetableUndoIn,
+    term: str = Query(min_length=3, max_length=32),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        envelope = await undo_canonical_timetable(
+            db,
+            user.id,
+            term,
+            body.expected_revision,
+            body.idempotency_key,
+        )
+    except PlanConflictError as exc:
+        return _conflict_response(exc)
+    except PlanValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    return _canonical_response(envelope)
 
 
 @router.get("/timetable")
 async def read_timetable(
+    term: str | None = Query(default=None, min_length=3, max_length=32),
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    row = await db.get(StudentTimetable, user.id)
-    if row is None:
-        return {"term": None, "courses": [], "busy_blocks": [], "updated_at": None}
-    return {"term": row.term, **row.payload, "updated_at": row.updated_at}
+    """Read the canonical plan with the legacy projection at the top level."""
+
+    requested_term = term or current_term()
+    return _canonical_response(await read_canonical_timetable(db, user.id, requested_term))
 
 
 @router.get("/departments/search")
@@ -534,7 +646,7 @@ def _credit_value(raw: Any) -> float:
     return float(match.group(0)) if match else 0.0
 
 
-@router.get("/courses/{course_code}")
+@router.get("/courses/{course_code}", response_model=CourseSectionsResponse)
 async def course_sections(
     course_code: str = Path(min_length=3, max_length=20),
     department: str = Query(min_length=1, max_length=20),
@@ -546,15 +658,14 @@ async def course_sections(
         compact_course, lookup_department = await _expand_course(
             db, user.id, course_code, department, session=catalog
         )
-        return {
-            "data": await call_course_info(
-                db,
-                user.id,
-                "get_course_info",
-                {"department": lookup_department, "semester": semester, "course": compact_course},
-                session=catalog,
-            )
-        }
+        data = await call_course_info(
+            db,
+            user.id,
+            "get_course_info",
+            {"department": lookup_department, "semester": semester, "course": compact_course},
+            session=catalog,
+        )
+        return {"data": data, "sections": normalize_sections(data)}
 
 
 class BulkConstraintsRequest(BaseModel):
@@ -613,8 +724,7 @@ async def bulk_course_sections(
 
         for raw, (compact_course, lookup_department) in expanded.items():
             try:
-                results[raw] = {
-                    "data": await call_course_info(
+                data = await call_course_info(
                         db,
                         user.id,
                         "get_course_info",
@@ -625,7 +735,7 @@ async def bulk_course_sections(
                         },
                         session=catalog,
                     )
-                }
+                results[raw] = {"data": data, "sections": normalize_sections(data)}
             except HTTPException as exc:
                 logger.info("bulk_sections_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"error": str(exc.detail)}

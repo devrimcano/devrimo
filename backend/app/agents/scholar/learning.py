@@ -1,7 +1,7 @@
 """Scholar learning and context-compression configuration."""
 
 from agno.compression.manager import CompressionManager
-from agno.learn import LearningMachine, LearningMode, SessionContextConfig, UserMemoryConfig
+from agno.learn import LearningMachine, LearningMode, SessionContextConfig
 from agno.models.base import Model
 
 from app.agents.store import get_agno_db
@@ -25,17 +25,9 @@ def build_learning(model: Model, *, enabled: bool | None = None) -> LearningMach
         db=db,
         model=model,
         max_updates_per_run=2,
-        user_memory=UserMemoryConfig(
-            mode=LearningMode.AGENTIC,
-            db=db,
-            model=model,
-            enable_add_memory=True,
-            enable_update_memory=True,
-            enable_delete_memory=False,
-            enable_clear_memories=False,
-            max_updates_per_run=1,
-            instructions=MEMORY_POLICY,
-        ),
+        # Canonical explicit memories are injected by build_run_dependencies.
+        # No extraction or hidden memory tool can bypass the seven operations.
+        user_memory=False,
         session_context=SessionContextConfig(
             mode=LearningMode.ALWAYS,
             db=db,

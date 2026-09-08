@@ -28,6 +28,17 @@ TELEMETRY_SCHEMA_VERSION = 2
 
 SERVICE_BROKER = "devrimo-broker"
 SERVICE_KNOWLEDGE_WORKER = "devrimo-knowledge-worker"
+SERVICE_EMBEDDING_WORKER = "devrimo-embedding-worker"
+
+# The generic worker entrypoint serves four independently operated units. Keep
+# their identities explicit so a catalog outage cannot be confused with a
+# directory or researcher outage in logs and PostHog.
+SERVICE_DOMAIN_WORKERS = {
+    "directory": "devrimo-directory-worker",
+    "catalog": "devrimo-catalog-worker",
+    "retention": "devrimo-retention-worker",
+    "researcher": "devrimo-researcher-worker",
+}
 
 # Written by ``scripts/deploy-vps.sh`` next to the deployed tree, so the running
 # services learn their revision without every systemd unit needing a new

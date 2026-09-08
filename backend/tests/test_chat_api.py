@@ -113,13 +113,13 @@ async def test_history_is_readable_without_the_agent_resident(client):
     Under Hermes this read required booting the user's agent; now it is a
     database query, so evicting the agent first must change nothing.
     """
-    from app.agents.pool import reset_pool
+    from app.campus.session_pool import close_all
 
     headers = auth_header(new_user_id())
     await provision(client, headers)
     await send(client, headers, "what is my CGPA")
 
-    await reset_pool()
+    await close_all()
 
     detail = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
     assert detail.status_code == 200
@@ -179,3 +179,40 @@ async def test_sessions_are_isolated_per_user(client):
 
     response = await client.get("/api/v1/chat/sessions/thread-1", headers=headers_b)
     assert response.status_code == 404
+
+
+async def test_durable_run_retries_replay_without_another_model_turn(client):
+    headers = auth_header(new_user_id())
+    body = {
+        "messages": [{"role": "user", "content": "saved reply"}],
+        "session_id": "durable",
+        "idempotency_key": "message-1",
+    }
+    first = await client.post("/api/v1/chat/completions", headers=headers, json=body)
+    replay = await client.post("/api/v1/chat/completions", headers=headers, json=body)
+    assert first.status_code == replay.status_code == 200
+    assert first.headers["x-run-id"] == replay.headers["x-run-id"]
+    assert sse_payloads(first.content) == sse_payloads(replay.content)
+    detail = await client.get("/api/v1/chat/sessions/durable", headers=headers)
+    assert len(detail.json()["messages"]) == 2
+    run_id = first.headers["x-run-id"]
+    resumed = await client.get(f"/api/v1/chat/runs/{run_id}/events?after=1", headers=headers)
+    assert resumed.content.startswith(b"id: 2\n")
+    foreign = await client.get(f"/api/v1/chat/runs/{run_id}/events", headers=auth_header(new_user_id()))
+    assert foreign.status_code == 404
+    conflict = await client.post(
+        "/api/v1/chat/completions",
+        headers=headers,
+        json={**body, "messages": [{"role": "user", "content": "different"}]},
+    )
+    assert conflict.status_code == 409
+
+
+async def test_message_idempotency_preserves_server_generated_session(client):
+    headers = auth_header(new_user_id())
+    body = {"messages": [{"role": "user", "content": "hello"}], "idempotency_key": "generated-session"}
+    first = await client.post("/api/v1/chat/completions", headers=headers, json=body)
+    second = await client.post("/api/v1/chat/completions", headers=headers, json=body)
+    assert first.status_code == second.status_code == 200
+    assert first.headers["x-run-id"] == second.headers["x-run-id"]
+    assert len((await client.get("/api/v1/chat/sessions", headers=headers)).json()["sessions"]) == 1

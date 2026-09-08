@@ -10,6 +10,7 @@ curriculum.
 """
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,6 +42,8 @@ class _Layers:
         self.campus_calls = 0
 
     def install(self, monkeypatch):
+        monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
+
         async def read_cached(key_hash):
             self.reads.append(key_hash)
             return None
@@ -100,9 +103,7 @@ async def test_the_second_student_is_served_the_first_student_answer(monkeypatch
     """The point of sharing: one fetch, and the row is keyed the same both times."""
     layers = _Layers(["a course"]).install(monkeypatch)
 
-    answer = await course_info.call_course_info(
-        None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES)
-    )
+    answer = await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
     assert answer == ["a course"]
     assert layers.campus_calls == 1
 
@@ -136,9 +137,7 @@ async def test_catalog_rows_are_written_unowned(monkeypatch):
     """owner_hash None is what stops one student's erasure deleting the catalog."""
     layers = _Layers(["a course"]).install(monkeypatch)
 
-    await course_info.call_course_info(
-        None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES)
-    )
+    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
     assert layers.writes
     for _, kwargs in layers.writes:
         assert kwargs["namespace"] == course_info.CATALOG_NAMESPACE

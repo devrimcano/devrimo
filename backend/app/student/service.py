@@ -95,30 +95,6 @@ async def apply_verified_context(
     return context
 
 
-async def save_preference(
-    db: AsyncSession,
-    user_id: UUID,
-    *,
-    key: str,
-    value: dict,
-    provenance: str,
-    confidence: float,
-) -> UserPreference:
-    validate_preference(key, value)
-    preference = (
-        await db.execute(select(UserPreference).where(UserPreference.user_id == user_id, UserPreference.key == key))
-    ).scalar_one_or_none()
-    if preference is None:
-        preference = UserPreference(user_id=user_id, key=key, value=value, provenance=provenance)
-        db.add(preference)
-    preference.value = value
-    preference.provenance = provenance
-    preference.confidence = max(0, min(confidence, 1))
-    await db.commit()
-    await db.refresh(preference)
-    return preference
-
-
 async def list_preferences(db: AsyncSession, user_id: UUID) -> list[UserPreference]:
     return (
         await db.execute(

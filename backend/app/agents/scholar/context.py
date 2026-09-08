@@ -3,12 +3,12 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.pool import ResidentAgent
 from app.campus import departments as department_directory
-from app.db.models import StudentTimetable
 from app.campus import service as campus_service
+from app.db.models import StudentTimetable
 from app.student import service as student_service
 
 ISTANBUL = ZoneInfo("Europe/Istanbul")
@@ -35,13 +35,27 @@ def _timetable(row: "StudentTimetable | None") -> dict | None:
     """
     if row is None or not row.payload:
         return None
+    from app.planning.models import PlanState
+    from app.planning.workspace import projection_from_state
+
+    raw_payload = row.payload if isinstance(row.payload, dict) else {}
+    payload = projection_from_state(PlanState.from_legacy_payload(raw_payload))
+    # A legacy projection can contain a course shell without meetings. It is
+    # still meaningful context (and must retain the distinction from SAIS),
+    # even though the canonical flat-entry state has no meeting row to project.
+    if not payload.get("courses") and isinstance(raw_payload.get("courses"), list):
+        payload["courses"] = [course for course in raw_payload["courses"] if isinstance(course, dict)]
+
     def when(meetings: list) -> str:
         parts = []
         for meeting in meetings or []:
-            start = int(meeting.get("start", 0))
-            end = start + int(meeting.get("duration", 1))
+            start = int(meeting.get("start_minute", int(meeting.get("start", 0)) * 60 + 40))
+            end = start + int(meeting.get("duration_minutes", int(meeting.get("duration", 1)) * 60 - 10))
             room = str(meeting.get("room") or "").strip()
-            parts.append(f"{meeting.get('day')} {start:02d}:40-{end:02d}:30{f' {room}' if room else ''}")
+            parts.append(
+                f"{meeting.get('day')} {start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d}"
+                f"{f' {room}' if room else ''}"
+            )
         return ", ".join(parts)
 
     courses = [
@@ -53,11 +67,11 @@ def _timetable(row: "StudentTimetable | None") -> dict | None:
             "instructor": course.get("instructor") or None,
             "when": when(course.get("meetings", [])),
         }
-        for course in row.payload.get("courses", [])
+        for course in payload.get("courses", [])
     ]
     blocks = [
         {"name": block.get("name") or "busy", "when": when(block.get("meetings", []))}
-        for block in row.payload.get("busy_blocks", [])
+        for block in payload.get("busy_blocks", [])
     ]
     if not courses and not blocks:
         return None
@@ -70,10 +84,18 @@ def _timetable(row: "StudentTimetable | None") -> dict | None:
     }
 
 
-async def build_run_dependencies(db: AsyncSession, user_id, resident: ResidentAgent) -> dict[str, object]:
+async def build_run_dependencies(db: AsyncSession, user_id) -> dict[str, object]:
+    from app.agents.memory import read_memories
+
+    memories = await read_memories(user_id)
     profile = await campus_service.get_profile(db, user_id)
     student_context = await student_service.get_context(db, user_id)
-    timetable = await db.get(StudentTimetable, user_id)
+    timetable = await db.scalar(
+        select(StudentTimetable)
+        .where(StudentTimetable.user_id == user_id)
+        .order_by(StudentTimetable.updated_at.desc())
+        .limit(1)
+    )
     preferences = await student_service.list_preferences(db, user_id)
     now = datetime.now(ISTANBUL)
     return {
@@ -87,9 +109,9 @@ async def build_run_dependencies(db: AsyncSession, user_id, resident: ResidentAg
             # to match it against codes, which it has no reliable way to do.
             "department_abbreviation": (
                 resolved.abbreviation
-                if (resolved := department_directory.resolve(
-                    student_context.department or student_context.program_code
-                ))
+                if (
+                    resolved := department_directory.resolve(student_context.department or student_context.program_code)
+                )
                 else None
             ),
             "degree_level": student_context.degree_level,
@@ -108,9 +130,10 @@ async def build_run_dependencies(db: AsyncSession, user_id, resident: ResidentAg
         # SAIS schedule: that is what they are already registered for, which
         # answers a different question and is rarely the one they ask.
         "planned_timetable": _timetable(timetable),
+        "explicit_memories": memories,
         "benign_preferences": {item.key: item.value for item in preferences},
         "locale": profile.locale if profile else "tr",
-        "enabled_tools": list(resident.tool_ids),
+        "enabled_tools": [spec.tool_id for spec in await campus_service.campus_server_specs(db, user_id)],
         "local_datetime": now.strftime("%Y-%m-%d %H:%M (%A)"),
         "academic_term_hint": _academic_term_hint(now),
         "context_boundary": (
