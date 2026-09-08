@@ -78,6 +78,9 @@ class _Response:
         self.content = html.encode("utf-8")
         self.url = "https://example.invalid/main.php"
 
+    def raise_for_status(self):
+        return None
+
 
 def _track_opens(client, sais):
     opens: list[int] = []
@@ -326,6 +329,36 @@ def test_curriculum_accepts_assigned_course_text_without_a_grade(sais):
     assert result["semesters"][0]["courses"] == [
         {"course_code": "2300213", "course_name": "PHYS 213", "grade": ""}
     ]
+
+
+async def test_curriculum_retries_one_stalled_result_page_within_the_tool_budget(sais):
+    client = _client(sais)
+    landing = _soup('''<form action="curriculum.php">
+      <select name="text_semester_programtype"><option selected value="20261|1">Main</option></select>
+      <input type="hidden" name="token" value="opaque">
+    </form>''')
+
+    async def open_session(_app_code):
+        return "https://example.invalid/main.php", str(landing), landing
+
+    attempts = []
+
+    async def post(url, data=None, timeout=None):
+        attempts.append((url, timeout))
+        if len(attempts) == 1:
+            request = sais.httpx.Request("POST", url)
+            raise sais.httpx.ReadTimeout("stalled", request=request)
+        html = '<div id="curriculum">' + _curriculum_box(3, False) + '</div>'
+        return _Response(html)
+
+    client._open_app_proxy_session = open_session
+    client._client = types.SimpleNamespace(post=post)
+
+    result = await client.get_student_curriculum()
+
+    assert len(attempts) == 2
+    assert [timeout for _, timeout in attempts] == [12.0, 12.0]
+    assert result["semesters"][0]["courses"][0]["course_code"] == "2300213"
 
 def test_curriculum_parser_rejects_missing_board(sais):
     with pytest.raises(ValueError):

@@ -371,7 +371,20 @@ class SAISClient:
         values = {item["name"]: item.get("value", "") for item in form.select('input[type="hidden"][name]')}
         values["text_semester_programtype"] = selected["value"]
         values["submit_studentInformation"] = "Submit"
-        response = await self._client.post(urljoin(url, form.get("action") or url), data=values)
+        endpoint = urljoin(url, form.get("action") or url)
+        response = None
+        for attempt in range(2):
+            try:
+                # The MCP caller gives the complete tool call 30 seconds. A
+                # single stalled SAIS response must leave enough time for one
+                # bounded retry instead of consuming that whole budget.
+                response = await self._client.post(endpoint, data=values, timeout=12.0)
+                break
+            except httpx.TimeoutException:
+                if attempt:
+                    raise
+        if response is None:  # pragma: no cover - the loop returns or raises
+            raise RuntimeError("SAIS curriculum request produced no response")
         response.raise_for_status()
         return parse_student_curriculum(self._decode_html(response))
 
