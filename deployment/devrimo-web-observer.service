@@ -1,0 +1,24 @@
+[Unit]
+Description=Devrimo frontend infrastructure error observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devrimo
+Group=devrimo
+SupplementaryGroups=systemd-journal
+EnvironmentFile=/etc/devrimo/web-observer.env
+ExecStart=/usr/bin/python3 /opt/devrimo/scripts/web_error_observer.py
+Restart=always
+RestartSec=10
+StateDirectory=devrimo-web-observer
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/devrimo-web-observer
+
+[Install]
+WantedBy=multi-user.target

@@ -72,6 +72,9 @@ unset pg_environment
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP_DIR"
+frontend_releases="$DEPLOY_DIR/.frontend-releases"
+frontend_release="$frontend_releases/$DEPLOY_SHA-$stamp"
+mkdir -p "$frontend_releases"
 
 # Keep a compact source rollback snapshot. Runtime dependencies, caches,
 # credentials, campus state, and databases are deliberately excluded.
@@ -88,6 +91,8 @@ tar -czf "$BACKUP_DIR/source-$stamp.tar.gz" \
   --exclude='./.local' \
   --exclude='./.ssh' \
   --exclude='./.backups' \
+  --exclude='./.frontend-releases' \
+  --exclude='./.release.*' \
   --exclude='./.deploy.lock' \
   --exclude='./.deployed-sha' \
   --exclude='./.release-sha' \
@@ -119,14 +124,18 @@ unset PGPASSWORD PGUSER PGHOST PGPORT PGDATABASE PGSSLMODE PGSSLROOTCERT PGSSLCE
 stage_dir="$(mktemp -d "$DEPLOY_DIR/.release.XXXXXX")"
 trap 'rm -rf "$stage_dir"' EXIT
 tar -xzf "$RELEASE_ARCHIVE" -C "$stage_dir"
+frontend_tool="$stage_dir/scripts/frontend_release.py"
+# Build and exercise HTML/assets before touching any serving files or backend.
+# Database credentials have been removed from the build environment above.
+python3 "$frontend_tool" prepare --source "$stage_dir/frontend" \
+  --release "$frontend_release" --env-file "$DEPLOY_DIR/frontend/.env.local" \
+  --node-bin "$NODE_BIN" --sha "$DEPLOY_SHA"
+mkdir -p "$DEPLOY_DIR/scripts"
+install -m 0644 "$stage_dir/scripts/frontend_release.py" "$DEPLOY_DIR/scripts/frontend_release.py"
+install -m 0644 "$stage_dir/scripts/web_error_observer.py" "$DEPLOY_DIR/scripts/web_error_observer.py"
 
 # Deploy an exact source tree instead of extracting over the previous release.
 # Runtime state and secrets are preserved; stale source files are removed.
-rsync -a --delete \
-  --exclude='.env.local' \
-  --exclude='node_modules/' \
-  --exclude='.next/' \
-  "$stage_dir/frontend/" "$DEPLOY_DIR/frontend/"
 rsync -a --delete \
   --exclude='.env*' \
   --exclude='.venv/' \
@@ -188,26 +197,6 @@ if [ -d "$patch_src" ]; then
   fi
 fi
 
-# The running services learn which commit they are, so every event, log line
-# and exception can be attributed to a deploy rather than to a date. Written
-# before the restarts below, and outside both rsync targets so `--delete` in
-# the step above cannot remove it.
-printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.release-sha"
-
-bash -lc "
-  set -e
-  export PATH='$NODE_BIN':\$PATH
-  # GIT_COMMIT_SHA names the release the browser source maps are uploaded
-  # under; NEXT_PUBLIC_RELEASE is the same value baked into the bundle, so a
-  # browser exception and its source map agree on which build they came from.
-  export GIT_COMMIT_SHA='$DEPLOY_SHA'
-  export NEXT_PUBLIC_RELEASE='$DEPLOY_SHA'
-  cd '$DEPLOY_DIR/frontend'
-  rm -rf .next
-  npm ci
-  npm run build
-"
-
 # Keep the migration/restart window short. Alembic migrations in this project
 # may change ownership and remove retired columns; keep the recovery snapshot.
 sudo /usr/bin/systemctl stop devrimo-api.service
@@ -219,19 +208,41 @@ fi
 # The knowledge worker imports the same application modules as the API, so it
 # keeps serving the previous release from memory until it is restarted too.
 # Every long-running unit that loads this source tree belongs in this list.
+printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.release-sha"
 sudo /usr/bin/systemctl restart devrimo-api.service
-sudo /usr/bin/systemctl restart devrimo-web.service
 worker_units=(devrimo-assistant-worker.service devrimo-knowledge-worker.service devrimo-embedding-worker.service devrimo-researcher-worker.service devrimo-directory-worker.service devrimo-catalog-worker.service devrimo-retention-worker.service)
 sudo /usr/bin/systemctl restart "${worker_units[@]}"
+
+# Existing installations start with a real directory. Retain it once; future
+# switches replace a symlink atomically. Never remove an active build or its deps.
+previous_frontend="$(readlink -f "$DEPLOY_DIR/frontend")"
+rollback_frontend() {
+  trap - ERR
+  echo "Frontend activation failed; restoring $previous_frontend" >&2
+  sudo /usr/bin/systemctl stop devrimo-web.service || true
+  if [ "$previous_frontend" != "$DEPLOY_DIR/frontend" ]; then
+    python3 "$frontend_tool" switch --current "$DEPLOY_DIR/frontend" --release "$previous_frontend"
+  fi
+  sudo /usr/bin/systemctl start devrimo-web.service
+}
+trap 'rollback_frontend' ERR
+sudo /usr/bin/systemctl stop devrimo-web.service
+if [ ! -L "$DEPLOY_DIR/frontend" ]; then
+  mv "$DEPLOY_DIR/frontend" "$frontend_releases/previous-$stamp"
+  previous_frontend="$frontend_releases/previous-$stamp"
+fi
+python3 "$frontend_tool" switch --current "$DEPLOY_DIR/frontend" --release "$frontend_release"
+sudo /usr/bin/systemctl start devrimo-web.service
 
 for attempt in {1..30}; do
   api_ok=false
   web_ok=false
   worker_ok=false
   curl -fsS http://127.0.0.1:8000/health >/dev/null && api_ok=true
-  curl -fsS -o /dev/null http://127.0.0.1:3000/ && web_ok=true
+  python3 "$frontend_tool" check-http && web_ok=true
   systemctl is-active --quiet "${worker_units[@]}" && worker_ok=true
   if "$api_ok" && "$web_ok" && "$worker_ok"; then
+    trap - ERR
     printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.deployed-sha"
     rm -f "$RELEASE_ARCHIVE"
     echo "Devrimo deployment $DEPLOY_SHA is healthy"
@@ -244,4 +255,6 @@ sudo /usr/bin/systemctl status devrimo-api.service --no-pager || true
 sudo /usr/bin/systemctl status devrimo-web.service --no-pager || true
 sudo /usr/bin/systemctl status "${worker_units[@]}" --no-pager || true
 journalctl -u devrimo-api.service -u devrimo-web.service -u devrimo-knowledge-worker.service -n 100 --no-pager || true
+rollback_frontend
+trap - ERR
 exit 1

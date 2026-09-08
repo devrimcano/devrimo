@@ -53,6 +53,11 @@ jobs:
           pytest -q
           TEST_EXTENSION_SCHEMA=extensions pytest -q tests/test_database_hardening.py tests/test_database_ownership.py tests/test_restore_check.py
 
+      - name: Test release tooling
+        run: |
+          python -m unittest discover -s scripts/tests -v
+          bash -n scripts/deploy-vps.sh
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
