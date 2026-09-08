@@ -44,9 +44,7 @@ from app.core.ttl_cache import TTLCache
 from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
-from app.observability.client import report_exception
 from app.planning.catalog import normalize_sections
-from app.planning.mcp_bridge import sync_student_context_from_sais
 from app.planning.models import PlanChanges, PlanConflictError, PlanSection, PlanValidationError
 from app.planning.service import current_term
 from app.planning.workspace import projection_from_state
@@ -56,12 +54,6 @@ from app.planning.workspace import update_timetable as update_canonical_timetabl
 
 router = APIRouter()
 logger = get_logger(__name__)
-
-# Filling a student's context spawns their whole campus toolkit as subprocesses,
-# so the schedule page mounting must not be able to start one per render. The
-# outcome is remembered either way: a student whose SAIS reports no department
-# would otherwise pay for four subprocess launches on every page view.
-_context_syncs = TTLCache(ttl_seconds=5 * 60, max_entries=1024)
 
 _PLAN_CACHE_SECONDS = 6 * 60 * 60
 
@@ -117,20 +109,14 @@ async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -
 
     The client's value wins when present, because a student who picked their
     department by hand in the planner is correcting exactly this. Otherwise it
-    comes from the stored campus context — and if that has never been filled,
-    one single-flighted SAIS sync fills it, the same one the schedule page's
-    own mount would have triggered.
+    comes from the stored campus context populated during setup or an explicit
+    academic-data refresh. Opening the planner never contacts SAIS for identity.
     """
     supplied = (provided or "").strip()
     if len(supplied) >= 2:
         return supplied
 
     context = await db.get(StudentContext, user_id)
-    if context is None or not (context.department or context.program_code):
-        await _context_syncs.run(str(user_id), lambda: _sync_context(user_id))
-        await db.rollback()
-        context = await db.get(StudentContext, user_id)
-
     query, code = await _student_department(db, user_id, context)
     resolved = (code or query or "").strip()
     if len(resolved) < 2:
@@ -156,8 +142,9 @@ async def _student_department(
 
     A program code that already carries the department — three digits, or the
     seven-digit form whose first three are the department — is authoritative.
-    Anything else is a name, and a name is resolved by asking the catalog
-    rather than by pattern-matching digits out of it.
+    Anything else is resolved against the bundled department directory. This
+    path deliberately performs no campus I/O: setup and explicit refresh own
+    the SAIS synchronization lifecycle.
     """
     if context is None:
         return None, None
@@ -169,10 +156,8 @@ async def _student_department(
         return query, digits[:3]
     if not query:
         return None, None
-    try:
-        return query, await resolve_department(db, user_id, query)
-    except HTTPException:
-        return query, None
+    resolved = departments.resolve(query)
+    return query, resolved.code if resolved else None
 
 
 @router.get("/student-context")
@@ -181,13 +166,6 @@ async def student_context(
     db: AsyncSession = Depends(get_db),
 ):
     context = await db.get(StudentContext, user.id)
-    if context is None or not (context.department or context.program_code):
-        # Single-flight: concurrent mounts of the schedule page wait on one
-        # sync instead of each spawning the student's campus servers.
-        await _context_syncs.run(str(user.id), lambda: _sync_context(user.id))
-        await db.rollback()
-        context = await db.get(StudentContext, user.id)
-
     query, code = await _student_department(db, user.id, context)
     return {
         "student": (
@@ -214,23 +192,6 @@ async def student_context(
         # section's surname range compares, so the rest is never stored.
         "surname_prefix": context.surname_prefix if context else None,
     }
-
-
-async def _sync_context(user_id) -> bool:
-    try:
-        return await sync_student_context_from_sais(user_id)
-    except Exception as exc:
-        logger.warning("schedule_context_sync_failed", user_id=str(user_id), error=str(exc))
-        report_exception(
-            exc,
-            distinct_id=str(user_id),
-            handler="schedule_context_sync",
-            operation="sync_student_context_from_sais",
-            dependency="sais",
-        )
-        return False
-
-
 class TimetableMeeting(BaseModel):
     day: Literal["Mon", "Tue", "Wed", "Thu", "Fri"]
     start: int = Field(ge=0, le=23)
