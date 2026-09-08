@@ -89,7 +89,7 @@ server_major="$((10#$server_version_num / 10000))"
 
 pg_dump_bin=""
 pg_dump_major() {
-  "$1" --version | sed -nE 's/.*PostgreSQL ([0-9]+)\..*/\1/p'
+  "$1" --version | sed -nE 's/.*PostgreSQL[^0-9]*([0-9]+)\..*/\1/p'
 }
 
 for candidate in \
