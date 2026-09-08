@@ -99,7 +99,9 @@ def _explicit_empty_result(soup: BeautifulSoup, subject: str) -> bool:
         "bulunamadı",
         "yoktur",
     )
-    return any(term in text for term in subjects) and any(marker in text for marker in empty_markers)
+    subject_present = any(term in text for term in subjects)
+    no_rows_sentence = re.search(r"\bno\b.{0,40}\b(?:records?|data)\b", text) is not None
+    return subject_present and (any(marker in text for marker in empty_markers) or no_rows_sentence)
 
 
 def parse_student_curriculum(html: str) -> dict:
