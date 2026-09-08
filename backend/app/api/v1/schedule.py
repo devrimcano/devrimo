@@ -111,6 +111,10 @@ class CurriculumCourseOut(BaseModel):
 class CurriculumPlanResponse(BaseModel):
     courses: list[CurriculumCourseOut] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # "We could not read your curriculum" and "your curriculum has nothing left
+    # for you this term" are both an empty list, and the planner has to tell the
+    # student which one happened. Without this it said the second one either way.
+    curriculum_unavailable: bool = False
     prerequisite_rejections: list[PrerequisiteRejectionOut] = Field(default_factory=list)
     source: str
     cache_hit: bool
@@ -1121,6 +1125,7 @@ async def curriculum_plan(
         return {
             "courses": [],
             "warnings": [f"Your curriculum could not be read from METU: {exc.detail}"],
+            "curriculum_unavailable": True,
             "prerequisite_rejections": [],
             "source": "sais_curriculum",
             "cache_hit": False,

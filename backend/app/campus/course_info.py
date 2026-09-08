@@ -148,7 +148,10 @@ async def prefetch(pairs: Iterable[tuple[str, dict[str, str]]]) -> None:
     if not wanted:
         return
     for key_hash, payload in (await read_many_cached(list(wanted))).items():
-        _catalog.set(wanted[key_hash], payload)
+        # Same reason as the single read: a stored failure is not an answer, and
+        # seeding one here would spread it to the in-process cache as well.
+        if tool_error_text(payload) is None:
+            _catalog.set(wanted[key_hash], payload)
 
 
 def section_numbers(payload: Any) -> list[str]:
@@ -188,6 +191,35 @@ def forget_user(user_id: UUID) -> None:
     # Dropped here anyway: a student who asked to be forgotten should not leave
     # an object behind with their id as its key.
     _campus_locks.pop(user_id, None)
+
+
+# Agno never raises when an MCP server reports a failure. Its wrapper turns the
+# error into the tool's own *content* -- "Error from MCP tool 'x': [TextContent(
+# text='...')]" -- and hands that back as if it were an answer (see
+# ``agno/utils/mcp.py``). Read as a payload, that sentence is a course list with
+# no courses in it and a curriculum board with no semesters, so every caller
+# reported "SAIS said nothing" while SAIS had in fact said exactly what was
+# wrong. Worse, a shared tool's answer is written to the catalog cache for
+# thirty days, so one student's momentary SAIS failure emptied a department's
+# listing for everybody until it expired.
+_TOOL_ERROR_PREFIXES = ("Error from MCP tool ", "MCP tool ", "Error: ")
+
+# The server's own sentence, inside the repr of the MCP content blocks agno
+# formatted into the message.
+_CONTENT_TEXT = re.compile(r"text=(['\"])(.*?)\1", re.S)
+
+
+def tool_error_text(value: Any) -> str | None:
+    """The failure a tool result is carrying, or ``None`` if it carries data.
+
+    Also applied to what comes back out of the cache: rows written before this
+    check existed still hold one of these sentences, and a poisoned row must
+    heal itself on the next read rather than wait out its thirty days.
+    """
+    if not isinstance(value, str) or not value.startswith(_TOOL_ERROR_PREFIXES):
+        return None
+    inner = " ".join(text.strip() for _, text in _CONTENT_TEXT.findall(value))
+    return inner or value
 
 
 def json_value(value: Any) -> Any:
@@ -305,7 +337,11 @@ async def call_course_info(
             source = "campus"
             return await _invoke(db, user_id, tool_suffix, values, session)
         cached = await read_cached(key_hash)
-        if cached is not None:
+        # A row written before failures were recognised holds a tool's error
+        # sentence rather than a catalog page. Treated as a miss so it is read
+        # again and overwritten now, instead of serving an empty department
+        # listing to everyone for the rest of its thirty days.
+        if cached is not None and tool_error_text(cached) is None:
             source = "database"
             return cached
         source = "campus"
@@ -398,6 +434,13 @@ async def _call_toolkit(db: AsyncSession, user_id: UUID, toolkit: Any, tool_suff
             result = await result
     except Exception as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Course catalog request failed: {exc}") from exc
+    failure = tool_error_text(getattr(result, "content", None))
+    if failure is not None:
+        # Logged as well as raised: the sentence the caller shows the student is
+        # trimmed for them, and the one thing worth having in journald when a
+        # student reports it is which tool said it.
+        logger.warning("catalog_tool_failed", tool=tool_suffix, detail=failure)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, failure)
     return json_value(mcp_payload(result))
 
 

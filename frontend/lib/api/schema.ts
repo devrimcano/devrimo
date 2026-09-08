@@ -1944,6 +1944,11 @@ export interface components {
             courses?: components["schemas"]["CurriculumCourseOut"][];
             /** Warnings */
             warnings?: string[];
+            /**
+             * Curriculum Unavailable
+             * @default false
+             */
+            curriculum_unavailable?: boolean;
             /** Prerequisite Rejections */
             prerequisite_rejections?: components["schemas"]["PrerequisiteRejectionOut"][];
             /** Source */
