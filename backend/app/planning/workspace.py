@@ -439,10 +439,19 @@ def solve_plan_state(state: PlanState) -> PlanState:
         # whole solve, but must never turn it into a partial timetable.
         if not timed_sections:
             continue
+        eligible_sections = [
+            section
+            for section in timed_sections
+            if state.ignore_constraints or section.get("eligible") is not False
+        ]
+        # A course for which every timed section is closed to the student is
+        # reported separately by the client. It cannot be made schedulable by
+        # choosing another combination, so it must not suppress valid plans
+        # for the remaining courses.
+        if not eligible_sections:
+            continue
         options = []
-        for section in timed_sections:
-            if section.get("eligible") is False and not state.ignore_constraints:
-                continue
+        for section in eligible_sections:
             meetings = _section_meetings(section)
             if any(day in state.empty_days for day, _, _, _ in meetings):
                 continue

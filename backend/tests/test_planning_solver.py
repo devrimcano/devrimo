@@ -108,6 +108,32 @@ def test_timetable_solver_can_ignore_a_course_without_published_times():
     assert len(solved.alternatives) == 1
 
 
+def test_timetable_solver_omits_a_fully_restricted_course_without_returning_a_partial_choice():
+    state = PlanState(
+        pool=[
+            {"code": "MATH101", "name": "Math", "credits": 3},
+            {"code": "HIST101", "name": "History", "credits": 3},
+        ],
+        sections={
+            "MATH101": [{
+                "section": "1",
+                "eligible": True,
+                "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}],
+            }],
+            "HIST101": [{
+                "section": "1",
+                "eligible": False,
+                "meetings": [{"day": "Tue", "start_minute": 540, "duration_minutes": 60}],
+            }],
+        },
+    )
+
+    solved = solve_plan_state(state)
+
+    assert {entry.code for entry in solved.entries} == {"MATH101"}
+    assert len(solved.alternatives) == 1
+
+
 def test_a_stale_duplicate_section_list_cannot_undo_a_verdict():
     """A plan holding the same course under two keys still respects the verdicts.
 
