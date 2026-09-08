@@ -55,6 +55,11 @@ def next_semester_courses(board: Any) -> list[dict]:
     # The live MCP tool wraps its dictionary return value under result.
     if isinstance(board, dict) and set(board) == {"result"}:
         board = board["result"]
+    # A string here is not a board. It used to be the shape a failed tool call
+    # arrived in, and answering it with the generic sentence below is what hid
+    # SAIS's own explanation from the one person who could act on it.
+    if isinstance(board, str):
+        raise ValueError(f"SAIS Curriculum could not be read: {' '.join(board.split())[:200]}")
     if not isinstance(board, dict) or not isinstance(board.get("semesters"), list) or not board["semesters"]:
         raise ValueError("SAIS Curriculum semester boxes could not be read")
     semesters = board["semesters"]

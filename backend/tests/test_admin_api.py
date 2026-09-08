@@ -9,6 +9,35 @@ from app.db.session import SessionLocal
 from tests.conftest import auth_header, new_user_id
 
 
+async def test_usage_reads_through_assistant_identity_when_api_cannot_access_ai(monkeypatch):
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine, event, text
+
+    from app.api.v1 import admin
+    from app.db.engine import postgres_connect_args, postgres_driver_url
+
+    url = postgres_driver_url(get_settings().database_url)
+    assistant = create_engine(url, connect_args=postgres_connect_args(url))
+
+    @event.listens_for(assistant, "connect")
+    def use_assistant(connection, _):
+        with connection.cursor() as cursor:
+            cursor.execute("SET ROLE devrimo_assistant")
+        connection.commit()
+
+    monkeypatch.setattr(admin, "get_agno_db", lambda: SimpleNamespace(db_engine=assistant))
+    try:
+        async with SessionLocal() as db:
+            await db.execute(text("SET LOCAL ROLE devrimo_api"))
+            assert not await db.scalar(text("SELECT has_schema_privilege(current_user, 'ai', 'USAGE')"))
+            usage = await admin._token_usage(SimpleNamespace(organization_id=None), db)
+            assert usage["runs"] == 0
+            assert usage["total_tokens"] == 0
+    finally:
+        assistant.dispose()
+
+
 async def test_admin_overview_reports_zero_usage_before_the_first_agent_run(client, monkeypatch):
     user_id = new_user_id()
     monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(user_id))

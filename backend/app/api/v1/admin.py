@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import csv
 import hashlib
@@ -19,6 +20,7 @@ from app.admin.schemas import AgentActionIn, DeleteUserIn, InviteIn, MembershipI
 from app.admin.supabase import SupabaseAdmin, parse_auth_time
 from app.agents import manager
 from app.agents.runtime import get_runtime_config
+from app.agents.store import get_agno_db
 from app.assistant.models import AssistantRun
 from app.campus.catalog import CAMPUS_TOOLS
 from app.campus.manifest import commits_by_slug
@@ -90,9 +92,21 @@ async def _run_counts(principal: AdminPrincipal, db: AsyncSession) -> dict:
 
 
 async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
+    runtime = await get_runtime_config(db)
+
+    def read_usage():
+        # Reuse the assistant-owned pool already used for conversation reads.
+        # The API identity deliberately has no access to the ai schema.
+        with get_agno_db().db_engine.connect() as connection:
+            return _token_usage_from_connection(principal, connection, runtime)
+
+    return await asyncio.to_thread(read_usage)
+
+
+def _token_usage_from_connection(principal, db, runtime) -> dict:
     """Aggregate Agno run metrics without loading prompts or responses."""
     table = "ai.agno_runs"
-    if not bool(await db.scalar(text("SELECT to_regclass('ai.agno_runs') IS NOT NULL"))):
+    if not bool(db.scalar(text("SELECT to_regclass('ai.agno_runs') IS NOT NULL"))):
         return {
             "runs": 0,
             "input_tokens": 0,
@@ -126,7 +140,7 @@ async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
     # Some providers omit total_tokens while still reporting both components.
     total_tokens = f"({input_tokens} + {output_tokens})"
     row = (
-        await db.execute(
+        db.execute(
             text(
                 f"""
                 SELECT
@@ -150,7 +164,7 @@ async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
     role_input = "COALESCE(CAST(entry.value ->> 'input_tokens' AS BIGINT), 0)"
     role_output = "COALESCE(CAST(entry.value ->> 'output_tokens' AS BIGINT), 0)"
     role_rows = (
-        await db.execute(
+        db.execute(
             text(
                 f"""
                 SELECT role.key, COALESCE(SUM({role_input} + {role_output}), 0) AS tokens
@@ -163,7 +177,6 @@ async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
         )
     ).all()
     tokens_by_role = {str(role): int(tokens or 0) for role, tokens in role_rows}
-    runtime = await get_runtime_config(db)
     estimated_cost = (
         float(row.input_tokens or 0) * runtime.input_token_price
         + float(row.output_tokens or 0) * runtime.output_token_price

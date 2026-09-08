@@ -191,6 +191,11 @@ function localizedCurriculumWarning(
   value: string,
   t: (tr: string, en: string) => string,
 ) {
+  // The broker's own sentence, kept verbatim after the colon: it is SAIS's
+  // explanation of what could not be read, and it is the only thing that makes
+  // a report from a student diagnosable.
+  const unreadable = value.match(/^Your curriculum could not be read from METU: (.+)$/i);
+  if (unreadable) return t(`ODTÜ yanıtı: ${unreadable[1]}`, `METU said: ${unreadable[1]}`);
   const match = value.match(/^(history|language): kept (.+?) — .*?add (.+?) instead\.$/i);
   if (!match) return value;
   const label = (codes: string) => codes.split(", ").map((code) => {
@@ -513,6 +518,10 @@ export function SchedulePlanner() {
   const [alternatives, setAlternatives] = useState<Entry[][]>([]);
   const [alternativeIndex, setAlternativeIndex] = useState(0);
   const [curriculumNotice, setCurriculumNotice] = useState("");
+  // Whether that notice is a failure. Kept beside the text rather than
+  // inferred from it: the planner must not decide what happened by matching
+  // on a sentence it also translates.
+  const [curriculumFailed, setCurriculumFailed] = useState(false);
   const [prerequisiteRejections, setPrerequisiteRejections] = useState<PrerequisiteRejection[]>([]);
   const [mobileDay, setMobileDay] = useState<Day>("Mon");
   const [poolQuery, setPoolQuery] = useState("");
@@ -842,10 +851,32 @@ export function SchedulePlanner() {
     setExpandedCourse(null);
     setCatalogSearch("");
     setCurriculumNotice("");
+    setCurriculumFailed(false);
     // The alternatives were arrangements of the pool that just went away.
     setAlternatives([]);
     setAlternativeIndex(0);
     toast.success(t("Ders havuzu temizlendi.", "Course pool cleared."));
+  }
+
+  /**
+   * Clear the timetable, and everything that would put it straight back.
+   *
+   * Emptying `entries` was not clearing the schedule, only the copy of it that
+   * happened to be on screen. The generated alternatives stayed in state, so
+   * the arrows stayed up and the next click restored what had just been
+   * cleared; both are persisted, so a reload restored it as well. The `#plan=`
+   * hash goes for the same reason: it outranks the stored plan on the next
+   * load, so clearing a shared schedule survived exactly until a refresh.
+   */
+  function clearSchedule() {
+    setEntries([]);
+    setAlternatives([]);
+    setAlternativeIndex(0);
+    setFavoriteIndex(-1);
+    if (window.location.hash.startsWith("#plan=")) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    toast.success(t("Program temizlendi.", "Schedule cleared."));
   }
 
   function removeScheduledCourse(courseEntries: Entry[]) {
@@ -1005,9 +1036,10 @@ export function SchedulePlanner() {
     // tool per department with a model turn between each. It now reads the
     // curriculum directly and answers in about two.
     const startedAt = Date.now();
-    let response: { courses?: AiPlanCourse[]; warnings?: string[]; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
+    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
+    let response: CurriculumResponse;
     try {
-      response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/curriculum", {
+      response = await jsonFetch<CurriculumResponse>("/api/schedule/curriculum", {
         method: "POST",
         body: { semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
       });
@@ -1042,18 +1074,15 @@ export function SchedulePlanner() {
       warnings: warnings.length,
       duration_seconds: (Date.now() - startedAt) / 1000,
     });
-    return { courses: verified, warnings, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
+    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
   }
 
   async function loadRequiredCourses() {
-    if (!department) {
-      toast.error(t(
-        "Bölüm bilgin bulunamadı. Ayarlar'dan akademik verilerini yenileyip tekrar dene.",
-        "Your department is missing. Refresh your academic data in Settings and try again.",
-      ));
-      return;
-    }
-    setPlanBusy(true); setCurriculumNotice(""); setExpandedCourse(null);
+    // No department gate here. The broker owns that value now — it reads the
+    // setup-cached StudentContext and answers with a specific 422 when there is
+    // genuinely none — and a client-side gate on a field that hydrates
+    // asynchronously refused the request in the first moments after load.
+    setPlanBusy(true); setCurriculumNotice(""); setCurriculumFailed(false); setExpandedCourse(null);
     try {
       const result = await requestCurriculum([]);
       setCatalogCourses(result.courses);
@@ -1063,7 +1092,13 @@ export function SchedulePlanner() {
       // they are choosing, not after.
       void fetchAllConstraints(result.courses);
       const warningText = result.warnings.map((warning) => localizedCurriculumWarning(warning, t)).join(" ");
-      setCurriculumNotice(result.courses.length
+      // Three outcomes, not two. "We could not read it" used to be phrased as
+      // "there is nothing to take", which tells a student their curriculum is
+      // clear when in fact nobody looked at it.
+      setCurriculumFailed(result.unavailable);
+      setCurriculumNotice(result.unavailable
+        ? t(`Müfredatın şu anda ODTÜ sisteminden okunamadı, bu yüzden havuz boş. Birkaç dakika sonra tekrar dene; sürerse dersleri aşağıdaki arama kutusundan elle ekleyebilirsin.${warningText ? ` ${warningText}` : ""}`, `Your curriculum could not be read from METU right now, so the pool is empty. Try again in a few minutes; if it keeps failing, add courses by hand from the search box below.${warningText ? ` ${warningText}` : ""}`)
+        : result.courses.length
         ? t(`Bu dönem alman gereken ${result.courses.length} ders bulundu.${warningText ? ` ${warningText}` : ""}`, `${result.courses.length} required courses were found for this term.${warningText ? ` ${warningText}` : ""}`)
         : t(`Müfredatında bu dönem açılan, henüz almadığın bir ders bulunamadı.${warningText ? ` ${warningText}` : ""}`, `No course from your curriculum that you still need is offered this term.${warningText ? ` ${warningText}` : ""}`));
     } catch (error) {
@@ -1335,7 +1370,7 @@ export function SchedulePlanner() {
             <p className="truncate text-sm text-muted-foreground">{termLabel(term, t)} · {t("derslerini ekle, çakışmaları gör, paylaş", "add courses, spot conflicts, share")}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => setEntries([])}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
+            <Button variant="outline" size="sm" onClick={clearSchedule}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
             <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><RotateCcwIcon />{t("Geri al", "Undo")}</Button>
           </div>
         </div>
@@ -1403,7 +1438,7 @@ export function SchedulePlanner() {
             <Card data-tour="pool"><CardHeader className="pb-3"><CardTitle className="text-base">{t("Dönem dersleri", "Semester courses")}</CardTitle></CardHeader><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3">
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
               {planBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite"><Loader2Icon className="size-3.5 animate-spin" />{t("Müfredatın okunuyor…", "Reading your curriculum…")}</p> : null}
-              {curriculumNotice ? <p className="rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground">{curriculumNotice}</p> : null}
+              {curriculumNotice ? <p className={curriculumFailed ? "rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-xs leading-5 text-destructive" : "rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"} role={curriculumFailed ? "alert" : undefined}>{curriculumNotice}</p> : null}
               {catalogCourses.length ? (
                 <div className="flex items-center justify-between gap-3 text-xs" aria-live="polite">
                   <span className="font-medium">{t(`${catalogCourses.length} dersten ${selectedPoolCount} tanesi programa eklendi`, `${selectedPoolCount} of ${catalogCourses.length} courses added to the schedule`)}</span>
