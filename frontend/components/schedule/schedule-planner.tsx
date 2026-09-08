@@ -1230,13 +1230,17 @@ export function SchedulePlanner() {
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
       if (restricted.length) toast.warning(t(`${restricted.join(", ")} için soyadına açık şube yok. Kısıtları yok sayarak tekrar dene.`, `No section of ${restricted.join(", ")} is open to your surname. Try again with restrictions ignored.`));
-      if (unplaced.length) toast.warning(t(`${unplaced.join(", ")} için boş gün ve çakışma tercihlerine uyan şube yok.`, `No section of ${unplaced.join(", ")} fits your empty-day and conflict preferences.`));
-      if (solved.state.alternatives.length > 1) {
+      if (!solved.state.alternatives.length) {
+        toast.error(t(
+          "Saat bilgisi olan tüm dersleri içeren bir program bulunamadı. Boş gün veya şube kısıtı tercihlerini değiştirip tekrar dene.",
+          "No schedule could include every course with published times. Change your empty-day or section restriction preferences and try again.",
+        ));
+      } else if (solved.state.alternatives.length > 1) {
         toast.success(t(
           `${solved.state.alternatives.length} alternatif program bulundu. Oklarla aralarında geçiş yap.`,
           `${solved.state.alternatives.length} possible schedules found. Use the arrows to switch between them.`,
         ));
-      } else if (solved.state.alternatives.length === 1 && !unavailable.length && !unpublished.length && !unplaced.length) {
+      } else if (!unavailable.length && !unpublished.length && !restricted.length && !unplaced.length) {
         toast.success(t("Tek bir çakışmasız program mümkün.", "Exactly one conflict-free schedule is possible."));
       }
     } catch (error) {

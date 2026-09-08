@@ -428,23 +428,38 @@ def solve_plan_state(state: PlanState) -> PlanState:
     groups: list[SolverGroup[dict[str, Any]]] = []
     courses_by_key: dict[str, Any] = {}
     for course in state.pool:
+        timed_sections = [
+            section
+            for section in _section_values(state, course)
+            if _section_meetings(section)
+        ]
+        # Courses whose meeting times have not been published cannot take part
+        # in the timetable yet. Once a course has a timed section, however, it
+        # is required: restrictions and empty-day preferences may reject the
+        # whole solve, but must never turn it into a partial timetable.
+        if not timed_sections:
+            continue
         options = []
-        for section in _section_values(state, course):
+        for section in timed_sections:
             if section.get("eligible") is False and not state.ignore_constraints:
                 continue
             meetings = _section_meetings(section)
-            if not meetings or any(day in state.empty_days for day, _, _, _ in meetings):
+            if any(day in state.empty_days for day, _, _, _ in meetings):
                 continue
             options.append(section)
-        if options:
-            groups.append(SolverGroup(key=course.code, options=tuple(options)))
-            courses_by_key[course.code] = course
+        if not options:
+            return state.model_copy(update={"entries": [], "alternatives": [], "alternative_index": 0})
+        groups.append(SolverGroup(key=course.code, options=tuple(options)))
+        courses_by_key[course.code] = course
+    if not groups:
+        return state.model_copy(update={"entries": [], "alternatives": [], "alternative_index": 0})
     solutions = enumerate_solutions(
         groups,
         lambda section: [(day, start, end) for day, start, end, _ in _section_meetings(section)],
         avoid_conflicts=state.avoid_conflicts,
         max_solutions=MAX_ALTERNATIVES,
         max_nodes=MAX_SOLVER_NODES,
+        allow_skip=False,
     )
     alternatives: list[list[PlanEntry]] = []
     for solution in solutions:
