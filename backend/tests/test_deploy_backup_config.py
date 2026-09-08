@@ -55,3 +55,12 @@ def test_old_deploy_artifacts_are_pruned_before_a_new_backup_is_written():
     assert "prune_deploy_files \"$BACKUP_DIR\" 'source-*.tar.gz' 1" in SCRIPT_TEXT
     assert "prune_deploy_files \"$BACKUP_DIR\" 'devrimo-*.dump' 1" in SCRIPT_TEXT
     assert "-name 'devrimo-release-*.tar.gz'" in SCRIPT_TEXT
+
+
+def test_frontend_retention_keeps_active_and_one_complete_rollback():
+    assert 'active="$(readlink -f "$DEPLOY_DIR/frontend"' in SCRIPT_TEXT
+    assert '[ -s "$directory/.next/BUILD_ID" ]' in SCRIPT_TEXT
+    assert '[ -d "$directory/node_modules/next" ]' in SCRIPT_TEXT
+    assert '[[ "$name" =~ ^([0-9a-f]{40}|previous)-[0-9]{8}-[0-9]{6}$ ]]' in SCRIPT_TEXT
+    assert '("$frontend_releases"/*) rm -rf -- "$directory"' in SCRIPT_TEXT
+    assert SCRIPT_TEXT.count("prune_frontend_releases") >= 3

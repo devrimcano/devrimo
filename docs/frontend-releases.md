@@ -17,6 +17,10 @@ restore that frontend and restart it. This is frontend rollback, not database
 or backend rollback. Review migration compatibility separately. Do not prune
 the active or previous release, or run a different deployment path concurrently.
 Database backup credentials remain a preflight requirement of full releases.
+The deploy script retains the active release and the newest complete inactive
+release for rollback. Older script-named release directories and incomplete
+builds are removed before the next build so their private `node_modules` and
+`.next` trees cannot fill the host.
 
 ## Independent error reporting
 
