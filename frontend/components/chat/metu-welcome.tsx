@@ -7,11 +7,13 @@ import {
   BookOpenCheckIcon,
   CalendarDaysIcon,
   LibraryIcon,
+  PlugIcon,
   RouteIcon,
   ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
+import { useCampus } from "@/hooks/useCampus";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { jsonFetch } from "@/lib/api/fetcher";
@@ -50,7 +52,43 @@ export function MetuWelcome() {
         <ShieldCheckIcon className="size-3.5 shrink-0 text-primary" />
         {pick({ tr: "ODTÜClass ve e-posta yalnızca izin verdiğinde kullanılır.", en: "ODTÜClass and email are used only with your permission." })}
       </p>
+      <CampusReadyLine />
     </div>
+  );
+}
+
+/**
+ * The one sentence a student never got: it works.
+ *
+ * Onboarding asks for the most trust this product will ever be given — a real
+ * METU password — and the screen it hands over to said nothing about whether
+ * that worked. This says which systems answered, and it says it from the
+ * connection record rather than from optimism: no verified connection, no line.
+ * The names come from the broker's own tool catalog, so it can never claim a
+ * system the student did not enable.
+ */
+function CampusReadyLine() {
+  const { locale, pick } = useLocale();
+  const { connection } = useCampus();
+  if (!connection?.connected || !connection.verified_at) return null;
+
+  const active = (connection.tools ?? []).filter((tool) => tool.active);
+  if (!active.length) return null;
+  const names = active.map((tool) => (locale === "tr" ? tool.name_tr : tool.name_en));
+  const readable = names.length > 1
+    ? `${names.slice(0, -1).join(", ")} ${pick({ tr: "ve", en: "and" })} ${names[names.length - 1]}`
+    : names[0];
+
+  return (
+    <p className="motion-enter mt-2 flex items-center justify-center gap-1.5 text-xs leading-5 [animation-delay:120ms]">
+      <span className="border-primary/25 bg-primary/10 text-primary inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium">
+        <PlugIcon className="size-3 shrink-0" aria-hidden />
+        {pick({ tr: "ODTÜ bağlantın çalışıyor", en: "Your METU connection works" })}
+      </span>
+      <span className="text-muted-foreground min-w-0 truncate">
+        {pick({ tr: `${readable} okunabiliyor`, en: `${readable} can be read` })}
+      </span>
+    </p>
   );
 }
 
