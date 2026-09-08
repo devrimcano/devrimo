@@ -25,6 +25,7 @@ import { usePlanning, type PlanEntry, type PlanEnvelope, type PlanState } from "
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
 import { formatMetuCourseCode } from "@/lib/metu-course-code";
+import { resolvePlannerDepartment, type PlannerDepartmentChoice } from "@/lib/planner-department";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
@@ -493,15 +494,17 @@ export function SchedulePlanner() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
-  const [department, setDepartment] = useState("");
-  const [departmentLabel, setDepartmentLabel] = useState("");
+  const [studentDepartment, setStudentDepartment] = useState<PlannerDepartmentChoice | null>(null);
+  const [departmentFallback, setDepartmentFallback] = useState<PlannerDepartmentChoice>({ code: "", label: "" });
   const [departmentBusy, setDepartmentBusy] = useState(true);
   const [departmentQuery, setDepartmentQuery] = useState("");
   const [departmentOptions, setDepartmentOptions] = useState<DepartmentOption[]>([]);
   const [departmentSearching, setDepartmentSearching] = useState(false);
   const [departmentStatus, setDepartmentStatus] = useState<"ok" | "unknown" | "failed" | "disconnected">("ok");
   const [departmentCodeDraft, setDepartmentCodeDraft] = useState("");
-  const departmentKnown = Boolean(department.trim());
+  const resolvedDepartment = resolvePlannerDepartment(studentDepartment, departmentFallback);
+  const department = resolvedDepartment.code;
+  const departmentKnown = Boolean(department);
   const [emptyDays, setEmptyDays] = useState<Day[]>([]);
   const [avoidConflicts, setAvoidConflicts] = useState(true);
   const [ignoreConstraints, setIgnoreConstraints] = useState(false);
@@ -558,8 +561,7 @@ export function SchedulePlanner() {
     setEntries(nextEntries);
     setCatalogCourses(nextPool);
     setSectionsByCourse(nextSections);
-    setDepartment(state.department);
-    setDepartmentLabel(state.department_label);
+    setDepartmentFallback({ code: state.department, label: state.department_label || state.department });
     setEmptyDays(state.empty_days.filter((day): day is Day => DAYS.includes(day)));
     setAvoidConflicts(state.avoid_conflicts);
     setIgnoreConstraints(state.ignore_constraints);
@@ -585,8 +587,8 @@ export function SchedulePlanner() {
   );
   const localCanonicalState = useMemo(() => canonicalStateFromLocal({
     entries,
-    department,
-    departmentLabel,
+    department: departmentFallback.code,
+    departmentLabel: departmentFallback.label,
     emptyDays,
     avoidConflicts,
     ignoreConstraints,
@@ -602,8 +604,7 @@ export function SchedulePlanner() {
     avoidConflicts,
     canonicalSections,
     catalogCourses,
-    department,
-    departmentLabel,
+    departmentFallback,
     emptyDays,
     entries,
     favoriteIndex,
@@ -675,12 +676,11 @@ export function SchedulePlanner() {
         // The AI planner accepts that verified SAIS value, so do not leave the
         // actionable state empty while displaying a valid department label.
         const resolved = context.department_code ?? context.department_query ?? "";
-        // Only overwrite a restored manual choice when SAIS actually knows: a
-        // student who picked their department by hand keeps that pick.
         if (resolved) {
-          setDepartment(resolved);
-          setDepartmentLabel(context.department_query ?? resolved);
+          setStudentDepartment({ code: resolved, label: context.department_query ?? resolved });
+          setDepartmentStatus("ok");
         } else {
+          setStudentDepartment(null);
           setDepartmentStatus("unknown");
         }
       })
@@ -726,8 +726,7 @@ export function SchedulePlanner() {
   }, [departmentQuery, departmentKnown]);
 
   function chooseDepartment(option: DepartmentOption) {
-    setDepartment(option.code);
-    setDepartmentLabel(option.name || option.code);
+    setDepartmentFallback({ code: option.code, label: option.name || option.code });
     setDepartmentQuery("");
     setDepartmentOptions([]);
     setDepartmentCodeDraft("");
