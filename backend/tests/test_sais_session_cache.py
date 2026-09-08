@@ -309,6 +309,24 @@ def test_real_curriculum_dom_checkmarks_and_grade_cells(sais):
     assert result["semesters"][1]["courses"][0]["grade"] == ""
     assert "0000000" not in str(result)
 
+
+def test_curriculum_accepts_assigned_course_text_without_a_grade(sais):
+    html = '''<div id="curriculum"><div class="box-table-curriculum">
+      <div class="box-table-head-curriculum"><div class="box-column-label-curriculum">3.SEMESTER</div></div>
+      <div class="box-row-curriculum"><div class="box-column-label-curriculum">PHYS 213</div>
+      <div class="box-column-value-curriculum">
+        <div id="0000000|1|1|3|2300213|1|PHYS 213">
+          <div id="0000000|1|1|2300213|1|25||PHYS 213|0">PHYS 213 MUST COURSE</div>
+        </div>
+      </div></div>
+    </div></div>'''
+
+    result = sais.parse_student_curriculum(html)
+
+    assert result["semesters"][0]["courses"] == [
+        {"course_code": "2300213", "course_name": "PHYS 213", "grade": ""}
+    ]
+
 def test_curriculum_parser_rejects_missing_board(sais):
     with pytest.raises(ValueError):
         sais.parse_student_curriculum('<form id="autologin"></form>')

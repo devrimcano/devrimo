@@ -121,10 +121,10 @@ def parse_student_curriculum(html: str) -> dict:
                     grade = clean_text(parts[6])
                     if grade:
                         break
-            # Nonempty assigned content without a readable grade is not a blank
-            # requirement. Fail rather than silently recommend it again.
-            if value.get_text(strip=True) and not grade:
-                raise ValueError("SAIS curriculum assigned course grade could not be read")
+            # SAIS also renders an assigned-course child for registrations that
+            # do not have a grade yet. Its text is nonempty (for example,
+            # ``PHYS 213 MUST COURSE``) while the grade field in the id is
+            # empty. That is a valid pending requirement, not a parse failure.
             courses.append({"course_code": fields[4], "course_name": label_text, "grade": grade})
         semester = {"semester": number, "completed": completed, "courses": courses}
         if number in semesters and semesters[number] != semester:
