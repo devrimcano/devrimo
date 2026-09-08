@@ -17,6 +17,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { useLocale } from "@/components/locale-provider";
 
 const ANIMATION_DURATION = 200;
 
@@ -101,7 +102,13 @@ function ToolGroupTrigger({
   count: number;
   active?: boolean;
 }) {
-  const label = `${count} tool ${count === 1 ? "call" : "calls"}`;
+  const { pick } = useLocale();
+  // Turkish takes no plural after a number, so this is one string in each
+  // language rather than a count with an English suffix glued on.
+  const label = pick({
+    tr: `${count} işlem`,
+    en: `${count} tool ${count === 1 ? "call" : "calls"}`,
+  });
 
   return (
     <CollapsibleTrigger

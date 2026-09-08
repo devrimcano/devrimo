@@ -101,13 +101,15 @@ const isHistoryLoadingView = (s: AssistantState) =>
   !s.thread.isDisabled &&
   !s.threads.isLoading;
 
-const ThreadHistorySkeleton: FC = () => (
+const ThreadHistorySkeleton: FC = () => {
+  const { pick } = useLocale();
+  return (
   <div
     data-slot="aui_thread-history-skeleton"
     role="status"
     className="animate-in fade-in fill-mode-both flex flex-col gap-y-6 [animation-delay:150ms] [animation-duration:200ms]"
   >
-    <span className="sr-only">Loading conversation</span>
+    <span className="sr-only">{pick({ tr: "Sohbet yükleniyor", en: "Loading conversation" })}</span>
     <Skeleton className="ml-auto h-9 w-2/5 rounded-xl motion-reduce:animate-none" />
     <div className="flex flex-col gap-y-2">
       <Skeleton className="h-4 w-11/12 motion-reduce:animate-none" />
@@ -120,7 +122,8 @@ const ThreadHistorySkeleton: FC = () => (
       <Skeleton className="h-4 w-2/3 motion-reduce:animate-none" />
     </div>
   </div>
-);
+  );
+};
 
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
@@ -288,6 +291,7 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
+  const { pick } = useLocale();
   const {
     ToolFallback: ToolFallbackComponent = ToolFallback,
     ToolGroup,
@@ -370,7 +374,7 @@ const AssistantMessage: FC = () => {
                 );
               case "indicator":
                 return (
-                  <span data-slot="aui_assistant-message-indicator" className="inline-flex gap-1 py-2" role="status" aria-label="Assistant is working">
+                  <span data-slot="aui_assistant-message-indicator" className="inline-flex gap-1 py-2" role="status" aria-label={pick({ tr: "Asistan yanıtı hazırlıyor", en: "Assistant is working" })}>
                     {[0, 1, 2].map((index) => <span key={index} className="size-1.5 animate-bounce rounded-full bg-muted-foreground motion-reduce:animate-none" style={{ animationDelay: `${index * 120}ms` }} />)}
                   </span>
                 );
@@ -394,27 +398,28 @@ const AssistantMessage: FC = () => {
 };
 
 const AssistantActionBar: FC = () => {
+  const { pick } = useLocale();
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
-      <ActionBarPrimitive.Copy render={<TooltipIconButton tooltip="Copy" />}><AuiIf condition={(s) => s.message.isCopied}>
+      <ActionBarPrimitive.Copy render={<TooltipIconButton tooltip={pick({ tr: "Kopyala", en: "Copy" })} />}><AuiIf condition={(s) => s.message.isCopied}>
                       <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
                     </AuiIf><AuiIf condition={(s) => !s.message.isCopied}>
                       <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
                     </AuiIf></ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload render={<TooltipIconButton tooltip="Refresh" />}><RefreshCwIcon /></ActionBarPrimitive.Reload>
+      <ActionBarPrimitive.Reload render={<TooltipIconButton tooltip={pick({ tr: "Yeniden yanıtla", en: "Refresh" })} />}><RefreshCwIcon /></ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
-        <ActionBarMorePrimitive.Trigger render={<TooltipIconButton tooltip="More" className="data-[state=open]:bg-accent" />}><MoreHorizontalIcon /></ActionBarMorePrimitive.Trigger>
+        <ActionBarMorePrimitive.Trigger render={<TooltipIconButton tooltip={pick({ tr: "Diğer işlemler", en: "More" })} className="data-[state=open]:bg-accent" />}><MoreHorizontalIcon /></ActionBarMorePrimitive.Trigger>
         <ActionBarMorePrimitive.Content
           side="bottom"
           align="start"
           sideOffset={6}
           className="aui-action-bar-more-content bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5"
         >
-          <ActionBarPrimitive.ExportMarkdown render={<ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none" />}><DownloadIcon className="size-4" />Export as Markdown
+          <ActionBarPrimitive.ExportMarkdown render={<ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none" />}><DownloadIcon className="size-4" />{pick({ tr: "Markdown olarak indir", en: "Export as Markdown" })}
                               </ActionBarPrimitive.ExportMarkdown>
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
@@ -463,18 +468,20 @@ const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  const { pick } = useLocale();
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-user-action-bar-root flex flex-col items-end"
     >
-      <ActionBarPrimitive.Edit render={<TooltipIconButton tooltip="Edit" className="aui-user-action-edit" />}><PencilIcon /></ActionBarPrimitive.Edit>
+      <ActionBarPrimitive.Edit render={<TooltipIconButton tooltip={pick({ tr: "Mesajı düzenle", en: "Edit" })} className="aui-user-action-edit" />}><PencilIcon /></ActionBarPrimitive.Edit>
     </ActionBarPrimitive.Root>
   );
 };
 
 const EditComposer: FC = () => {
+  const { pick } = useLocale();
   return (
     <MessagePrimitive.Root
       data-slot="aui_edit-composer-wrapper"
@@ -486,9 +493,9 @@ const EditComposer: FC = () => {
           autoFocus
         />
         <div className="aui-edit-composer-footer mx-2.5 mb-2.5 flex items-center gap-1.5 self-end">
-          <ComposerPrimitive.Cancel render={<Button variant="ghost" size="sm" className="h-8 rounded-full px-3.5" />}>Cancel
+          <ComposerPrimitive.Cancel render={<Button variant="ghost" size="sm" className="h-8 rounded-full px-3.5" />}>{pick({ tr: "Vazgeç", en: "Cancel" })}
                               </ComposerPrimitive.Cancel>
-          <ComposerPrimitive.Send render={<Button size="sm" className="h-8 rounded-full px-3.5" />}>Update
+          <ComposerPrimitive.Send render={<Button size="sm" className="h-8 rounded-full px-3.5" />}>{pick({ tr: "Kaydet ve yeniden sor", en: "Update" })}
                               </ComposerPrimitive.Send>
         </div>
       </ComposerPrimitive.Root>
@@ -500,6 +507,7 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
   className,
   ...rest
 }) => {
+  const { pick } = useLocale();
   return (
     <BranchPickerPrimitive.Root
       hideWhenSingleBranch
@@ -509,11 +517,11 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
       )}
       {...rest}
     >
-      <BranchPickerPrimitive.Previous render={<TooltipIconButton tooltip="Previous" />}><ChevronLeftIcon /></BranchPickerPrimitive.Previous>
+      <BranchPickerPrimitive.Previous render={<TooltipIconButton tooltip={pick({ tr: "Önceki yanıt", en: "Previous" })} />}><ChevronLeftIcon /></BranchPickerPrimitive.Previous>
       <span className="aui-branch-picker-state font-medium">
         <BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count />
       </span>
-      <BranchPickerPrimitive.Next render={<TooltipIconButton tooltip="Next" />}><ChevronRightIcon /></BranchPickerPrimitive.Next>
+      <BranchPickerPrimitive.Next render={<TooltipIconButton tooltip={pick({ tr: "Sonraki yanıt", en: "Next" })} />}><ChevronRightIcon /></BranchPickerPrimitive.Next>
     </BranchPickerPrimitive.Root>
   );
 };

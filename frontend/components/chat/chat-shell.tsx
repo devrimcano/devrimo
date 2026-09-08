@@ -10,6 +10,8 @@ import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { loadSessionMessages, useChatSessions } from "@/hooks/useChat";
 import { Loader2Icon, MenuIcon, Trash2Icon } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
+import { activityFields } from "@/lib/agent-activity";
+import { cn } from "@/lib/utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -310,9 +312,17 @@ function AssistantThread({
     }
   }
 
-  const actionTitle = requirement?.tool === "send_email"
-    ? pick({ tr: "E-posta Gönderme Onayı", en: "Send Email Confirmation" })
-    : pick({ tr: "İşlem Onayı", en: "Action Confirmation" });
+  const isEmail = requirement?.tool === "send_email";
+  const actionTitle = isEmail
+    ? pick({ tr: "Bu e-posta senin adına gönderilecek", en: "This email will be sent as you" })
+    : pick({ tr: "Bu işlem için onayın gerekiyor", en: "This action needs your approval" });
+  // The one thing a consent dialog owes the student is the content they are
+  // consenting to, in their own language. It used to be `Object.entries` of the
+  // raw tool arguments, keyed by internal field names and cased by CSS — which
+  // under lang="tr" rendered a key beginning with "i" as "İ".
+  const confirmationFields = requirement?.arguments && typeof requirement.arguments === "object"
+    ? activityFields(requirement.arguments as Record<string, unknown>)
+    : [];
 
   return (
     <>
@@ -324,22 +334,44 @@ function AssistantThread({
           <AlertDialogHeader>
             <AlertDialogTitle>{actionTitle}</AlertDialogTitle>
             <AlertDialogDescription>
-              {pick({
-                tr: "Yapılacak işlemi ve bilgileri kontrol edip onayla.",
-                en: "Please review the action details before confirming.",
-              })}
+              {isEmail
+                ? pick({
+                    tr: "Alıcıyı, konuyu ve mesajı oku. Onaylamazsan hiçbir şey gönderilmez.",
+                    en: "Read the recipient, subject and message. Nothing is sent unless you approve.",
+                  })
+                : pick({
+                    tr: "Yapılacak işlemi ve bilgileri kontrol edip onayla.",
+                    en: "Please review the action details before confirming.",
+                  })}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="max-h-72 space-y-2 overflow-auto rounded-lg border bg-muted/40 p-3 text-xs">
-            {requirement?.arguments && typeof requirement.arguments === "object" ? (
-              Object.entries(requirement.arguments as Record<string, unknown>).map(([k, v]) => (
-                <div key={k} className="flex flex-col gap-0.5">
-                  <span className="font-semibold text-foreground/80 capitalize">{k.replace(/_/g, " ")}:</span>
-                  <span className="whitespace-pre-wrap text-muted-foreground">{typeof v === "object" ? JSON.stringify(v, null, 2) : String(v)}</span>
-                </div>
-              ))
+          <div className="max-h-72 overflow-auto rounded-lg border bg-muted/40 text-sm">
+            {confirmationFields.length ? (
+              <dl className="divide-border/60 divide-y">
+                {confirmationFields.map((field) => (
+                  <div
+                    key={field.key}
+                    className={cn(
+                      "grid gap-1 px-3 py-2 sm:gap-3",
+                      // The message body is the part that is actually read, so it
+                      // gets its own full-width block instead of a narrow column.
+                      field.key === "body" || field.key === "body_html"
+                        ? "grid-cols-1"
+                        : "sm:grid-cols-[6.5rem_minmax(0,1fr)]",
+                    )}
+                  >
+                    <dt className="text-muted-foreground text-xs">{pick(field.label)}</dt>
+                    <dd className="text-foreground/90 break-words whitespace-pre-wrap">{field.value}</dd>
+                  </div>
+                ))}
+              </dl>
             ) : (
-              <pre className="whitespace-pre-wrap">{JSON.stringify(requirement?.arguments ?? {}, null, 2)}</pre>
+              <p className="text-muted-foreground px-3 py-2 text-xs">
+                {pick({
+                  tr: "Bu işlemin gösterilecek bir ayrıntısı yok.",
+                  en: "This action carries no details to show.",
+                })}
+              </p>
             )}
           </div>
           <AlertDialogFooter>
@@ -348,7 +380,9 @@ function AssistantThread({
             </AlertDialogCancel>
             <AlertDialogAction disabled={confirmationPending} onClick={() => void resolveConfirmation(true)}>
               {confirmationPending ? <Loader2Icon className="animate-spin" /> : null}
-              {pick({ tr: "Onayla", en: "Approve" })}
+              {isEmail
+                ? pick({ tr: "Gönder", en: "Send" })
+                : pick({ tr: "Onayla", en: "Approve" })}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

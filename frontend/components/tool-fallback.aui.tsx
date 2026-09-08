@@ -24,6 +24,8 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useLocale } from "@/components/locale-provider";
+import { type Copy, activityFields, describeActivity, parseArgs } from "@/lib/agent-activity";
 
 const ANIMATION_DURATION = 200;
 
@@ -126,20 +128,25 @@ function ToolFallbackDuration({
 
 function ToolFallbackTrigger({
   toolName,
+  argsText,
   status,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
+  argsText?: string;
   status?: ToolCallMessagePartStatus;
 }) {
+  const { pick } = useLocale();
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  // The student reads what happened and which METU system answered, not the
+  // internal function name. `describeActivity` refuses to invent either.
+  const activity = describeActivity(toolName, argsText, statusType);
 
   return (
     <CollapsibleTrigger
@@ -162,11 +169,17 @@ function ToolFallbackTrigger({
         data-slot="tool-fallback-trigger-label"
         className={cn(
           "aui-tool-fallback-trigger-label-wrapper inline-block text-start leading-none",
-          isCancelled && "text-muted-foreground line-through",
+          isCancelled && "text-muted-foreground",
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
-        {label}: <b>{toolName}</b>
+        {pick(activity.line)}
+        {activity.source ? (
+          <span className="aui-tool-fallback-trigger-source text-muted-foreground/75">
+            {" · "}
+            {pick(activity.source)}
+          </span>
+        ) : null}
       </span>
       <ToolFallbackDuration />
       <ChevronDownIcon
@@ -217,6 +230,13 @@ function ToolFallbackContent({
   );
 }
 
+/**
+ * What the assistant asked for, as labelled rows.
+ *
+ * This was the raw argument JSON in a `<pre>`. A student opening a tool call to
+ * check what had been read got the request's plumbing instead, in a language the
+ * interface does not speak.
+ */
 function ToolFallbackArgs({
   argsText,
   className,
@@ -224,17 +244,25 @@ function ToolFallbackArgs({
 }: React.ComponentProps<"div"> & {
   argsText?: string;
 }) {
-  if (!argsText) return null;
+  const { pick } = useLocale();
+  const fields = activityFields(parseArgs(argsText));
+  if (!fields.length) return null;
 
   return (
     <div
       data-slot="tool-fallback-args"
-      className={cn("aui-tool-fallback-args", className)}
+      className={cn(
+        "aui-tool-fallback-args bg-muted/40 grid gap-1.5 rounded-md p-2.5 text-xs",
+        className,
+      )}
       {...props}
     >
-      <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {argsText}
-      </pre>
+      {fields.map((field) => (
+        <div key={field.key} className="grid gap-0.5 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
+          <span className="text-muted-foreground">{pick(field.label)}</span>
+          <span className="text-foreground/90 break-words whitespace-pre-wrap">{field.value}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -246,6 +274,7 @@ function ToolFallbackResult({
 }: React.ComponentProps<"div"> & {
   result?: unknown;
 }) {
+  const { pick } = useLocale();
   if (result === undefined) return null;
 
   return (
@@ -255,13 +284,27 @@ function ToolFallbackResult({
       {...props}
     >
       <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
-        Result:
+        {pick({ tr: "ODTÜ'nün verdiği yanıt", en: "What METU answered" })}
       </p>
       <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
         {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
       </pre>
     </div>
   );
+}
+
+/** The one sentence inside an error object that a person can act on. */
+function errorSentence(error: unknown): string | null {
+  if (!error) return null;
+  if (typeof error === "string") return error.trim() || null;
+  if (typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    for (const key of ["detail", "message", "error", "reason"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return null;
 }
 
 function ToolFallbackError({
@@ -271,19 +314,29 @@ function ToolFallbackError({
 }: React.ComponentProps<"div"> & {
   status?: ToolCallMessagePartStatus;
 }) {
+  const { pick } = useLocale();
   if (status?.type !== "incomplete") return null;
 
-  const error = status.error;
-  const errorText = error
-    ? typeof error === "string"
-      ? error
-      : JSON.stringify(error)
-    : null;
-
-  if (!errorText) return null;
-
   const isCancelled = status.reason === "cancelled";
-  const headerText = isCancelled ? "Cancelled reason:" : "Error:";
+  // A JSON dump was the message here. What a student needs is the sentence
+  // inside it, and when there is none, a plain statement of what happens next
+  // rather than the object's punctuation.
+  const errorText =
+    errorSentence(status.error) ??
+    pick(
+      isCancelled
+        ? { tr: "İşlem yarıda kaldı.", en: "The step was interrupted." }
+        : {
+            tr: "ODTÜ sistemi yanıt vermedi. Birkaç dakika sonra tekrar sorabilirsin.",
+            en: "The METU system did not answer. You can ask again in a few minutes.",
+          },
+    );
+
+  const headerText = pick(
+    isCancelled
+      ? { tr: "Yarıda kalma nedeni", en: "Why it stopped" }
+      : { tr: "Neden okunamadı", en: "Why it could not be read" },
+  );
 
   return (
     <div
@@ -291,10 +344,10 @@ function ToolFallbackError({
       className={cn("aui-tool-fallback-error", className)}
       {...props}
     >
-      <p className="aui-tool-fallback-error-header text-muted-foreground font-semibold">
+      <p className="aui-tool-fallback-error-header text-muted-foreground text-xs font-medium">
         {headerText}
       </p>
-      <p className="aui-tool-fallback-error-reason text-muted-foreground">
+      <p className="aui-tool-fallback-error-reason text-foreground/90 text-xs break-words">
         {errorText}
       </p>
     </div>
@@ -304,11 +357,11 @@ function ToolFallbackError({
 const APPROVED_RESULT = "Approved by user";
 const DENIED_RESULT = "User denied tool execution";
 
-const APPROVAL_OPTION_DEFAULT_LABELS: Record<string, string> = {
-  "allow-once": "Allow",
-  "allow-always": "Always allow",
-  "reject-once": "Deny",
-  "reject-always": "Always deny",
+const APPROVAL_OPTION_DEFAULT_LABELS: Record<string, Copy> = {
+  "allow-once": { tr: "İzin ver", en: "Allow" },
+  "allow-always": { tr: "Her zaman izin ver", en: "Always allow" },
+  "reject-once": { tr: "Reddet", en: "Deny" },
+  "reject-always": { tr: "Her zaman reddet", en: "Always deny" },
 };
 
 const isKnownKind = (kind: string) =>
@@ -317,12 +370,21 @@ const isKnownKind = (kind: string) =>
 const isAllowKind = (kind: string) =>
   kind === "allow-once" || kind === "allow-always";
 
-const approvalOptionLabel = (option: ToolApprovalOption) =>
-  option.label ??
-  (isKnownKind(option.kind)
+/**
+ * A declared option keeps the server's own label; a known kind gets ours, in the
+ * student's language. `option.id` is the last resort and stays untranslated
+ * because it is an identifier, not copy.
+ */
+const approvalOptionLabel = (
+  option: ToolApprovalOption,
+  pick: (copy: Copy) => string,
+) => {
+  if (option.label) return option.label;
+  const known = isKnownKind(option.kind)
     ? APPROVAL_OPTION_DEFAULT_LABELS[option.kind]
-    : undefined) ??
-  option.id;
+    : undefined;
+  return known ? pick(known) : option.id;
+};
 
 const offersInterruptAction = (
   status: ToolCallMessagePartStatus | undefined,
@@ -353,6 +415,7 @@ function ToolFallbackApproval({
     interrupt?: ToolCallMessagePart["interrupt"];
     approval?: ToolCallMessagePart["approval"];
   }) {
+  const { pick } = useLocale();
   const [submitted, setSubmitted] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
@@ -431,7 +494,7 @@ function ToolFallbackApproval({
         {...props}
       >
         <p className="aui-tool-fallback-approval-confirm-title font-semibold">
-          {confirmMeta?.title ?? `${approvalOptionLabel(confirming)}?`}
+          {confirmMeta?.title ?? `${approvalOptionLabel(confirming, pick)}?`}
         </p>
         {confirmDescription && (
           <p className="aui-tool-fallback-approval-confirm-description text-muted-foreground">
@@ -456,7 +519,7 @@ function ToolFallbackApproval({
             onClick={() => respondWithOption(confirming)}
             disabled={submitted}
           >
-            Confirm
+            {pick({ tr: "Onayla", en: "Confirm" })}
           </Button>
           <Button
             size="sm"
@@ -465,7 +528,7 @@ function ToolFallbackApproval({
             onClick={() => setConfirmingId(null)}
             disabled={submitted}
           >
-            Back
+            {pick({ tr: "Geri dön", en: "Back" })}
           </Button>
         </div>
       </div>
@@ -496,7 +559,7 @@ function ToolFallbackApproval({
             onClick={() => handleOption(option)}
             disabled={submitted}
           >
-            {approvalOptionLabel(option)}
+            {approvalOptionLabel(option, pick)}
           </Button>
         ))}
         {rejectOptions.length === 0 && (
@@ -507,7 +570,7 @@ function ToolFallbackApproval({
             onClick={() => respond(false)}
             disabled={submitted}
           >
-            Deny
+            {pick({ tr: "Reddet", en: "Deny" })}
           </Button>
         )}
       </div>
@@ -529,7 +592,7 @@ function ToolFallbackApproval({
         onClick={() => respond(true)}
         disabled={submitted}
       >
-        Allow
+        {pick({ tr: "İzin ver", en: "Allow" })}
       </Button>
       <Button
         size="sm"
@@ -538,7 +601,7 @@ function ToolFallbackApproval({
         onClick={() => respond(false)}
         disabled={submitted}
       >
-        Deny
+        {pick({ tr: "Reddet", en: "Deny" })}
       </Button>
     </div>
   );
@@ -571,7 +634,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
 
   return (
     <ToolFallbackRoot open={open} onOpenChange={setOpen}>
-      <ToolFallbackTrigger toolName={toolName} status={status} />
+      <ToolFallbackTrigger toolName={toolName} argsText={argsText} status={status} />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
         <ToolFallbackArgs
