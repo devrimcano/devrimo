@@ -121,10 +121,10 @@ def parse_student_curriculum(html: str) -> dict:
                     grade = clean_text(parts[6])
                     if grade:
                         break
-            # Nonempty assigned content without a readable grade is not a blank
-            # requirement. Fail rather than silently recommend it again.
-            if value.get_text(strip=True) and not grade:
-                raise ValueError("SAIS curriculum assigned course grade could not be read")
+            # SAIS also renders an assigned-course child for registrations that
+            # do not have a grade yet. Its text is nonempty (for example,
+            # ``PHYS 213 MUST COURSE``) while the grade field in the id is
+            # empty. That is a valid pending requirement, not a parse failure.
             courses.append({"course_code": fields[4], "course_name": label_text, "grade": grade})
         semester = {"semester": number, "completed": completed, "courses": courses}
         if number in semesters and semesters[number] != semester:
@@ -371,7 +371,20 @@ class SAISClient:
         values = {item["name"]: item.get("value", "") for item in form.select('input[type="hidden"][name]')}
         values["text_semester_programtype"] = selected["value"]
         values["submit_studentInformation"] = "Submit"
-        response = await self._client.post(urljoin(url, form.get("action") or url), data=values)
+        endpoint = urljoin(url, form.get("action") or url)
+        response = None
+        for attempt in range(2):
+            try:
+                # The MCP caller gives the complete tool call 30 seconds. A
+                # single stalled SAIS response must leave enough time for one
+                # bounded retry instead of consuming that whole budget.
+                response = await self._client.post(endpoint, data=values, timeout=12.0)
+                break
+            except httpx.TimeoutException:
+                if attempt:
+                    raise
+        if response is None:  # pragma: no cover - the loop returns or raises
+            raise RuntimeError("SAIS curriculum request produced no response")
         response.raise_for_status()
         return parse_student_curriculum(self._decode_html(response))
 

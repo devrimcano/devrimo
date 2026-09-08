@@ -27,7 +27,7 @@ def test_shared_solver_uses_minute_ranges_for_conflicts():
     assert {choice.key for choice in solutions[0]} == {"A"}
 
 
-def test_timetable_solver_skips_ineligible_and_empty_day_sections():
+def test_timetable_solver_rejects_plan_when_a_timed_course_has_no_valid_section():
     state = PlanState(
         empty_days=["Tue"],
         pool=[
@@ -59,10 +59,79 @@ def test_timetable_solver_skips_ineligible_and_empty_day_sections():
 
     solved = solve_plan_state(state)
 
+    assert solved.entries == []
+    assert solved.alternatives == []
+
+
+def test_timetable_solver_never_returns_a_partial_conflict_free_plan():
+    state = PlanState(
+        pool=[
+            {"code": "MATH101", "name": "Math", "credits": 3},
+            {"code": "PHYS101", "name": "Physics", "credits": 3},
+        ],
+        sections={
+            "MATH101": [{
+                "section": "1",
+                "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}],
+            }],
+            "PHYS101": [{
+                "section": "1",
+                "meetings": [{"day": "Mon", "start_minute": 570, "duration_minutes": 60}],
+            }],
+        },
+    )
+
+    solved = solve_plan_state(state)
+
+    assert solved.entries == []
+    assert solved.alternatives == []
+
+
+def test_timetable_solver_can_ignore_a_course_without_published_times():
+    state = PlanState(
+        pool=[
+            {"code": "MATH101", "name": "Math", "credits": 3},
+            {"code": "PHYS101", "name": "Physics", "credits": 3},
+        ],
+        sections={
+            "MATH101": [{"section": "1", "meetings": []}],
+            "PHYS101": [{
+                "section": "1",
+                "meetings": [{"day": "Mon", "start_minute": 660, "duration_minutes": 110}],
+            }],
+        },
+    )
+
+    solved = solve_plan_state(state)
+
     assert {entry.code for entry in solved.entries} == {"PHYS101"}
-    assert solved.alternatives
-    assert all(entry.code != "MATH101" for entry in solved.entries)
-    assert all(entry.day != "Tue" for alternative in solved.alternatives for entry in alternative)
+    assert len(solved.alternatives) == 1
+
+
+def test_timetable_solver_omits_a_fully_restricted_course_without_returning_a_partial_choice():
+    state = PlanState(
+        pool=[
+            {"code": "MATH101", "name": "Math", "credits": 3},
+            {"code": "HIST101", "name": "History", "credits": 3},
+        ],
+        sections={
+            "MATH101": [{
+                "section": "1",
+                "eligible": True,
+                "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}],
+            }],
+            "HIST101": [{
+                "section": "1",
+                "eligible": False,
+                "meetings": [{"day": "Tue", "start_minute": 540, "duration_minutes": 60}],
+            }],
+        },
+    )
+
+    solved = solve_plan_state(state)
+
+    assert {entry.code for entry in solved.entries} == {"MATH101"}
+    assert len(solved.alternatives) == 1
 
 
 def test_a_stale_duplicate_section_list_cannot_undo_a_verdict():
