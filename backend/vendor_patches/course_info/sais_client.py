@@ -82,6 +82,26 @@ def clean_text(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _explicit_empty_result(soup: BeautifulSoup, subject: str) -> bool:
+    """Whether SAIS explicitly says the requested result has no rows."""
+    text = clean_text(soup.get_text(" ", strip=True)).casefold()
+    subjects = {
+        "course": ("course", "courses", "ders"),
+        "prerequisite": ("prerequisite", "prerequisites", "ön koşul", "önkoşul"),
+    }.get(subject, (subject,))
+    empty_markers = (
+        "no record",
+        "no data",
+        "not found",
+        "does not have",
+        "there is no",
+        "bulunmamaktadır",
+        "bulunamadı",
+        "yoktur",
+    )
+    return any(term in text for term in subjects) and any(marker in text for marker in empty_markers)
+
+
 def parse_student_curriculum(html: str) -> dict:
     """Read the actual Student Information curriculum board (SAIS App 61).
 
@@ -90,6 +110,7 @@ def parse_student_curriculum(html: str) -> dict:
     """
     soup = BeautifulSoup(html, "html.parser")
     semesters = {}
+    warnings: List[str] = []
     for box in soup.select("#curriculum .box-table-curriculum"):
         head = box.select_one(".box-table-head-curriculum")
         if head is None:
@@ -101,11 +122,14 @@ def parse_student_curriculum(html: str) -> dict:
         number = int(match.group(1))
         completed = any(urljoin("https://example.invalid/", img.get("src", "")).split("?")[0].endswith("/check.gif") for img in head.select("img"))
         courses = []
-        for row in box.select(".box-row-curriculum"):
+        for row_index, row in enumerate(box.select(".box-row-curriculum"), start=1):
             name = row.select_one(".box-column-label-curriculum")
             value = row.select_one(".box-column-value-curriculum")
             if name is None or value is None:
-                raise ValueError("SAIS curriculum row is missing its course or grade cell")
+                warnings.append(
+                    f"Semester {number}, row {row_index}: curriculum cells could not be read."
+                )
+                continue
             label_text = clean_text(name.get_text(" ", strip=True))
             # Elective slots have a category label, not a named required course.
             if not re.fullmatch(r"[A-Z]{2,6}\s*\d{3,4}", label_text, re.I):
@@ -113,7 +137,8 @@ def parse_student_curriculum(html: str) -> dict:
             container = value.find(attrs={"id": True}, recursive=False)
             fields = str(container.get("id", "") if container else "").split("|")
             if len(fields) != 7 or not re.fullmatch(r"\d{7}", fields[4]):
-                raise ValueError("SAIS curriculum course identity could not be read")
+                warnings.append(f"{label_text}: curriculum course identity could not be read.")
+                continue
             grade = ""
             for assigned in container.find_all(attrs={"id": True}):
                 parts = assigned["id"].split("|")
@@ -132,7 +157,7 @@ def parse_student_curriculum(html: str) -> dict:
         semesters[number] = semester
     if not semesters:
         raise ValueError("SAIS Student Information curriculum board could not be read")
-    return {"semesters": [semesters[n] for n in sorted(semesters)]}
+    return {"semesters": [semesters[n] for n in sorted(semesters)], "warnings": warnings}
 
 
 class SAISAuthError(Exception):
@@ -470,12 +495,14 @@ class SAISClient:
         _, _, soup = await self._submit_course_list_page(department_code, semester_code)
 
         courses: List[CourseSummary] = []
+        course_table_found = False
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
                 continue
             header_cells = [td.get_text(strip=True).lower() for td in rows[0].find_all(["td", "th"])]
             if any("code" in h for h in header_cells) and any("name" in h for h in header_cells):
+                course_table_found = True
                 for tr in rows[1:]:
                     cells = tr.find_all(["td", "th"])
                     if len(cells) >= 6:
@@ -509,6 +536,9 @@ class SAISClient:
                                     type=ctype,
                                 )
                             )
+
+        if not course_table_found and not _explicit_empty_result(soup, "course"):
+            raise ValueError("SAIS programme course table could not be read")
 
         return courses
 
@@ -557,6 +587,7 @@ class SAISClient:
         soup = BeautifulSoup(self._decode_html(resp), "html.parser")
 
         rows: List[SectionConstraint] = []
+        constraint_table_found = False
         for table in soup.find_all("table"):
             trs = table.find_all("tr")
             if not trs:
@@ -567,6 +598,7 @@ class SAISClient:
             # only table naming a department alongside a character range.
             if not (any("dept" in h for h in headers) and any("char" in h for h in headers)):
                 continue
+            constraint_table_found = True
             for tr in trs[1:]:
                 cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
                 if len(cells) < 9 or not cells[0]:
@@ -585,6 +617,9 @@ class SAISClient:
                     )
                 )
             break
+
+        if not constraint_table_found:
+            raise ValueError("SAIS section restriction table could not be read")
 
         return SectionConstraints(
             department=str(department_code),
@@ -633,12 +668,14 @@ class SAISClient:
                 credit_info = clean_text(credit_m.group(1))
 
         sections: List[CourseSection] = []
+        section_table_found = False
         for table in res_soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
                 continue
             headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(["td", "th"])]
             if any("section" in h for h in headers) and any("instructor" in h for h in headers):
+                section_table_found = True
                 current_section: Optional[CourseSection] = None
                 for tr in rows[1:]:
                     cells = tr.find_all(["td", "th"])
@@ -687,6 +724,9 @@ class SAISClient:
                                         )
                                     )
 
+        if not c_name and not section_table_found:
+            raise ValueError("SAIS course information page could not be read")
+
         return CourseDetails(
             department=dept_name or department_code,
             semester=sem_name,
@@ -717,12 +757,14 @@ class SAISClient:
         soup = BeautifulSoup(html, "html.parser")
 
         prereqs: List[CoursePrerequisite] = []
+        prerequisite_table_found = False
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
                 continue
             headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(["td", "th"])]
             if any("course code" in h or "prerequisite" in h for h in headers) and any("set no" in h or "min grade" in h for h in headers):
+                prerequisite_table_found = True
                 for tr in rows[1:]:
                     cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
                     if len(cells) >= 7:
@@ -739,6 +781,9 @@ class SAISClient:
                                 position=cells[8] if len(cells) > 8 else "",
                             )
                         )
+
+        if not prerequisite_table_found and not _explicit_empty_result(soup, "prerequisite"):
+            raise ValueError("SAIS prerequisite table could not be read")
 
         return prereqs
 

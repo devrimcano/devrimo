@@ -1949,6 +1949,11 @@ export interface components {
              * @default false
              */
             curriculum_unavailable?: boolean;
+            /**
+             * Partial
+             * @default false
+             */
+            partial?: boolean;
             /** Prerequisite Rejections */
             prerequisite_rejections?: components["schemas"]["PrerequisiteRejectionOut"][];
             /** Source */

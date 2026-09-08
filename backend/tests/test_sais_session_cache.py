@@ -331,6 +331,21 @@ def test_curriculum_accepts_assigned_course_text_without_a_grade(sais):
     ]
 
 
+def test_one_malformed_curriculum_row_keeps_verified_rows_and_reports_partial(sais):
+    malformed = '''<div class="box-row-curriculum">
+      <div class="box-column-label-curriculum">EE 201</div>
+      <div class="box-column-value-curriculum"><div id="changed-markup"></div></div>
+    </div>'''
+    box = _curriculum_box(3, False)
+    before_close, after_close = box.rsplit('</div>', 1)
+    html = '<div id="curriculum">' + before_close + malformed + '</div>' + after_close + '</div>'
+
+    result = sais.parse_student_curriculum(html)
+
+    assert result["semesters"][0]["courses"][0]["course_code"] == "2300213"
+    assert result["warnings"] == ["EE 201: curriculum course identity could not be read."]
+
+
 async def test_curriculum_retries_one_stalled_result_page_within_the_tool_budget(sais):
     client = _client(sais)
     landing = _soup('''<form action="curriculum.php">
@@ -359,6 +374,83 @@ async def test_curriculum_retries_one_stalled_result_page_within_the_tool_budget
     assert len(attempts) == 2
     assert [timeout for _, timeout in attempts] == [12.0, 12.0]
     assert result["semesters"][0]["courses"][0]["course_code"] == "2300213"
+
+
+async def test_prerequisite_read_rejects_a_plausible_previous_page(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [COURSE_LIST])
+
+    with pytest.raises(ValueError, match="prerequisite table"):
+        await client.get_course_prerequisites("567", "20261", "5670201")
+
+
+async def test_course_listing_rejects_an_unrelated_success_page(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        page = "<html><body><p>Welcome to SAIS.</p></body></html>"
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+
+    with pytest.raises(ValueError, match="programme course table"):
+        await client.list_program_courses("567", "20261")
+
+
+async def test_explicit_empty_course_listing_remains_valid(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        page = "<html><body><p>No course records found.</p></body></html>"
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+
+    assert await client.list_program_courses("567", "20261") == []
+
+
+async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, ["<p>This course does not have any prerequisites.</p>"])
+
+    assert await client.get_course_prerequisites("567", "20261", "5670201") == []
+
+
+async def test_course_info_read_rejects_a_plausible_previous_page(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [COURSE_LIST])
+
+    with pytest.raises(ValueError, match="course information page"):
+        await client.get_course_info("567", "20261", "5670201")
+
+
+async def test_section_constraint_read_rejects_a_plausible_previous_page(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    course_page = '<form><input type="hidden" name="hidden_redir" value="Course_Info"></form>'
+    _post_returning(client, [course_page, COURSE_LIST])
+
+    with pytest.raises(ValueError, match="restriction table"):
+        await client.get_section_constraints("567", "20261", "5670201", "1")
 
 def test_curriculum_parser_rejects_missing_board(sais):
     with pytest.raises(ValueError):

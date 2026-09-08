@@ -1,5 +1,7 @@
 """Recommendations follow the actual SAIS Curriculum semester board."""
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 import app.api.v1.schedule as schedule
@@ -55,12 +57,13 @@ async def test_pipeline_uses_board_not_categories_and_verifies_target_term(monke
         return [{"course_code": c, "name": c, "credit": "3"} for c in offered if c.startswith(values["department"])]
     monkeypatch.setattr(schedule, "call_course_info", call)
     monkeypatch.setattr(schedule.prerequisites, "call_course_info", call)
-    courses, _, rejections = await schedule._curriculum_courses(None, USER, None, "567", "20261", [])
+    courses, _, rejections, complete = await schedule._curriculum_courses(None, USER, None, "567", "20261", [])
     assert [c["code"] for c in courses] == ["2300213", "2360219", "5670201", "5670213", "6390211", "2402201"]
     assert all(c["sections"] == [] for c in courses)
     assert calls[0][0] == "get_student_curriculum"
     assert not any("category" in tool for tool, _ in calls)
     assert rejections == []
+    assert complete is True
 
 async def test_course_not_offered_in_target_term_is_excluded(monkeypatch):
     async def call(db, user_id, tool, values, *, session=None):
@@ -71,10 +74,11 @@ async def test_course_not_offered_in_target_term_is_excluded(monkeypatch):
         return [{"course_code": "5670201", "name": "Circuit Theory", "credit": "4"}]
     monkeypatch.setattr(schedule, "call_course_info", call)
     monkeypatch.setattr(schedule.prerequisites, "call_course_info", call)
-    courses, warnings, rejections = await schedule._curriculum_courses(None, USER, None, "567", "20261", [])
+    courses, warnings, rejections, complete = await schedule._curriculum_courses(None, USER, None, "567", "20261", [])
     assert [c["code"] for c in courses] == ["5670201"]
     assert warnings == []
     assert rejections == []
+    assert complete is True
 
 
 async def test_unmet_prerequisite_is_removed_and_returned_for_popup(monkeypatch):
@@ -94,11 +98,12 @@ async def test_unmet_prerequisite_is_removed_and_returned_for_popup(monkeypatch)
 
     monkeypatch.setattr(schedule, "call_course_info", call)
     monkeypatch.setattr(schedule.prerequisites, "call_course_info", call)
-    courses, warnings, rejections = await schedule._curriculum_courses(
+    courses, warnings, rejections, complete = await schedule._curriculum_courses(
         None, USER, None, "567", "20261", [{"course_code": "PHYS213", "grade": "FD"}]
     )
     assert [course["code"] for course in courses] == ["5670201"]
     assert warnings == []
+    assert complete is True
     assert rejections == [{
         "course_code": "5670213",
         "course_label": "EE 213",
@@ -113,3 +118,61 @@ async def test_unreadable_board_does_not_fall_back_to_general_catalog(monkeypatc
     monkeypatch.setattr(schedule, "call_course_info", call)
     with pytest.raises(HTTPException):
         await schedule._curriculum_courses(None, USER, None, "567", "20261", [])
+
+
+async def test_failed_department_listing_marks_the_verified_remainder_partial(monkeypatch):
+    async def call(db, user_id, tool, values, *, session=None):
+        if tool == "get_student_curriculum":
+            return board(semester(3, False, row("EE201"), row("PHYS213")))
+        if tool == "get_course_prerequisites":
+            return []
+        if values["department"] == "230":
+            raise HTTPException(502, "catalog unavailable")
+        return [{"course_code": "5670201", "name": "Circuit Theory", "credit": "4"}]
+
+    monkeypatch.setattr(schedule, "call_course_info", call)
+    monkeypatch.setattr(schedule.prerequisites, "call_course_info", call)
+
+    courses, warnings, rejections, complete = await schedule._curriculum_courses(
+        None, USER, None, "567", "20261", []
+    )
+
+    assert [course["code"] for course in courses] == ["5670201"]
+    assert warnings
+    assert rejections == []
+    assert complete is False
+
+
+async def test_partial_curriculum_is_returned_but_not_cached_or_warmed(monkeypatch):
+    @asynccontextmanager
+    async def catalog_session(db, user_id):
+        yield None
+
+    course = {
+        "code": "5670201",
+        "display_code": "EE 201",
+        "name": "Circuit Theory",
+        "credits": 4.0,
+        "sections": [],
+    }
+    write_cached = AsyncMock()
+    record_wanted_courses = AsyncMock()
+    monkeypatch.setattr(schedule, "_resolve_department", AsyncMock(return_value="567"))
+    monkeypatch.setattr(schedule, "_cached_plan", AsyncMock(return_value=None))
+    monkeypatch.setattr(schedule, "_curriculum_courses", AsyncMock(return_value=(
+        [course], ["PHYS: catalog unavailable"], [], False
+    )))
+    monkeypatch.setattr(schedule, "catalog_session", catalog_session)
+    monkeypatch.setattr(schedule, "write_cached", write_cached)
+    monkeypatch.setattr(schedule, "record_wanted_courses", record_wanted_courses)
+
+    response = await schedule.curriculum_plan(
+        schedule.AiScheduleRequest(semester="20261"),
+        user=USER,
+        db=SimpleNamespace(scalar=AsyncMock(return_value=None)),
+    )
+
+    assert response["courses"] == [course]
+    assert response["partial"] is True
+    write_cached.assert_not_awaited()
+    record_wanted_courses.assert_not_awaited()
