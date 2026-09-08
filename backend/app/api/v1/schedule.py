@@ -104,6 +104,9 @@ class CurriculumPlanResponse(BaseModel):
     # for you this term" are both an empty list, and the planner has to tell the
     # student which one happened. Without this it said the second one either way.
     curriculum_unavailable: bool = False
+    # Some owning department or prerequisite lookups failed. Verified courses
+    # remain useful, but this answer must not look complete or enter the cache.
+    partial: bool = False
     prerequisite_rejections: list[PrerequisiteRejectionOut] = Field(default_factory=list)
     source: str
     cache_hit: bool
@@ -968,6 +971,18 @@ def _curriculum_year(value: Any) -> int:
     return year if 1 <= year <= 8 else 9
 
 
+def _curriculum_read_warning(detail: Any) -> str:
+    """A stable user message; the exact MCP/parser error stays in server logs."""
+    text = str(detail or "").casefold()
+    if "timeout" in text or "timed out" in text:
+        reason = "The METU request timed out."
+    elif "credential" in text or "authentication" in text or "sign-in" in text:
+        reason = "Your METU connection needs to be refreshed in Settings."
+    else:
+        reason = "The METU response could not be verified."
+    return f"Your curriculum could not be read from METU: {reason}"
+
+
 async def _category_rows(
     db: AsyncSession, user: AuthenticatedUser, catalog: CatalogSession, department: str
 ) -> tuple[list[dict], list[str]]:
@@ -979,7 +994,10 @@ async def _category_rows(
         rows = curriculum.next_semester_courses(board)
     except ValueError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return [{**row, "_rank": index} for index, row in enumerate(rows)], []
+    board_data = board.get("result") if isinstance(board, dict) and isinstance(board.get("result"), dict) else board
+    board_warnings = board_data.get("warnings", []) if isinstance(board_data, dict) else []
+    warnings = [str(item) for item in board_warnings if isinstance(item, str) and item.strip()]
+    return [{**row, "_rank": index} for index, row in enumerate(rows)], warnings
 
 
 async def _offered_courses(
@@ -1046,7 +1064,7 @@ async def _curriculum_courses(
     department: str,
     semester: str,
     completed: list[dict],
-) -> tuple[list[dict], list[str], list[dict]]:
+) -> tuple[list[dict], list[str], list[dict], bool]:
     rows, warnings = await _category_rows(db, user, catalog, department)
 
     candidates: dict[str, dict] = {}
@@ -1070,8 +1088,10 @@ async def _curriculum_courses(
             },
         )
 
+    complete = not warnings
     offered, offer_warnings = await _offered_courses(db, user, catalog, candidates, semester)
     warnings.extend(offer_warnings)
+    complete = complete and not offer_warnings
 
     kept, variant_warnings = curriculum.resolve_citizenship_variants(
         list(offered.values()), completed
@@ -1082,6 +1102,7 @@ async def _curriculum_courses(
         db, user.id, catalog, semester, kept, completed
     )
     warnings.extend(prerequisite_warnings)
+    complete = complete and not prerequisite_warnings
     return (
         [
             {key: value for key, value in course.items() if not key.startswith("_")}
@@ -1089,6 +1110,7 @@ async def _curriculum_courses(
         ],
         warnings,
         [rejection.as_dict() for rejection in prerequisite_rejections],
+        complete,
     )
 
 
@@ -1131,7 +1153,7 @@ async def curriculum_plan(
     completed = list(snapshot.completed_courses) if snapshot else []
     try:
         async with catalog_session(db, user.id) as catalog:
-            courses, warnings, prerequisite_rejections = await _curriculum_courses(
+            courses, warnings, prerequisite_rejections, complete = await _curriculum_courses(
                 db, user, catalog, department, body.semester.strip(), completed
             )
     except HTTPException as exc:
@@ -1141,8 +1163,9 @@ async def curriculum_plan(
         logger.info("curriculum_plan_unavailable", user_id=str(user.id), detail=str(exc.detail))
         return {
             "courses": [],
-            "warnings": [f"Your curriculum could not be read from METU: {exc.detail}"],
+            "warnings": [_curriculum_read_warning(exc.detail)],
             "curriculum_unavailable": True,
+            "partial": False,
             "prerequisite_rejections": [],
             "source": "sais_curriculum",
             "cache_hit": False,
@@ -1153,13 +1176,14 @@ async def curriculum_plan(
         "courses": courses,
         "warnings": warnings,
         "prerequisite_rejections": prerequisite_rejections,
+        "partial": not complete,
         "source": "sais_curriculum",
         "cache_hit": False,
         "duration_ms": round((time.monotonic() - started_at) * 1000),
     }
     # Only a result worth reusing. An empty list means something upstream gave
     # us nothing, and caching that turns one bad minute into six bad hours.
-    if courses:
+    if courses and complete:
         # What a student asked for tonight is what the warmer should have ready
         # tomorrow. Course codes only, never who wanted them.
         await record_wanted_courses(body.semester.strip(), [course["code"] for course in courses])

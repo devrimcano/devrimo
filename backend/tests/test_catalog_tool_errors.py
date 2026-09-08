@@ -163,4 +163,7 @@ async def test_a_failed_read_is_reported_as_unavailable_not_as_an_empty_curricul
     )
     assert response["courses"] == []
     assert response["curriculum_unavailable"] is True
-    assert "semester form was not found" in response["warnings"][0]
+    assert response["warnings"] == [
+        "Your curriculum could not be read from METU: The METU response could not be verified."
+    ]
+    assert response["partial"] is False

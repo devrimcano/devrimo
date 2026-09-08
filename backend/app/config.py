@@ -201,7 +201,11 @@ class Settings(BaseSettings):
     # Per-user scratch root. Servers that cache a session token relative to
     # their CWD (odtuclass) get a private directory beneath this.
     campus_state_root: str = "/var/lib/devrimo/campus"
-    campus_mcp_timeout_seconds: int = 30
+    # The vendored SAIS client may spend up to 30 seconds producing its own
+    # explicit timeout. The MCP envelope needs a separate margin to transport
+    # that failure; sharing the same deadline replaced the useful cause with a
+    # generic "Error executing tool" race.
+    campus_mcp_timeout_seconds: int = 45
     # SAIS transcript and student-card reads are full scrapes behind a login and
     # routinely take longer than a chat tool call is allowed to. Sharing one
     # budget meant every academic refresh died at exactly 30 seconds with

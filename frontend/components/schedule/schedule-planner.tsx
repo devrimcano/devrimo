@@ -191,11 +191,16 @@ function localizedCurriculumWarning(
   value: string,
   t: (tr: string, en: string) => string,
 ) {
-  // The broker's own sentence, kept verbatim after the colon: it is SAIS's
-  // explanation of what could not be read, and it is the only thing that makes
-  // a report from a student diagnosable.
+  // The backend logs the exact parser/MCP cause and sends a stable reason that
+  // can be translated without exposing internal tool text in the interface.
   const unreadable = value.match(/^Your curriculum could not be read from METU: (.+)$/i);
-  if (unreadable) return t(`ODTÜ yanıtı: ${unreadable[1]}`, `METU said: ${unreadable[1]}`);
+  if (unreadable) {
+    const reason = unreadable[1].replace(/[.;]+$/, "");
+    if (/request timed out/i.test(reason)) return t("ODTÜ isteği zaman aşımına uğradı.", "The METU request timed out.");
+    if (/connection needs to be refreshed/i.test(reason)) return t("ODTÜ bağlantını Ayarlar'dan yenilemelisin.", "Refresh your METU connection in Settings.");
+    if (/response could not be verified/i.test(reason)) return t("ODTÜ yanıtı doğrulanamadı.", "The METU response could not be verified.");
+    return t(`ODTÜ yanıtı: ${reason}.`, `METU said: ${reason}.`);
+  }
   const match = value.match(/^(history|language): kept (.+?) — .*?add (.+?) instead\.$/i);
   if (!match) return value;
   const label = (codes: string) => codes.split(", ").map((code) => {
@@ -1052,7 +1057,7 @@ export function SchedulePlanner() {
     // tool per department with a model turn between each. It now reads the
     // curriculum directly and answers in about two.
     const startedAt = Date.now();
-    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
+    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; partial?: boolean; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
     let response: CurriculumResponse;
     try {
       response = await jsonFetch<CurriculumResponse>("/api/schedule/curriculum", {
@@ -1090,7 +1095,7 @@ export function SchedulePlanner() {
       warnings: warnings.length,
       duration_seconds: (Date.now() - startedAt) / 1000,
     });
-    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
+    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, partial: response.partial === true, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
   }
 
   async function loadRequiredCourses() {
@@ -1114,6 +1119,8 @@ export function SchedulePlanner() {
       setCurriculumFailed(result.unavailable);
       setCurriculumNotice(result.unavailable
         ? t(`Müfredatın şu anda ODTÜ sisteminden okunamadı, bu yüzden havuz boş. Birkaç dakika sonra tekrar dene; sürerse dersleri aşağıdaki arama kutusundan elle ekleyebilirsin.${warningText ? ` ${warningText}` : ""}`, `Your curriculum could not be read from METU right now, so the pool is empty. Try again in a few minutes; if it keeps failing, add courses by hand from the search box below.${warningText ? ` ${warningText}` : ""}`)
+        : result.partial
+        ? t(`ODTÜ'den bazı dersler doğrulanamadı. Doğrulanan ${result.courses.length} ders gösteriliyor; bu eksik sonuç önbelleğe alınmadı. Birkaç dakika sonra tekrar dene.${warningText ? ` ${warningText}` : ""}`, `Some courses could not be verified with METU. ${result.courses.length} verified courses are shown; this partial result was not cached. Try again in a few minutes.${warningText ? ` ${warningText}` : ""}`)
         : result.courses.length
         ? t(`Bu dönem alman gereken ${result.courses.length} ders bulundu.${warningText ? ` ${warningText}` : ""}`, `${result.courses.length} required courses were found for this term.${warningText ? ` ${warningText}` : ""}`)
         : t(`Müfredatında bu dönem açılan, henüz almadığın bir ders bulunamadı.${warningText ? ` ${warningText}` : ""}`, `No course from your curriculum that you still need is offered this term.${warningText ? ` ${warningText}` : ""}`));
