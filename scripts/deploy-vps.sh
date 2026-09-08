@@ -71,7 +71,21 @@ chmod 600 "$BACKUP_DIR/source-$stamp.tar.gz"
 
 # pg_dump takes a transactionally consistent snapshot while the old API process
 # keeps serving. The custom format restores with pg_restore and compresses.
-pg_dump --format=custom --no-owner --file="$BACKUP_DIR/devrimo-$stamp.dump" "$PG_URL"
+# Ubuntu's default client can be older than Supabase. Prefer the installed
+# client matching the server without changing the host's default PostgreSQL tools.
+server_version_num="$(psql "$PG_URL" -AtXqc 'SHOW server_version_num')"
+case "$server_version_num" in
+  (''|*[!0-9]*)
+    echo "Could not determine the PostgreSQL server version" >&2
+    exit 1
+    ;;
+esac
+server_major="$((10#$server_version_num / 10000))"
+pg_dump_bin="/usr/lib/postgresql/$server_major/bin/pg_dump"
+if [ ! -x "$pg_dump_bin" ]; then
+  pg_dump_bin="$(command -v pg_dump)"
+fi
+"$pg_dump_bin" --format=custom --no-owner --file="$BACKUP_DIR/devrimo-$stamp.dump" "$PG_URL"
 chmod 600 "$BACKUP_DIR/devrimo-$stamp.dump"
 
 stage_dir="$(mktemp -d "$DEPLOY_DIR/.release.XXXXXX")"
