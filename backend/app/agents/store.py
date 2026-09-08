@@ -18,7 +18,7 @@ from agno.db.base import BaseDb
 from sqlalchemy import create_engine
 
 from app.config import get_settings
-from app.db.engine import postgres_connect_args, postgres_driver_url
+from app.db.engine import database_pool_options, postgres_connect_args, postgres_driver_url
 from app.logging import get_logger
 
 logger = get_logger(__name__)
@@ -92,7 +92,9 @@ def get_agno_db() -> BaseDb:
     managed = settings.environment in {"production", "staging"} or settings.database_runtime_role != "api"
     sync_url = _sync_postgres_url(url)
     db = MigrationManagedPostgresDb(
-        db_engine=create_engine(sync_url, pool_pre_ping=True, connect_args=postgres_connect_args(sync_url)),
+        db_engine=create_engine(
+            sync_url, **database_pool_options(settings, agno=True), connect_args=postgres_connect_args(sync_url)
+        ),
         create_schema=False,
         **tables,
     )

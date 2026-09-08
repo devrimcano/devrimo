@@ -56,7 +56,6 @@ async def _run_pass(kind: str, *, attempt: int, stop_event: asyncio.Event | None
         worker=kind,
         attempt=attempt,
         retrying=attempt > 1,
-        report_exceptions=False,
         include_failure_reason=False,
     ) as observation:
         work = asyncio.create_task(_pass(kind))

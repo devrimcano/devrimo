@@ -44,6 +44,8 @@ async def main():
                         )
                     )
                 await connection.execute(text(f"GRANT devrimo_{owner} TO {login}"))
+                limit = {"api": 9, "assistant": 5, "catalog": 6}.get(owner, 3)
+                await connection.execute(text(f"ALTER ROLE {login} CONNECTION LIMIT {limit}"))
     finally:
         await engine.dispose()
 

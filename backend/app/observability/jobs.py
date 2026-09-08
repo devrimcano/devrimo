@@ -93,6 +93,19 @@ class JobObservation:
         self._exception = exc
         self.detail(**properties)
 
+    def failed_type(self, error_type: str, **properties: Any) -> None:
+        """Record an unexpected failure when no exception object exists.
+
+        Some runtimes report a failed model/job outcome as a protocol event
+        instead of raising an exception. Keeping that outcome unexpected is
+        useful for job health, while manufacturing an exception would create a
+        misleading PostHog issue.
+        """
+        self.outcome = OUTCOME_UNEXPECTED_FAILURE
+        self.error_type = error_type
+        self.reason = None
+        self.detail(**properties)
+
     def finish(self) -> None:
         """Emit the terminal event. Idempotent, and never raises."""
         if self._finished:
@@ -102,14 +115,29 @@ class JobObservation:
             from app.observability.client import capture, report_exception
 
             if self._exception is not None and self.report_exceptions:
-                report_exception(
-                    self._exception,
-                    distinct_id=self.distinct_id,
-                    job_kind=self.kind,
-                    job_id=self.job_id,
-                    source_id=self.source_id,
-                    handler="observed_job",
+                issue = self._exception
+                issue_properties = {
+                    "job_kind": self.kind,
+                    "job_id": self.job_id,
+                    "source_id": self.source_id,
+                    "handler": "observed_job",
                     **self.details,
+                }
+                if not self.include_failure_reason:
+                    # Background workers often handle provider/parser errors
+                    # whose message and traceback can contain source content.
+                    # Keep issue triage enabled with a fresh, traceback-free
+                    # exception carrying only bounded type/grouping facts.
+                    error_type = self.error_type or self._exception.__class__.__name__
+                    issue = RuntimeError(f"{self.kind} failed ({error_type})")
+                    issue_properties.update(
+                        error_type=error_type,
+                        **{"$exception_fingerprint": ["background_job", self.kind, error_type]},
+                    )
+                report_exception(
+                    issue,
+                    distinct_id=self.distinct_id,
+                    **issue_properties,
                 )
             capture(
                 EVENT_JOB_COMPLETED,
@@ -159,6 +187,11 @@ def observed_job(
     # as on everything logged inside it — not only as context the SDK happens
     # to merge in.
     observation.detail(**tags)
+    if request_id:
+        # Contextvars make this available to normal captures, but explicit
+        # properties keep the job event joinable in tests and with SDKs that do
+        # not merge context tags into captured events.
+        observation.detail(request_id=request_id)
     context_tags = {
         "job_kind": kind,
         **({"job_id": job_id} if job_id else {}),

@@ -60,6 +60,97 @@ def _legacy_duration(value: Any) -> int:
     return max(1, hours * 60 - 10)
 
 
+def _legacy_number(value: Any) -> float | None:
+    """Match the browser's numeric coercion without leaking NaN into JSON."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _legacy_day(value: Any) -> Day:
+    # The previous client accepted only its five compact day tokens and mapped
+    # every other value to Monday. Keep that compatibility rule in the one
+    # server-side converter so all clients share it.
+    return value if isinstance(value, str) and value in {"Mon", "Tue", "Wed", "Thu", "Fri"} else "Mon"
+
+
+def _legacy_text(value: Any, fallback: str = "", *, limit: int) -> str:
+    if value is None:
+        value = fallback
+    return str(value)[:limit]
+
+
+def _legacy_entry(value: Any, index: int, kind: Literal["course", "block"] = "course") -> dict[str, Any] | None:
+    """Convert one old entry exactly once, at the server compatibility edge."""
+
+    if not isinstance(value, dict):
+        return None
+    item = dict(value)
+    actual_kind: Literal["course", "block"] = "block" if item.get("kind") == "block" else kind
+    if item.get("start_minute") is not None:
+        start_number = _legacy_number(item.get("start_minute"))
+        start = int(start_number) if start_number is not None else 0
+    elif item.get("startMinute") is not None:
+        start_number = _legacy_number(item.get("startMinute"))
+        start = int(start_number) if start_number is not None else 0
+    else:
+        start_number = _legacy_number(item.get("start", 0))
+        start = int(start_number * 60 + 40) if start_number is not None else 0
+    if item.get("duration_minutes") is not None:
+        duration_number = _legacy_number(item.get("duration_minutes"))
+        duration = int(duration_number) if duration_number is not None else 1
+    elif item.get("durationMinutes") is not None:
+        duration_number = _legacy_number(item.get("durationMinutes"))
+        duration = int(duration_number) if duration_number is not None else 1
+    else:
+        duration_number = _legacy_number(item.get("duration", 1))
+        duration = int(duration_number * 60 - 10) if duration_number is not None else 1
+    start = max(0, min(1439, start))
+    duration = max(1, min(1440, duration))
+    # PlanEntry intentionally rejects a cross-midnight meeting. Legacy browser
+    # state clamped each field independently, so finish the same normalization
+    # here rather than making imports fail on a single edge-of-day row.
+    duration = min(duration, 1440 - start)
+
+    name = _legacy_text(item.get("name"), limit=240)
+    fallback_code = f"BLOCK:{name or 'busy'}" if actual_kind == "block" else ""
+    code = _legacy_text(item.get("code"), fallback_code, limit=32)
+    if not code:
+        # A course without an identifier cannot be addressed or removed later;
+        # dropping it is safer than inventing a course that was never imported.
+        return None
+    entry_id = _legacy_text(item.get("id"), f"{actual_kind}:{index}", limit=128)
+    if not entry_id:
+        return None
+    credits_number = _legacy_number(item.get("credits", 0))
+    color_number = _legacy_number(item.get("color", 0))
+    return {
+        "id": entry_id,
+        "code": code,
+        "name": name,
+        "section": _legacy_text(item.get("section"), limit=32),
+        "credits": max(0.0, min(60.0, credits_number if credits_number is not None else 0.0)),
+        "color": max(0, min(64, int(color_number) if color_number is not None else 0)),
+        "kind": actual_kind,
+        "instructor": _legacy_text(item.get("instructor"), limit=240),
+        "day": _legacy_day(item.get("day")),
+        "start_minute": start,
+        "duration_minutes": duration,
+        "room": _legacy_text(item.get("room"), limit=128),
+    }
+
+
+def _legacy_entries(values: Any, *, kind: Literal["course", "block"] = "course") -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    return [entry for index, value in enumerate(values) if (entry := _legacy_entry(value, index, kind)) is not None]
+
+
 class PlanMeeting(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -75,9 +166,15 @@ class PlanMeeting(BaseModel):
             return value
         data = dict(value)
         if "start_minute" not in data:
-            data["start_minute"] = _legacy_start(data.get("start", 0))
+            data["start_minute"] = (
+                data["startMinute"] if "startMinute" in data else _legacy_start(data.get("start", 0))
+            )
         if "duration_minutes" not in data:
-            data["duration_minutes"] = _legacy_duration(data.get("duration", 1))
+            data["duration_minutes"] = (
+                data["durationMinutes"]
+                if "durationMinutes" in data
+                else _legacy_duration(data.get("duration", 1))
+            )
         return data
 
     @model_validator(mode="after")
@@ -139,9 +236,15 @@ class PlanEntry(BaseModel):
             return value
         data = dict(value)
         if "start_minute" not in data:
-            data["start_minute"] = _legacy_start(data.get("start", 0))
+            data["start_minute"] = (
+                data["startMinute"] if "startMinute" in data else _legacy_start(data.get("start", 0))
+            )
         if "duration_minutes" not in data:
-            data["duration_minutes"] = _legacy_duration(data.get("duration", 1))
+            data["duration_minutes"] = (
+                data["durationMinutes"]
+                if "durationMinutes" in data
+                else _legacy_duration(data.get("duration", 1))
+            )
         return data
 
     @model_validator(mode="after")
@@ -226,39 +329,71 @@ class PlanState(BaseModel):
 
     @classmethod
     def from_legacy_payload(cls, payload: Any) -> PlanState:
+        """Convert the browser's v1 projection into the canonical state.
+
+        This is the sole compatibility boundary. In particular, callers must
+        pass raw legacy data for ``import_legacy`` rather than reproducing these
+        defaults in a browser adapter.
+        """
+
         if not isinstance(payload, dict):
             return cls()
         data = dict(payload)
-        if "department_label" not in data and "departmentLabel" in data:
-            data["department_label"] = data["departmentLabel"]
-        if "empty_days" not in data and "emptyDays" in data:
-            data["empty_days"] = data["emptyDays"]
-        if "avoid_conflicts" not in data and "avoidConflicts" in data:
-            data["avoid_conflicts"] = data["avoidConflicts"]
-        if "ignore_constraints" not in data and "ignoreConstraints" in data:
-            data["ignore_constraints"] = data["ignoreConstraints"]
-        if "alternative_index" not in data and "alternativeIndex" in data:
-            data["alternative_index"] = data["alternativeIndex"]
-        if "favorite_index" not in data and "favoriteIndex" in data:
-            data["favorite_index"] = data["favoriteIndex"]
-        if "raw_code" not in data:
-            data["pool"] = [
-                {**course, "raw_code": course.get("rawCode")}
-                if isinstance(course, dict)
-                else course
-                for course in data.get("pool", [])
-            ]
-        if "entries" not in data:
-            entries: list[dict[str, Any]] = []
-            for course in data.get("courses", []):
+        aliases = {
+            "department_label": "departmentLabel",
+            "empty_days": "emptyDays",
+            "avoid_conflicts": "avoidConflicts",
+            "ignore_constraints": "ignoreConstraints",
+            "alternative_index": "alternativeIndex",
+            "favorite_index": "favoriteIndex",
+        }
+        for canonical, legacy in aliases.items():
+            if (canonical not in data or data[canonical] is None) and legacy in data:
+                data[canonical] = data[legacy]
+
+        pool: list[dict[str, Any]] = []
+        raw_pool = data.get("pool")
+        if isinstance(raw_pool, list):
+            for value in raw_pool:
+                if not isinstance(value, dict):
+                    continue
+                course = dict(value)
+                code = _legacy_text(course.get("code"), limit=32).strip()
+                if not code:
+                    continue
+                credits = _legacy_number(course.get("credits", 0))
+                raw_code = course.get("raw_code")
+                if raw_code is None:
+                    raw_code = course.get("rawCode")
+                pool.append(
+                    {
+                        **course,
+                        "code": code,
+                        "name": _legacy_text(course.get("name"), code, limit=240),
+                        "credits": max(0.0, min(60.0, credits if credits is not None else 0.0)),
+                        "raw_code": _legacy_text(raw_code, code, limit=32),
+                    }
+                )
+        data["pool"] = pool
+
+        # Explicit entries win. If the old projection has no entries, expand
+        # courses and busy blocks once, with generated ids applied after each
+        # meeting so a meeting cannot overwrite its stable compatibility id.
+        if isinstance(data.get("entries"), list):
+            raw_entries = data["entries"]
+        else:
+            raw_entries = []
+            courses = data.get("courses") if isinstance(data.get("courses"), list) else []
+            for course in courses:
                 if not isinstance(course, dict):
                     continue
-                meetings = course.get("meetings", [])
-                for index, meeting in enumerate(meetings if isinstance(meetings, list) else []):
+                meetings = course.get("meetings") if isinstance(course.get("meetings"), list) else []
+                for index, meeting in enumerate(meetings):
                     if not isinstance(meeting, dict):
                         continue
-                    entries.append(
+                    raw_entries.append(
                         {
+                            **meeting,
                             "id": f"course:{course.get('code', '')}:{course.get('section', '')}:{index}",
                             "code": course.get("code", ""),
                             "name": course.get("name", ""),
@@ -266,26 +401,78 @@ class PlanState(BaseModel):
                             "credits": course.get("credits", 0) if index == 0 else 0,
                             "kind": "course",
                             "instructor": course.get("instructor", ""),
-                            **meeting,
                         }
                     )
-            for block in data.get("busy_blocks", []):
+            blocks = data.get("busy_blocks") if isinstance(data.get("busy_blocks"), list) else []
+            for block in blocks:
                 if not isinstance(block, dict):
                     continue
-                meetings = block.get("meetings", [])
-                for index, meeting in enumerate(meetings if isinstance(meetings, list) else []):
+                name = block.get("name", "busy")
+                meetings = block.get("meetings") if isinstance(block.get("meetings"), list) else []
+                for index, meeting in enumerate(meetings):
                     if not isinstance(meeting, dict):
                         continue
-                    entries.append(
+                    raw_entries.append(
                         {
-                            "id": f"block:{block.get('name', 'busy')}:{index}",
-                            "code": f"BLOCK:{block.get('name', 'busy')}",
-                            "name": block.get("name", "busy"),
-                            "kind": "block",
                             **meeting,
+                            "id": f"block:{name}:{index}",
+                            "code": f"BLOCK:{name}",
+                            "name": name,
+                            "kind": "block",
                         }
                     )
-            data["entries"] = entries
+        data["entries"] = _legacy_entries(raw_entries)
+
+        def legacy_entry_groups(value: Any) -> list[list[dict[str, Any]]]:
+            if not isinstance(value, list):
+                return []
+            groups: list[list[dict[str, Any]]] = []
+            for group in value:
+                if not isinstance(group, list):
+                    continue
+                groups.append(_legacy_entries(group))
+            return groups
+
+        data["alternatives"] = legacy_entry_groups(data.get("alternatives"))
+        data["favorites"] = legacy_entry_groups(data.get("favorites"))
+
+        raw_empty_days = data.get("empty_days")
+        data["empty_days"] = (
+            [
+                day
+                for day in raw_empty_days
+                if isinstance(day, str) and day in {"Mon", "Tue", "Wed", "Thu", "Fri"}
+            ]
+            if isinstance(raw_empty_days, list)
+            else []
+        )
+        data["department"] = _legacy_text(data.get("department"), limit=64)
+        data["department_label"] = _legacy_text(data.get("department_label"), limit=240)
+        data["avoid_conflicts"] = (
+            data["avoid_conflicts"]
+            if isinstance(data.get("avoid_conflicts"), bool)
+            else data.get("avoidConflicts") is not False
+        )
+        data["ignore_constraints"] = (
+            data["ignore_constraints"]
+            if isinstance(data.get("ignore_constraints"), bool)
+            else data.get("ignoreConstraints") is True
+        )
+        alternative_index = _legacy_number(data.get("alternative_index", 0))
+        favorite_default = len(data["favorites"]) - 1 if data["favorites"] else -1
+        favorite_index = _legacy_number(data.get("favorite_index", favorite_default))
+        data["alternative_index"] = max(0, int(alternative_index) if alternative_index is not None else 0)
+        data["favorite_index"] = int(favorite_index) if favorite_index is not None else favorite_default
+
+        raw_sections = data.get("sections")
+        sections: dict[str, list[dict[str, Any]]] = {}
+        if isinstance(raw_sections, dict):
+            for key, value in raw_sections.items():
+                if isinstance(value, list):
+                    sections[str(key)] = [item for item in value if isinstance(item, dict)]
+                elif isinstance(value, dict):
+                    sections[str(key)] = [item for item in value.values() if isinstance(item, dict)]
+        data["sections"] = sections
         return cls.model_validate(data)
 
     def to_payload(self) -> dict[str, Any]:
@@ -349,6 +536,10 @@ class PlanConflictError(Exception):
 
 class PlanValidationError(ValueError):
     pass
+
+
+class PlanIdempotencyError(PlanValidationError):
+    """An idempotency key was reused with a different request payload."""
 
 
 class PlanNotFoundError(LookupError):

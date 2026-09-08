@@ -305,23 +305,9 @@ async def semester_plan(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    snapshot = await db.get(StudentAcademicSnapshot, (user.id, body.term))
-    if snapshot is None:
-        try:
-            if await sync_planning_snapshot_from_sais(user.id, body.term):
-                # The refresh commits in a separate short-lived session. End
-                # this read transaction so the planner sees the new snapshot.
-                await db.rollback()
-        except Exception as exc:
-            # Preserve the planner's established needs_academic_snapshot
-            # response when SAIS is disconnected or temporarily unavailable.
-            logger.warning("planning_snapshot_sync_failed", user_id=str(user.id), error=str(exc))
-            report_exception(
-                exc,
-                distinct_id=str(user.id),
-                handler="planning_snapshot_sync",
-                dependency="sais",
-            )
+    # ``plan_semester`` owns the shared freshness window and stale-data
+    # fallback. Keeping this route as a thin adapter makes HTTP and workspace
+    # planning observe the same snapshot preparation policy.
     return await plan_semester(db, user.id, body)
 
 

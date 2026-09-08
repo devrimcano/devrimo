@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -12,7 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.directory import METU_ID
 from app.db.models import CourseOffering, CourseRule, PlanningPolicy, StudentAcademicSnapshot
+from app.logging import get_logger
 from app.planning.solver import SolverGroup, enumerate_solutions
+
+logger = get_logger(__name__)
+
+# Registration data can change during a day, while a transient SAIS outage
+# should not erase a usable plan. Both the HTTP and workspace adapters use this
+# one freshness window and the same stale-data fallback policy.
+PLANNING_SNAPSHOT_MAX_AGE = timedelta(hours=6)
 
 GRADE_POINTS = {
     "AA": 4.0,
@@ -176,13 +184,94 @@ def _best_combination(
     return best
 
 
+async def prepare_planning_snapshot(
+    db: AsyncSession,
+    user_id: UUID,
+    term: str,
+    *,
+    max_age: timedelta = PLANNING_SNAPSHOT_MAX_AGE,
+) -> tuple[StudentAcademicSnapshot | None, dict[str, Any]]:
+    """Return a term snapshot under one explicit freshness/failure policy.
+
+    Missing or stale data triggers one bounded SAIS refresh. A failed refresh
+    preserves an existing stale snapshot and reports that fact to callers; a
+    missing snapshot remains unavailable so the planner cannot treat an empty
+    result as verified academic history. The refresh runs in its own short
+    session, so the caller rolls back its read transaction before reloading the
+    committed snapshot.
+    """
+
+    async def read_snapshot() -> StudentAcademicSnapshot | None:
+        # The refresh runs in another session and an academic-data purge may
+        # delete this identity while it is in flight. Force a new database row
+        # image after rollback instead of trusting SQLAlchemy's identity map.
+        return await db.scalar(
+            select(StudentAcademicSnapshot)
+            .where(StudentAcademicSnapshot.user_id == user_id, StudentAcademicSnapshot.term == term)
+            .execution_options(populate_existing=True)
+        )
+
+    snapshot = await read_snapshot()
+    now = datetime.now(UTC)
+    fetched_at = snapshot.fetched_at if snapshot is not None else None
+    if fetched_at is not None and fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=UTC)
+    is_fresh = fetched_at is not None and now - fetched_at <= max_age
+    if is_fresh:
+        return snapshot, {
+            "status": "fresh",
+            "fresh": True,
+            "refresh_attempted": False,
+            "fetched_at": snapshot.fetched_at.isoformat(),
+        }
+
+    # Do not hold an API connection while the independent SAIS session is
+    # starting and reading. The planning pool is deliberately small, and a
+    # burst of stale planners would otherwise starve the refresh itself.
+    await db.rollback()
+    refresh_error = False
+    try:
+        from app.planning.mcp_bridge import sync_planning_snapshot_from_sais
+
+        reached_sais = await sync_planning_snapshot_from_sais(user_id, term)
+    except Exception as exc:  # campus failures are a stale-data outcome here
+        logger.warning("planning_snapshot_refresh_failed", user_id=str(user_id), term=term, error=str(exc))
+        reached_sais = False
+        refresh_error = True
+    await db.rollback()
+    refreshed = await read_snapshot()
+    if refreshed is None:
+        return None, {
+            "status": "unavailable",
+            "fresh": False,
+            "refresh_attempted": True,
+            "refresh_succeeded": bool(reached_sais),
+            "refresh_error": refresh_error,
+            "fetched_at": None,
+        }
+
+    refreshed_at = refreshed.fetched_at
+    if refreshed_at.tzinfo is None:
+        refreshed_at = refreshed_at.replace(tzinfo=UTC)
+    changed = fetched_at is None or refreshed_at > fetched_at
+    return refreshed, {
+        "status": "fresh" if changed and reached_sais else "stale",
+        "fresh": bool(changed and reached_sais),
+        "refresh_attempted": True,
+        "refresh_succeeded": bool(reached_sais),
+        "refresh_error": refresh_error,
+        "fetched_at": refreshed.fetched_at.isoformat(),
+    }
+
+
 async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRequest) -> dict:
-    snapshot = await db.get(StudentAcademicSnapshot, (user_id, request.term))
+    snapshot, snapshot_status = await prepare_planning_snapshot(db, user_id, request.term)
     if snapshot is None:
         return {
             "status": "needs_academic_snapshot",
             "detail": "Refresh the student's SAIS transcript and current registration before planning.",
             "term": request.term,
+            "freshness": {"academic_snapshot": snapshot_status},
         }
     offerings = (
         await db.execute(select(CourseOffering).where(CourseOffering.term == request.term))
@@ -280,6 +369,7 @@ async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRe
         ],
         "freshness": {
             "academic_snapshot": snapshot.fetched_at.isoformat(),
+            "academic_snapshot_status": snapshot_status,
             "offerings": max((item.fetched_at for item in offerings), default=None).isoformat() if offerings else None,
             "policy_revision": policy.revision if policy else None,
             "calculated_at": datetime.now(UTC).isoformat(),

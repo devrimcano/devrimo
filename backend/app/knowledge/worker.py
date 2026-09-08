@@ -29,7 +29,7 @@ from app.knowledge.ingestion import (
 from app.logging import configure_logging, get_logger
 from app.observability.client import initialize as posthog_initialize
 from app.observability.client import shutdown as posthog_shutdown
-from app.observability.jobs import observed_job
+from app.observability.jobs import capture_worker_lifecycle, observed_job
 from app.observability.logs import shutdown as posthog_logs_shutdown
 from app.observability.runtime import SERVICE_KNOWLEDGE_WORKER, configure_service
 
@@ -105,11 +105,19 @@ async def _run_job(lease: JobLease) -> None:
 async def run() -> None:
     settings = get_settings()
     worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    started = False
     # Eagerly, so a worker deployed without a key says so at boot instead of
     # being discovered later as an absence of ingestion data.
     posthog_initialize()
-    logger.info("knowledge_worker_started", worker_id=worker_id)
     try:
+        capture_worker_lifecycle(
+            SERVICE_KNOWLEDGE_WORKER,
+            "started",
+            worker_id=worker_id,
+            poll_seconds=settings.knowledge_worker_poll_seconds,
+        )
+        started = True
+        logger.info("knowledge_worker_started", worker_id=worker_id)
         while True:
             job_id = None
             try:
@@ -139,6 +147,13 @@ async def run() -> None:
     finally:
         # A worker that is being restarted mid-deploy still owes us the events
         # explaining what it was doing when it stopped.
+        if started:
+            capture_worker_lifecycle(
+                SERVICE_KNOWLEDGE_WORKER,
+                "stopped",
+                worker_id=worker_id,
+                stop_reason="cancelled",
+            )
         logger.info("knowledge_worker_stopping", worker_id=worker_id)
         await asyncio.to_thread(posthog_shutdown)
         await asyncio.to_thread(posthog_logs_shutdown)

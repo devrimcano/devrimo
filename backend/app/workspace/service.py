@@ -202,13 +202,11 @@ class WorkspaceService:
 
     async def plan(self, request: dict):
         await self.authorize()
-        from app.planning.mcp_bridge import sync_planning_snapshot_from_sais
         from app.planning.proposals import proposal_changes
         from app.planning.service import SemesterPlanRequest, plan_semester
         from app.planning.workspace import read_timetable
 
         parsed = SemesterPlanRequest.model_validate(request)
-        await sync_planning_snapshot_from_sais(self.user_id, parsed.term)
         async with SessionLocal() as db:
             proposal = await plan_semester(db, self.user_id, parsed)
             changes = proposal_changes(proposal)
@@ -253,21 +251,22 @@ class WorkspaceService:
             return envelope(resource, await mutate_memories(self.user_id, changes, expected_revision, idempotency_key))
         if resource.kind != "planning.timetable":
             raise HTTPException(403, "Resource is read-only")
-        from app.planning.models import PlanChanges
+        from app.planning.models import PlanChanges, PlanIdempotencyError
         from app.planning.workspace import update_timetable
 
         async with SessionLocal() as db:
-            return envelope(
-                resource,
-                await update_timetable(
+            try:
+                result = await update_timetable(
                     db,
                     self.user_id,
                     resource.term or current_term(),
                     PlanChanges.model_validate(changes),
                     expected_revision,
                     idempotency_key,
-                ),
-            )
+                )
+            except PlanIdempotencyError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return envelope(resource, result)
 
     async def undo(self, resource: ResourceRef, expected_revision: int, idempotency_key: str):
         await self.authorize()
@@ -279,15 +278,17 @@ class WorkspaceService:
             )
         if resource.kind != "planning.timetable":
             raise HTTPException(403, "Resource is read-only")
+        from app.planning.models import PlanIdempotencyError
         from app.planning.workspace import undo_timetable
 
         async with SessionLocal() as db:
-            return envelope(
-                resource,
-                await undo_timetable(
+            try:
+                result = await undo_timetable(
                     db, self.user_id, resource.term or current_term(), expected_revision, idempotency_key
-                ),
-            )
+                )
+            except PlanIdempotencyError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return envelope(resource, result)
 
     async def compute(self, expression: str):
         from app.planning.calculator import compute

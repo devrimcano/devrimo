@@ -25,10 +25,12 @@ from app.observability.llm import (
     trace_properties,
 )
 from app.observability.middleware import ObservabilityMiddleware
+from app.observability.turns import OUTCOME_INTERRUPTED
 
 __all__ = [
     "OUTCOME_CANCELLED",
     "OUTCOME_EXPECTED_FAILURE",
+    "OUTCOME_INTERRUPTED",
     "OUTCOME_SUCCESS",
     "OUTCOME_UNEXPECTED_FAILURE",
     "REQUEST_ID_HEADER",

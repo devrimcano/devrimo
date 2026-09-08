@@ -45,6 +45,12 @@ logger = get_logger(__name__)
 # product event nothing else knows how to read.
 EVENT_AI_EMBEDDING = "$ai_embedding"
 EVENT_AI_SPAN = "$ai_span"
+EVENT_AI_INSTRUMENTATION_STATE = "ai_instrumentation_state"
+
+# Model clients are rebuilt for each durable turn. Emit an instrumentation
+# health signal only when the state changes, so a broken optional wrapper cannot
+# create a telemetry storm while still making fallback visible.
+_instrumentation_state: tuple[str, str | None] | None = None
 
 # Set per turn by the chat route; read by every nested model call.
 current_trace_id: ContextVar[str | None] = ContextVar("posthog_ai_trace_id", default=None)
@@ -53,6 +59,26 @@ current_session_id: ContextVar[str | None] = ContextVar("posthog_ai_session_id",
 
 def new_trace_id() -> str:
     return str(uuid4())
+
+
+def _report_instrumentation_state(state: str, reason: str | None = None, error_type: str | None = None) -> None:
+    """Report a bounded health transition for the optional AI wrapper."""
+    global _instrumentation_state
+    key = (state, reason)
+    if _instrumentation_state == key:
+        return
+    _instrumentation_state = key
+    try:
+        from app.observability.client import capture
+
+        capture(
+            EVENT_AI_INSTRUMENTATION_STATE,
+            state=state,
+            reason=reason,
+            error_type=error_type,
+        )
+    except Exception:  # pragma: no cover - telemetry must never affect fallback
+        logger.warning("posthog_ai_instrumentation_signal_failed", state=state, reason=reason)
 
 
 @contextmanager
@@ -161,6 +187,7 @@ def build_traced_async_client(
         )
     except Exception as exc:  # pragma: no cover - posthog[otel] not installed
         logger.warning("posthog_ai_wrapper_unavailable", error=exc.__class__.__name__)
+        _report_instrumentation_state("unavailable", "wrapper_import", exc.__class__.__name__)
         return None
 
     class _TracedCompletions(WrappedCompletions):
@@ -191,11 +218,14 @@ def build_traced_async_client(
             self.responses = _TracedResponses(self, self._original_responses)
 
     try:
-        return _TracedAsyncOpenAI(**client_kwargs)
+        client = _TracedAsyncOpenAI(**client_kwargs)
+        _report_instrumentation_state("available")
+        return client
     except Exception as exc:
         # A model client that cannot be built must not take the agent down with
         # it; the caller falls back to the uninstrumented client.
         logger.warning("posthog_ai_client_build_failed", error=exc.__class__.__name__)
+        _report_instrumentation_state("unavailable", "client_build", exc.__class__.__name__)
         return None
 
 

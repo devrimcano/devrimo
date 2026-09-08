@@ -110,7 +110,7 @@ def test_non_crypto_workers_and_agentos_do_not_receive_the_encryption_key():
     knowledge = Settings(
         _env_file=None,
         environment="production",
-        database_url="postgresql+asyncpg://knowledge:x@db/app",
+        database_url="postgresql+asyncpg://knowledge:x@db/app?ssl=require",
         database_runtime_role="knowledge",
         secret_encryption_key="",
         runtime_component="knowledge",
@@ -118,7 +118,7 @@ def test_non_crypto_workers_and_agentos_do_not_receive_the_encryption_key():
     retention = Settings(
         _env_file=None,
         environment="production",
-        database_url="postgresql+asyncpg://catalog:x@db/app",
+        database_url="postgresql+asyncpg://catalog:x@db/app?ssl=require",
         database_runtime_role="catalog",
         secret_encryption_key="",
         runtime_component="retention",
@@ -126,7 +126,7 @@ def test_non_crypto_workers_and_agentos_do_not_receive_the_encryption_key():
     agentos = Settings(
         _env_file=None,
         environment="production",
-        database_url="postgresql+asyncpg://assistant:x@db/app",
+        database_url="postgresql+asyncpg://assistant:x@db/app?ssl=require",
         database_runtime_role="assistant",
         secret_encryption_key="",
         runtime_component="agentos",
@@ -152,7 +152,7 @@ def test_runtime_component_reads_the_devrimo_environment_variable(monkeypatch):
     settings = Settings(
         _env_file=None,
         environment="production",
-        database_url="postgresql+asyncpg://catalog:x@db/app",
+        database_url="postgresql+asyncpg://catalog:x@db/app?ssl=require",
         database_runtime_role="catalog",
         secret_encryption_key="",
     )
@@ -165,7 +165,7 @@ def test_crypto_rejects_placeholder_even_for_retention(monkeypatch):
     retention = Settings(
         _env_file=None,
         environment="production",
-        database_url="postgresql+asyncpg://catalog:x@db/app",
+        database_url="postgresql+asyncpg://catalog:x@db/app?ssl=require",
         database_runtime_role="catalog",
         runtime_component="retention",
         secret_encryption_key="",

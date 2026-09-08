@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # Retrieval depends on pgvector, pg_trgm and Postgres full-text search, so
     # there is no second supported engine to fall back to.
     database_url: str = "postgresql+asyncpg://devrimo:devrimo@localhost:5432/devrimo"
+    # API calls may hold their request connection and a campus lease while
+    # performing a short cache read. Reserve room for four such concurrent calls.
+    database_pool_size: int | None = Field(default=None, ge=1, le=20)
+    database_max_overflow: int = Field(default=1, ge=0, le=5)
+    database_pool_timeout: float = Field(default=15, gt=0, le=120)
+    database_pool_recycle: int = Field(default=300, ge=30)
+    agno_database_pool_size: int = Field(default=1, ge=1, le=5)
 
     # Every process connects using its own restricted login. Migration credentials
     # belong only to the release job, never a worker environment.
@@ -77,6 +84,7 @@ class Settings(BaseSettings):
     def validate_database_configuration(self):
         from sqlalchemy.engine import make_url
 
+        self.environment = self.environment.strip().casefold()
         base = make_url(self.database_url)
         if base.get_backend_name() != "postgresql":
             raise ValueError("Devrimo requires one PostgreSQL database")
@@ -91,7 +99,7 @@ class Settings(BaseSettings):
                 ):
                     raise ValueError("All database identities must use the same PostgreSQL endpoint and database")
         if self.environment in {"production", "staging"}:
-            if self.database_migration_url and self.database_migration_url == self.database_url:
+            if self.database_migration_url and make_url(self.database_migration_url).username == base.username:
                 raise ValueError("Migration and runtime credentials must be separate")
             if base.username and base.username.split(".")[0] in {"postgres", "supabase_admin", "service_role"}:
                 raise ValueError("Runtime requires a restricted database login")
@@ -114,11 +122,22 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECRET_ENCRYPTION_KEY must be set to a non-placeholder value outside development/test"
                 )
+        if environment in {"production", "staging"}:
+            from app.db.engine import require_postgres_tls
+
+            for url in (self.database_url, self.assistant_database_url, self.database_migration_url):
+                if url:
+                    require_postgres_tls(url)
+        if self.supabase_jwks_url and self.supabase_jwks_url != (
+            f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+        ):
+            raise ValueError("SUPABASE_JWKS_URL must match the configured Supabase project's signing-key endpoint")
         return self
 
     avesis_proxy_url: SecretStr | None = None
 
     supabase_url: str = ""
+    supabase_jwks_url: str = ""
     supabase_jwt_secret: str = ""
     # Supabase secret key (or legacy service-role key). Backend only.
     supabase_secret_key: str = ""
@@ -279,7 +298,11 @@ class Settings(BaseSettings):
 
     @property
     def jwks_url(self) -> str:
-        return f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+        return self.supabase_jwks_url or f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+    @property
+    def jwt_issuer(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
 
     @property
     def posthog_configured(self) -> bool:

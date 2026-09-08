@@ -149,16 +149,19 @@ export function authenticatedRoute<Extra extends unknown[]>(
       });
     };
 
-    const result = await requireAuth();
-    if (result.error) {
-      await report(result.error.status, { outcome: OUTCOME_EXPECTED_FAILURE });
-      return withRequestId(result.error, telemetry.requestId);
-    }
-    // From here on the person is known for certain, which is the only
-    // attribution a server-side event should ever use.
-    telemetry = { ...telemetry, distinctId: result.auth.user.id };
-
     try {
+      // Keep auth setup inside the same wrapper as the handler. An unexpected
+      // cookie/client/auth failure must still produce the request outcome while
+      // the anonymous browser id is available for correlation.
+      const result = await requireAuth();
+      if (result.error) {
+        await report(result.error.status, { outcome: OUTCOME_EXPECTED_FAILURE });
+        return withRequestId(result.error, telemetry.requestId);
+      }
+      // From here on the person is known for certain, which is the only
+      // attribution a server-side event should ever use.
+      telemetry = { ...telemetry, distinctId: result.auth.user.id };
+
       const response = await withUpstreamContext(
         { requestId: telemetry.requestId, forwardHeaders: tracingHeadersFrom(request, telemetry.requestId) },
         () => handler({ ...telemetry, auth: result.auth }, request, ...rest),

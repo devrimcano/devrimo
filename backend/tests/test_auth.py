@@ -4,6 +4,7 @@ import jwt as pyjwt
 
 from app.auth import dependencies as auth_dependencies
 from app.auth import jwt as auth_jwt
+from app.config import get_settings
 from tests.conftest import new_user_id
 
 
@@ -53,6 +54,7 @@ async def test_authenticated_request_verifies_its_jwt_once(client, monkeypatch):
                     {
                         "sub": str(new_user_id()),
                         "aud": "authenticated",
+                        "iss": get_settings().jwt_issuer,
                         "exp": int(time.time()) + 3600,
                     },
                     "test-secret-not-for-production",

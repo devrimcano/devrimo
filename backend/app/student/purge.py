@@ -32,6 +32,7 @@ from app.db.models import (
     UserPreference,
     UserUpdateState,
 )
+from app.student.fence import advance_academic_data_fence
 from app.workspace.models import WorkspaceMailApproval, WorkspaceMemoryMutation
 
 
@@ -42,6 +43,11 @@ async def purge_academic_data(db: AsyncSession, user_id: UUID) -> None:
     still holds answers derived from this student's department until they
     expire, so it is forgotten here too.
     """
+    # Lock the account row before deleting anything. A concurrent campus sync
+    # takes this same lock immediately before committing a fetched result, so
+    # either that write commits first and is deleted below, or the fence bump
+    # wins and the stale writer is rejected.
+    await advance_academic_data_fence(db, user_id)
     await db.execute(delete(StudentAcademicSnapshot).where(StudentAcademicSnapshot.user_id == user_id))
     await db.execute(delete(StudentContext).where(StudentContext.user_id == user_id))
     await db.execute(delete(StudentTimetableRevision).where(StudentTimetableRevision.user_id == user_id))

@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { captureError, captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import type { ChatConfirmation, ChatStreamError, ChatToolEvent } from "@/lib/api/chat";
+import { requestIdOf } from "@/lib/api/errors";
 import { jsonFetch } from "@/lib/api/fetcher";
 import { REQUEST_ID_HEADER, newRequestId } from "@/lib/telemetry";
 import { Button } from "@/components/ui/button";
@@ -296,6 +297,13 @@ function AssistantThread({
       await jsonFetch(`/api/chat/runs/${runId}/cancel`, { method: "POST" });
       if (telemetry.isCurrentRun(runId)) runtime.thread.cancelRun();
     } catch (error) {
+      const requestId = requestIdOf(error) ?? telemetry.currentRequestId();
+      captureProductEvent("chat.cancel", {
+        result: "failed",
+        run_id: runId,
+        request_id: requestId,
+      });
+      captureRequestFailure(error, { operation: "chat.cancel", kind: "mutation" });
       toast.error(error instanceof Error ? error.message : "Unable to stop the run");
     } finally {
       telemetry.finishStop(runId);

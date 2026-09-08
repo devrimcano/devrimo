@@ -39,8 +39,12 @@ def _decode(token: str) -> dict:
     settings = get_settings()
     unverified = jwt.get_unverified_header(token)
     algorithm = unverified.get("alg", "")
+    if not isinstance(algorithm, str):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unsupported token algorithm")
 
-    options = {"require": ["exp", "sub"]}
+    if not settings.supabase_url:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Auth is not configured")
+    options = {"require": ["exp", "sub", "iss"]}
 
     if algorithm == "HS256":
         if not settings.supabase_jwt_secret:
@@ -50,9 +54,12 @@ def _decode(token: str) -> dict:
             settings.supabase_jwt_secret,
             algorithms=["HS256"],
             audience="authenticated",
+            issuer=settings.jwt_issuer,
             options=options,
         )
 
+    if algorithm not in {"ES256", "RS256"}:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unsupported token algorithm")
     client = _jwks_client()
     if client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Auth is not configured")
@@ -61,8 +68,9 @@ def _decode(token: str) -> dict:
     return jwt.decode(
         token,
         signing_key.key,
-        algorithms=[algorithm or "ES256", "RS256"],
+        algorithms=["ES256", "RS256"],
         audience="authenticated",
+        issuer=settings.jwt_issuer,
         options=options,
     )
 

@@ -12,7 +12,6 @@ a 409. It now reads the student's own curriculum listing directly.
 
 import re
 import time
-from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -30,13 +29,11 @@ from app.campus.course_info import (
     call_course_info,
     catalog_key,
     catalog_session,
-    department_for_course,
     department_options,
     prefetch,
     resolve_department,
     section_numbers,
 )
-from app.campus.eligibility import course_candidates, evaluate, prior_grade
 from app.campus.warmer import record_wanted_courses
 from app.core.digest import owner_digest, stable_digest
 from app.core.persistent_cache import read_cached, read_many_cached, write_cached
@@ -45,7 +42,21 @@ from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
 from app.planning.catalog import normalize_sections
-from app.planning.models import PlanChanges, PlanConflictError, PlanSection, PlanValidationError
+from app.planning.catalog_service import (
+    StudentProfile,
+    constraint_rows,
+    course_grade,
+    load_student_profile,
+    section_verdict,
+)
+from app.planning.catalog_service import expand_course_code as expand_catalog_course_code
+from app.planning.models import (
+    PlanChanges,
+    PlanConflictError,
+    PlanIdempotencyError,
+    PlanSection,
+    PlanValidationError,
+)
 from app.planning.service import current_term
 from app.planning.workspace import projection_from_state
 from app.planning.workspace import read_timetable as read_canonical_timetable
@@ -304,6 +315,8 @@ async def update_timetable(
         )
     except PlanConflictError as exc:
         return _conflict_response(exc)
+    except PlanIdempotencyError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except PlanValidationError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return _canonical_response(envelope)
@@ -326,6 +339,8 @@ async def undo_timetable(
         )
     except PlanConflictError as exc:
         return _conflict_response(exc)
+    except PlanIdempotencyError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except PlanValidationError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return _canonical_response(envelope)
@@ -379,13 +394,10 @@ async def _expand_course(
     against the department that actually owns the course, not the one they are
     enrolled in — a CENG student opening MATH 260 must not be sent to 5710260.
     """
-    compact = course_code.upper().replace(" ", "").replace("-", "")
-    owner = await department_for_course(db, user_id, compact, department, session=session)
-    if not compact.isdigit() and (number := re.search(r"(\d{3,4})$", compact)):
-        compact = f"{owner}{number.group(1).zfill(4)}"
-    elif compact.isdigit() and len(compact) in (3, 4):
-        compact = f"{owner}{compact.zfill(4)}"
-    return compact, owner
+    compact, owner = await expand_catalog_course_code(
+        db, user_id, course_code, department, session=session
+    )
+    return compact, owner.code
 
 
 def _short_code(full_code: str, abbreviation: str) -> str:
@@ -772,40 +784,14 @@ async def course_section_constraints(
         )
 
 
-@dataclass(frozen=True)
-class _StudentProfile:
-    """Everything an eligibility verdict needs about the student, read once.
-
-    These four values are the same for every course and every section in a
-    request, but they used to be read per course inside the loop below: a
-    forty-course batch issued a hundred and twenty queries — a context row, a
-    department resolution that can itself reach the campus, and a transcript
-    scan — to answer with the same four values every time.
-    """
-
-    context: StudentContext | None
-    department: Any
-    cgpa: float | None
-    completed: list[dict]
-
-
-async def _student_profile(db: AsyncSession, user: AuthenticatedUser) -> _StudentProfile:
+async def _student_profile(db: AsyncSession, user: AuthenticatedUser) -> StudentProfile:
     context = await db.get(StudentContext, user.id)
     query, code = await _student_department(db, user.id, context)
-    snapshot = await db.scalar(
-        select(StudentAcademicSnapshot)
-        .where(StudentAcademicSnapshot.user_id == user.id)
-        .order_by(StudentAcademicSnapshot.fetched_at.desc())
-        .limit(1)
-    )
-    cgpa = None
-    if snapshot and snapshot.current_credits:
-        cgpa = float(snapshot.current_grade_points) / float(snapshot.current_credits)
-    return _StudentProfile(
+    return await load_student_profile(
+        db,
+        user.id,
         context=context,
-        department=departments.resolve(code or query),
-        cgpa=cgpa,
-        completed=list(snapshot.completed_courses) if snapshot else [],
+        department_value=code or query,
     )
 
 
@@ -817,7 +803,7 @@ async def _constraints_for(
     compact_course: str,
     lookup_department: str,
     semester: str,
-    profile: _StudentProfile,
+    profile: StudentProfile,
 ) -> dict:
     info = await call_course_info(
         db,
@@ -833,11 +819,8 @@ async def _constraints_for(
     # transcript spellings of this course ("PHYS213"), so they are built from
     # whoever owns it. Passing the student's department here would look for
     # "EE213", a course that does not exist.
-    course_owner = departments.by_code(lookup_department)
-    held = prior_grade(
-        profile.completed,
-        course_candidates(course_code, course_owner, compact_course),
-    )
+    course_owner = departments.by_code(lookup_department) or profile.department
+    held = course_grade(profile, course_code, course_owner, compact_course)
 
     sections: dict[str, Any] = {}
     for number in section_numbers(info):
@@ -859,19 +842,18 @@ async def _constraints_for(
             # course: the student still gets its times, just no verdict.
             logger.warning("section_constraints_failed", course=compact_course, section=number, detail=exc.detail)
             continue
-        rows = _constraint_rows(payload)
-        verdict = evaluate(
-            rows,
-            department=profile.department.abbreviation if profile.department else None,
-            surname=profile.context.surname_prefix if profile.context else None,
-            cgpa=profile.cgpa,
-            year=profile.context.year_of_study if profile.context else None,
-            prior_grade=held,
+        rows, eligible, reason = section_verdict(
+            payload,
+            profile=profile,
+            supplied_course=course_code,
+            owner=course_owner,
+            full_course=compact_course,
+            held_grade=held,
         )
         sections[number] = {
             "rows": rows,
-            "eligible": verdict.eligible,
-            "reason": verdict.reason,
+            "eligible": eligible,
+            "reason": reason,
         }
 
     return {
@@ -885,13 +867,7 @@ async def _constraints_for(
 
 def _constraint_rows(payload: Any) -> list[dict[str, Any]]:
     """The eligibility rows out of whatever shape the tool returned."""
-    if isinstance(payload, dict):
-        rows = payload.get("constraints")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict) and "given_dept" in row]
-    return []
+    return constraint_rows(payload) or []
 
 
 _CURRICULUM_NAMESPACE = "schedule-curriculum"

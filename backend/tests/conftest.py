@@ -32,6 +32,7 @@ os.environ["ASSISTANT_DATABASE_URL"] = ""
 os.environ["DATABASE_RUNTIME_ROLE"] = "api"
 os.environ["RELEASE"] = "test"
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
+os.environ["SUPABASE_JWKS_URL"] = ""
 os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret-not-for-production")
 os.environ.setdefault("SECRET_ENCRYPTION_KEY", "test-encryption-key")
 os.environ.setdefault("AGENT_IDLE_TIMEOUT_SECONDS", "3600")
@@ -184,6 +185,7 @@ def auth_header(user_id: uuid.UUID) -> dict[str, str]:
         {
             "sub": str(user_id),
             "aud": "authenticated",
+            "iss": os.environ["SUPABASE_URL"].rstrip("/") + "/auth/v1",
             "exp": int(time.time()) + 3600,
             "email": f"{user_id}@example.edu",
         },

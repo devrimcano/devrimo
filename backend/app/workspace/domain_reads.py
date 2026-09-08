@@ -3,20 +3,32 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from fastapi import HTTPException
 
 from app.admin.directory import active_account
 from app.campus import departments as department_directory
-from app.campus.course_info import call_course_info
-from app.campus.eligibility import course_candidates, prior_grade
-from app.campus.eligibility import evaluate as evaluate_eligibility
-from app.db.models import StudentAcademicSnapshot, StudentContext
+from app.campus.course_info import call_course_info, catalog_session
 from app.db.session import SessionLocal
 from app.knowledge.retrieval import SearchFilters, search_knowledge
 from app.knowledge.retrieval import read_campus_page as read_indexed_page
+from app.planning.catalog import normalize_sections
+from app.planning.catalog_service import (
+    course_grade,
+    expand_course_code,
+    load_student_profile,
+    section_verdict,
+)
 from app.planning.groups import get_course_group as resolve_course_group
 from app.planning.mcp_bridge import sync_planning_snapshot_from_sais
 from app.student import service as student_service
+
+
+def _unknown_course_code(course_code: str) -> dict[str, str]:
+    return {
+        "status": "unknown_course_code",
+        "course": course_code,
+        "detail": "Use a department abbreviation with a course number (PHYS213) or the full seven-digit code.",
+    }
 
 
 def build_domain_reads(user_id: UUID) -> dict:
@@ -78,26 +90,28 @@ def build_domain_reads(user_id: UUID) -> dict:
 
         Accepts either form a student uses: "PHYS213" or "2300213".
         """
-        expanded = department_directory.expand_course_code(course_code)
-        if expanded is None:
-            return {
-                "status": "unknown_course_code",
-                "course": course_code,
-                "detail": "Use a department abbreviation with a course number (PHYS213) or the full seven-digit code.",
-            }
-        full_code, owner = expanded
         async with SessionLocal() as db:
+            async with catalog_session(db, user_id) as catalog:
+                try:
+                    full_code, owner = await expand_course_code(db, user_id, course_code, session=catalog)
+                except HTTPException as exc:
+                    if exc.status_code == 404:
+                        return _unknown_course_code(course_code)
+                    raise
+                data = await call_course_info(
+                    db,
+                    user_id,
+                    "get_course_info",
+                    {"department": owner.code, "semester": semester, "course": full_code},
+                    session=catalog,
+                )
             return {
                 "course": full_code,
                 "department": owner.code,
                 "department_name": owner.name_en,
                 "semester": semester,
-                "data": await call_course_info(
-                    db,
-                    user_id,
-                    "get_course_info",
-                    {"department": owner.code, "semester": semester, "course": full_code},
-                ),
+                "data": data,
+                "sections": normalize_sections(data),
             }
 
     async def check_section_eligibility(course_code: str, semester: str, section: str) -> dict:
@@ -107,62 +121,45 @@ def build_domain_reads(user_id: UUID) -> dict:
         it admits and their surname, CGPA and year ranges — not from anything
         the student says in chat.
         """
-        expanded = department_directory.expand_course_code(course_code)
-        if expanded is None:
-            return {
-                "status": "unknown_course_code",
-                "course": course_code,
-                "detail": "Use a department abbreviation with a course number (PHYS213) or the full seven-digit code.",
-            }
-        full_code, owner = expanded
         async with SessionLocal() as db:
-            payload = await call_course_info(
-                db,
-                user_id,
-                "get_section_constraints",
-                {
-                    "department": owner.code,
-                    "semester": semester,
-                    "course": full_code,
-                    "section": section,
-                },
-            )
-            context = await db.get(StudentContext, user_id)
-            snapshot = await db.scalar(
-                select(StudentAcademicSnapshot)
-                .where(StudentAcademicSnapshot.user_id == user_id)
-                .order_by(StudentAcademicSnapshot.fetched_at.desc())
-                .limit(1)
-            )
-        rows = payload.get("constraints") if isinstance(payload, dict) else None
-        rows = [row for row in (rows or []) if isinstance(row, dict)]
-        student = department_directory.resolve((context.department or context.program_code) if context else None)
-        cgpa = None
-        if snapshot and snapshot.current_credits:
-            cgpa = float(snapshot.current_grade_points) / float(snapshot.current_credits)
-        # A section restricted to students who still need the course is not
-        # open to one who has already passed it, and the transcript is the
-        # only place that says which they are.
-        held = prior_grade(
-            snapshot.completed_courses if snapshot else [],
-            course_candidates(course_code, owner, full_code),
-        )
-        verdict = evaluate_eligibility(
-            rows,
-            department=student.abbreviation if student else None,
-            surname=context.surname_prefix if context else None,
-            cgpa=cgpa,
-            year=context.year_of_study if context else None,
-            prior_grade=held,
+            async with catalog_session(db, user_id) as catalog:
+                try:
+                    full_code, owner = await expand_course_code(db, user_id, course_code, session=catalog)
+                except HTTPException as exc:
+                    if exc.status_code == 404:
+                        return _unknown_course_code(course_code)
+                    raise
+                profile = await load_student_profile(db, user_id)
+                payload = await call_course_info(
+                    db,
+                    user_id,
+                    "get_section_constraints",
+                    {
+                        "department": owner.code,
+                        "semester": semester,
+                        "course": full_code,
+                        "section": section,
+                    },
+                    session=catalog,
+                )
+        held = course_grade(profile, course_code, owner, full_code)
+        rows, eligible, reason = section_verdict(
+            payload,
+            profile=profile,
+            supplied_course=course_code,
+            owner=owner,
+            full_course=full_code,
+            held_grade=held,
         )
         return {
             "course": full_code,
             "section": section,
-            "student_department": student.abbreviation if student else None,
+            "student_department": profile.department.abbreviation if profile.department else None,
             "your_grade_in_this_course": held,
-            "eligible": verdict.eligible,
-            "reason": verdict.reason,
+            "eligible": eligible,
+            "reason": reason,
             "constraints": rows,
+            "constraints_verified": eligible is not None,
         }
 
     return {

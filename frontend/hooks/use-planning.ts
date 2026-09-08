@@ -150,96 +150,6 @@ function readRecoveryState(userId: string, term: string): PlanState | null {
   }
 }
 
-function legacyDay(value: unknown): PlanDay {
-  return value === "Tue" || value === "Wed" || value === "Thu" || value === "Fri" ? value : "Mon";
-}
-
-function legacyEntry(value: unknown, index: number, kind: PlanEntry["kind"] = "course"): PlanEntry {
-  const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const start = Number(item.start_minute ?? item.startMinute ?? (Number(item.start ?? 0) * 60 + 40));
-  const duration = Number(item.duration_minutes ?? item.durationMinutes ?? Math.max(1, Number(item.duration ?? 1) * 60 - 10));
-  return {
-    id: String(item.id ?? `${kind}:${index}`),
-    code: String(item.code ?? (kind === "block" ? `BLOCK:${String(item.name ?? "busy")}` : "")),
-    name: String(item.name ?? ""),
-    section: String(item.section ?? ""),
-    credits: Number(item.credits ?? 0),
-    color: Number(item.color ?? 0),
-    kind: item.kind === "block" ? "block" : kind,
-    instructor: String(item.instructor ?? ""),
-    day: legacyDay(item.day),
-    start_minute: Number.isFinite(start) ? Math.max(0, Math.min(1439, Math.trunc(start))) : 0,
-    duration_minutes: Number.isFinite(duration) ? Math.max(1, Math.min(1440, Math.trunc(duration))) : 1,
-    room: String(item.room ?? ""),
-  };
-}
-
-function legacyToState(draft: LegacyDraft): PlanState {
-  const rawEntries = Array.isArray(draft.entries)
-    ? draft.entries
-    : [
-        ...(Array.isArray(draft.courses) ? draft.courses.flatMap((course) => {
-          if (!course || typeof course !== "object") return [];
-          const item = course as Record<string, unknown>;
-          return (Array.isArray(item.meetings) ? item.meetings : []).map((meeting, index) => ({
-            ...(meeting && typeof meeting === "object" ? meeting : {}),
-            id: `course:${String(item.code ?? "")}:${String(item.section ?? "")}:${index}`,
-            code: item.code,
-            name: item.name,
-            section: item.section,
-            credits: index === 0 ? item.credits : 0,
-            instructor: item.instructor,
-          }));
-        }) : []),
-        ...(Array.isArray(draft.busy_blocks) ? draft.busy_blocks.flatMap((block) => {
-          if (!block || typeof block !== "object") return [];
-          const item = block as Record<string, unknown>;
-          return (Array.isArray(item.meetings) ? item.meetings : []).map((meeting, index) => ({
-            ...(meeting && typeof meeting === "object" ? meeting : {}),
-            id: `block:${String(item.name ?? "busy")}:${index}`,
-            code: `BLOCK:${String(item.name ?? "busy")}`,
-            name: item.name,
-            kind: "block",
-          }));
-        }) : []),
-      ];
-  const pool = (Array.isArray(draft.pool) ? draft.pool : []).flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const item = value as Record<string, unknown>;
-    const code = String(item.code ?? "").trim();
-    if (!code) return [];
-    return [{
-      ...item,
-      code,
-      name: String(item.name ?? code),
-      credits: Number(item.credits ?? 0),
-      raw_code: String(item.raw_code ?? item.rawCode ?? code),
-    }];
-  }) as PlanCourse[];
-  const alternatives = (Array.isArray(draft.alternatives) ? draft.alternatives : []).map((value) => (
-    Array.isArray(value) ? value.map((entry, index) => legacyEntry(entry, index)) : []
-  ));
-  const favorites = (Array.isArray(draft.favorites) ? draft.favorites : []).map((value) => (
-    Array.isArray(value) ? value.map((entry, index) => legacyEntry(entry, index)) : []
-  ));
-  const emptyDays = (Array.isArray(draft.empty_days) ? draft.empty_days : Array.isArray(draft.emptyDays) ? draft.emptyDays : [])
-    .filter((day): day is PlanDay => day === "Mon" || day === "Tue" || day === "Wed" || day === "Thu" || day === "Fri");
-  return {
-    entries: rawEntries.map((entry, index) => legacyEntry(entry, index)),
-    department: String(draft.department ?? ""),
-    department_label: String(draft.department_label ?? draft.departmentLabel ?? ""),
-    empty_days: emptyDays,
-    avoid_conflicts: typeof draft.avoid_conflicts === "boolean" ? draft.avoid_conflicts : draft.avoidConflicts !== false,
-    ignore_constraints: typeof draft.ignore_constraints === "boolean" ? draft.ignore_constraints : draft.ignoreConstraints === true,
-    pool,
-    sections: (draft.sections && typeof draft.sections === "object" ? draft.sections : {}) as Record<string, unknown[]>,
-    alternatives,
-    alternative_index: Number(draft.alternative_index ?? draft.alternativeIndex ?? 0),
-    favorites,
-    favorite_index: Number(draft.favorite_index ?? draft.favoriteIndex ?? (favorites.length ? favorites.length - 1 : -1)),
-  };
-}
-
 /**
  * Owns loading, optimistic revision ordering, recovery caching and conflict
  * reporting for the server-owned timetable resource.
@@ -405,7 +315,7 @@ export function usePlanning(term: string) {
 
   const importLegacy = useCallback(async (idempotencyKey?: string) => {
     if (!legacyDraft) return null;
-    const result = await update({ operation: "import_legacy", state: legacyToState(legacyDraft) }, idempotencyKey);
+    const result = await update({ operation: "import_legacy", projection: legacyDraft }, idempotencyKey);
     if (result) setLegacyDraft(null);
     return result;
   }, [legacyDraft, update]);

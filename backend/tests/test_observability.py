@@ -118,6 +118,57 @@ def test_turn_observation_records_failure_and_is_idempotent(monkeypatch):
     assert turn["error_type"] == "ModelProviderError"
 
 
+def test_interrupted_turn_keeps_durable_and_queue_correlation(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "app.observability.turns.capture",
+        lambda event, **kw: captured.append((event, kw)),
+    )
+    observation = TurnObservation(
+        trace_id="trace-lease",
+        user_id="user-lease",
+        session_id="session-lease",
+        run_id="run-lease",
+        request_id="request-lease",
+        worker_id="worker-lease",
+    )
+    observation.interrupted("lease_lost")
+    observation.durable_status = "unknown"
+    observation.durable_finalization = "lease_lost"
+    observation.finish()
+
+    trace = next(kw for event, kw in captured if event == "$ai_trace")
+    turn = next(kw for event, kw in captured if event == "chat_turn_completed")
+    for event in (trace, turn):
+        assert event["run_id"] == "run-lease"
+        assert event["request_id"] == "request-lease"
+        assert event["worker_id"] == "worker-lease"
+        assert event["durable_status"] == "unknown"
+        assert event["durable_finalization"] == "lease_lost"
+    assert turn["outcome"] == "interrupted"
+    assert turn["result"] == "expected_failure"
+
+
+def test_ai_instrumentation_state_is_bounded(monkeypatch):
+    from app.observability import llm
+
+    captured = []
+    monkeypatch.setattr(ph_client, "capture", lambda event, **kw: captured.append((event, kw)))
+    monkeypatch.setattr(llm, "_instrumentation_state", None)
+
+    llm._report_instrumentation_state("unavailable", "wrapper_import", "ImportError")
+    llm._report_instrumentation_state("unavailable", "wrapper_import", "ImportError")
+    llm._report_instrumentation_state("available")
+
+    assert [event for event, _ in captured] == ["ai_instrumentation_state", "ai_instrumentation_state"]
+    assert captured[0][1] == {
+        "state": "unavailable",
+        "reason": "wrapper_import",
+        "error_type": "ImportError",
+    }
+    assert captured[1][1] == {"state": "available", "reason": None, "error_type": None}
+
+
 def test_tool_failures_are_counted_and_reported(monkeypatch):
     captured = []
     monkeypatch.setattr(
@@ -254,7 +305,7 @@ async def test_chat_turn_emits_one_trace_and_one_turn_event(client, monkeypatch)
         lambda event, **kw: captured.append((event, kw)),
     )
 
-    headers = auth_header(new_user_id())
+    headers = {**auth_header(new_user_id()), "X-Request-ID": "request-chat-1"}
     assert (await client.post("/api/v1/agents/provision", headers=headers)).status_code == 201
     response = await client.post(
         "/api/v1/chat/completions",
@@ -270,6 +321,8 @@ async def test_chat_turn_emits_one_trace_and_one_turn_event(client, monkeypatch)
 
     assert traces[0]["$ai_session_id"] == "obs-trace-1"
     assert traces[0]["$ai_span_name"] == "chat_turn"
+    assert traces[0]["request_id"] == "request-chat-1"
+    assert turns[0]["request_id"] == "request-chat-1"
     assert "$ai_is_error" not in traces[0]
     assert turns[0]["outcome"] == "completed"
     assert turns[0]["chat_session_id"] == "obs-trace-1"

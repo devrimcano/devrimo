@@ -43,6 +43,11 @@ type ProductEventProperties = {
     duration_seconds: number | null;
     request_id: string | null;
   };
+  "chat.cancel": {
+    result: "failed";
+    run_id: string;
+    request_id: string | null;
+  };
   // Tool activity the broker streams as `devrimo` extension chunks. The
   // frontend received these already and threw them away.
   agent_tool_call: { tool: string | null; server: string | null; status: "started" | "completed" | "error" };

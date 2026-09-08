@@ -27,6 +27,7 @@ from typing import Any
 TELEMETRY_SCHEMA_VERSION = 2
 
 SERVICE_BROKER = "devrimo-broker"
+SERVICE_ASSISTANT_WORKER = "devrimo-assistant-worker"
 SERVICE_KNOWLEDGE_WORKER = "devrimo-knowledge-worker"
 SERVICE_EMBEDDING_WORKER = "devrimo-embedding-worker"
 
