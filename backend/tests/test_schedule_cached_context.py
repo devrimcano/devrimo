@@ -20,3 +20,24 @@ async def test_student_department_uses_setup_cache_without_catalog(monkeypatch):
 
     assert query == "Electrical and Electronics Engineering"
     assert code == "567"
+
+
+async def test_resolve_department_ignores_browser_override():
+    context = StudentContext(
+        user_id=uuid4(),
+        department="Electrical and Electronics Engineering",
+        program_code="567",
+        source="sais",
+    )
+
+    class CachedContextDatabase:
+        async def get(self, model, user_id):
+            assert model is StudentContext
+            assert user_id == context.user_id
+            return context
+
+    resolved = await schedule_api._resolve_department(
+        CachedContextDatabase(), context.user_id, "571"
+    )
+
+    assert resolved == "567"

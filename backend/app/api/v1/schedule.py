@@ -63,12 +63,8 @@ class AiScheduleCourse(BaseModel):
 
 
 class AiScheduleRequest(BaseModel):
-    # Optional because the broker already knows it. The department is read from
-    # ``sais_get_student_info`` during the same sync that fills the transcript
-    # snapshot, so requiring the client to send it back was asking the browser
-    # to restate a value the server had all along — and made the request fail
-    # outright whenever the page's own state happened to be empty.
-    # Official SAIS abbreviations such as EE are two characters long.
+    # Kept for compatibility with already-open browser tabs. The server ignores
+    # it and reads the setup-owned StudentContext instead.
     department: str | None = Field(default=None, max_length=20)
     semester: str = Field(min_length=4, max_length=20)
     courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
@@ -104,17 +100,10 @@ class CourseSectionsResponse(BaseModel):
     data: Any
     sections: list[PlanSection] = Field(default_factory=list)
 
-async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
-    """The department to plan against: what the client sent, else what SAIS said.
 
-    The client's value wins when present, because a student who picked their
-    department by hand in the planner is correcting exactly this. Otherwise it
-    comes from the stored campus context populated during setup or an explicit
-    academic-data refresh. Opening the planner never contacts SAIS for identity.
-    """
-    supplied = (provided or "").strip()
-    if len(supplied) >= 2:
-        return supplied
+async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -> str:
+    """Read the immutable planning department from the setup cache."""
+    del provided  # Accepted only so older clients remain wire-compatible.
 
     context = await db.get(StudentContext, user_id)
     query, code = await _student_department(db, user_id, context)
@@ -122,8 +111,8 @@ async def _resolve_department(db: AsyncSession, user_id, provided: str | None) -
     if len(resolved) < 2:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "No department is on file for this account and SAIS did not report one. "
-            "Choose your department in the planner and try again.",
+            "No department is stored for this account. Complete METU setup or "
+            "refresh academic data in Settings, then try again.",
         )
     return resolved
 

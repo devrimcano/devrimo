@@ -25,7 +25,6 @@ import { usePlanning, type PlanEntry, type PlanEnvelope, type PlanState } from "
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
 import { formatMetuCourseCode } from "@/lib/metu-course-code";
-import { resolvePlannerDepartment, type PlannerDepartmentChoice } from "@/lib/planner-department";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
@@ -39,7 +38,7 @@ type SectionMap = Record<string, CatalogSection[]>;
 type ConstraintRow = { given_dept?: string; start_char?: string; end_char?: string; min_cgpa?: string; max_cgpa?: string; min_year?: string; max_year?: string };
 type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean; reason: string };
 type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
-type DepartmentOption = { code: string; name: string };
+type StudentDepartment = { code: string; label: string };
 type AiPlanCourse = { code?: string; display_code?: string; name?: string; credits?: number; sections?: unknown };
 type PrerequisiteRejection = {
   course_code?: string;
@@ -494,17 +493,9 @@ export function SchedulePlanner() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
-  const [studentDepartment, setStudentDepartment] = useState<PlannerDepartmentChoice | null>(null);
-  const [departmentFallback, setDepartmentFallback] = useState<PlannerDepartmentChoice>({ code: "", label: "" });
+  const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
-  const [departmentQuery, setDepartmentQuery] = useState("");
-  const [departmentOptions, setDepartmentOptions] = useState<DepartmentOption[]>([]);
-  const [departmentSearching, setDepartmentSearching] = useState(false);
-  const [departmentStatus, setDepartmentStatus] = useState<"ok" | "unknown" | "failed" | "disconnected">("ok");
-  const [departmentCodeDraft, setDepartmentCodeDraft] = useState("");
-  const resolvedDepartment = resolvePlannerDepartment(studentDepartment, departmentFallback);
-  const department = resolvedDepartment.code;
-  const departmentKnown = Boolean(department);
+  const department = studentDepartment?.code ?? "";
   const [emptyDays, setEmptyDays] = useState<Day[]>([]);
   const [avoidConflicts, setAvoidConflicts] = useState(true);
   const [ignoreConstraints, setIgnoreConstraints] = useState(false);
@@ -561,7 +552,6 @@ export function SchedulePlanner() {
     setEntries(nextEntries);
     setCatalogCourses(nextPool);
     setSectionsByCourse(nextSections);
-    setDepartmentFallback({ code: state.department, label: state.department_label || state.department });
     setEmptyDays(state.empty_days.filter((day): day is Day => DAYS.includes(day)));
     setAvoidConflicts(state.avoid_conflicts);
     setIgnoreConstraints(state.ignore_constraints);
@@ -587,8 +577,8 @@ export function SchedulePlanner() {
   );
   const localCanonicalState = useMemo(() => canonicalStateFromLocal({
     entries,
-    department: departmentFallback.code,
-    departmentLabel: departmentFallback.label,
+    department,
+    departmentLabel: studentDepartment?.label ?? department,
     emptyDays,
     avoidConflicts,
     ignoreConstraints,
@@ -604,12 +594,13 @@ export function SchedulePlanner() {
     avoidConflicts,
     canonicalSections,
     catalogCourses,
-    departmentFallback,
+    department,
     emptyDays,
     entries,
     favoriteIndex,
     favorites,
     ignoreConstraints,
+    studentDepartment?.label,
   ]);
 
   const localFingerprint = useMemo(() => canonicalStateFingerprint(localCanonicalState), [localCanonicalState]);
@@ -678,66 +669,18 @@ export function SchedulePlanner() {
         const resolved = context.department_code ?? context.department_query ?? "";
         if (resolved) {
           setStudentDepartment({ code: resolved, label: context.department_query ?? resolved });
-          setDepartmentStatus("ok");
         } else {
           setStudentDepartment(null);
-          setDepartmentStatus("unknown");
         }
       })
       .catch((error) => {
-        // Distinguished from "SAIS answered and had nothing": the picker is the
-        // way out of both, but a student whose campus connection has expired
-        // needs to be told that rather than left guessing why their department
-        // vanished.
-        if (!cancelled) setDepartmentStatus(error instanceof Error && /401|403|connect/i.test(error.message) ? "disconnected" : "failed");
+        captureRequestFailure(error, { operation: "schedule.student_context", kind: "query" });
+        if (!cancelled) setStudentDepartment(null);
       })
       .finally(() => { if (!cancelled) setDepartmentBusy(false); });
     // The student context is stable for the lifetime of this page.
     return () => { cancelled = true; };
   }, []);
-
-  // --- department picker --------------------------------------------------
-
-  // What the server already holds, so an unchanged value is not re-sent.
-  const searchToken = useRef(0);
-  useEffect(() => {
-    const query = departmentQuery.trim();
-    // A token rather than an abort: a slow first response must not be allowed
-    // to land after a later one and replace the list the student is reading.
-    // Every state change happens inside the debounce, so a keystroke costs no
-    // synchronous render of its own.
-    const token = ++searchToken.current;
-    const timer = window.setTimeout(() => {
-      if (departmentKnown || query.length < 2) {
-        setDepartmentOptions([]);
-        setDepartmentSearching(false);
-        return;
-      }
-      setDepartmentSearching(true);
-      void jsonFetch<{ departments?: DepartmentOption[] }>(`/api/schedule/departments/search?query=${encodeURIComponent(query)}`)
-        .then((response) => { if (token === searchToken.current) setDepartmentOptions(response.departments ?? []); })
-        .catch((error) => {
-        // The planner is driven imperatively rather than through TanStack
-        // Query, so none of its failures reached the central query reporter.
-        captureRequestFailure(error, { operation: "schedule.student_context", kind: "query" }); if (token === searchToken.current) setDepartmentOptions([]); })
-        .finally(() => { if (token === searchToken.current) setDepartmentSearching(false); });
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [departmentQuery, departmentKnown]);
-
-  function chooseDepartment(option: DepartmentOption) {
-    setDepartmentFallback({ code: option.code, label: option.name || option.code });
-    setDepartmentQuery("");
-    setDepartmentOptions([]);
-    setDepartmentCodeDraft("");
-    setDepartmentStatus("ok");
-  }
-
-  function applyDepartmentCode() {
-    const code = departmentCodeDraft.replace(/\D/g, "");
-    if (code.length !== 3) return toast.error(t("Bölüm kodu üç haneli olmalı.", "A department code is three digits."));
-    chooseDepartment({ code, name: code });
-  }
 
   // --- derived ------------------------------------------------------------
 
@@ -1057,10 +1000,7 @@ export function SchedulePlanner() {
     try {
       response = await jsonFetch<{ courses?: AiPlanCourse[]; warnings?: string[]; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number }>("/api/schedule/curriculum", {
         method: "POST",
-        // Omitted rather than sent empty: the broker reads the department from
-        // the stored campus context when the client has none, so a page whose
-        // own state is empty still gets a plan instead of a validation error.
-        body: { department: department.trim() || undefined, semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
+        body: { semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
       });
     } catch (error) {
       captureProductEvent("schedule_plan_completed", {
@@ -1097,9 +1037,13 @@ export function SchedulePlanner() {
   }
 
   async function loadRequiredCourses() {
-    // No department gate any more. The broker resolves it from the stored
-    // campus context when the request omits it, and answers with a specific
-    // 422 when it genuinely has none — which is more than this check knew.
+    if (!department) {
+      toast.error(t(
+        "Bölüm bilgin bulunamadı. Ayarlar'dan akademik verilerini yenileyip tekrar dene.",
+        "Your department is missing. Refresh your academic data in Settings and try again.",
+      ));
+      return;
+    }
     setPlanBusy(true); setCurriculumNotice(""); setExpandedCourse(null);
     try {
       const result = await requestCurriculum([]);
@@ -1418,59 +1362,6 @@ export function SchedulePlanner() {
         <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
             <Card><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 p-4">
-              {/* The department is not a setting. It is read once from SAIS and
-                  the broker keeps it, so in the normal case there is nothing
-                  here to show or decide — this whole block appears only when
-                  the campus systems gave us nothing to go on. */}
-              {departmentBusy || departmentKnown ? null : (
-                <Field id="planner-department" label={t("Bölüm", "Department")}>
-                  <div className="space-y-2">
-                    {!departmentKnown ? (
-                      <p className="text-xs text-muted-foreground">
-                        {departmentStatus === "disconnected"
-                          ? t("ODTÜ bağlantın yenilenmeli; bölümün SAIS'ten okunamadı. Aşağıdan seçebilirsin.", "Your METU connection needs renewing, so your department could not be read from SAIS. Pick it below.")
-                          : departmentStatus === "failed"
-                            ? t("SAIS'e ulaşılamadı. Bölümünü aşağıdan seç.", "SAIS could not be reached. Pick your department below.")
-                            : t("SAIS bir bölüm bildirmedi. Aşağıdan seç.", "SAIS did not report a department. Pick one below.")}
-                      </p>
-                    ) : null}
-                    <div className="relative">
-                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input id="planner-department" value={departmentQuery} onChange={(e) => setDepartmentQuery(e.target.value)} className="pl-9" placeholder={t("Bölüm ara (ör. Bilgisayar)", "Search department (e.g. Computer)")} aria-label={t("Bölüm ara", "Search department")} />
-                    </div>
-                    {departmentSearching ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2Icon className="size-3.5 animate-spin" />{t("Aranıyor…", "Searching…")}</p> : null}
-                    {departmentOptions.length ? (
-                      <select
-                        value=""
-                        onChange={(e) => { const found = departmentOptions.find((option) => option.code === e.target.value); if (found) chooseDepartment(found); }}
-                        className="h-10 w-full rounded-md border bg-background px-2 text-sm"
-                        aria-label={t("Bölüm seç", "Select department")}
-                      >
-                        <option value="" disabled>{t(`${departmentOptions.length} bölüm bulundu — seç`, `${departmentOptions.length} departments found — select`)}</option>
-                        {departmentOptions.map((option) => <option key={option.code} value={option.code}>{option.name} ({option.code})</option>)}
-                      </select>
-                    ) : !departmentSearching && departmentQuery.trim().length >= 2 ? (
-                      <p className="text-xs text-muted-foreground">{t("Eşleşen bölüm bulunamadı.", "No matching department was found.")}</p>
-                    ) : null}
-                    {/* Last resort, and the only branch that needs no campus
-                        server at all: the catalog search goes through the
-                        student's own Course Info connection, so when that is
-                        what is broken the search cannot be the only way in. */}
-                    <div className="flex items-center gap-2">
-                      <Input
-                        value={departmentCodeDraft}
-                        onChange={(e) => setDepartmentCodeDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
-                        onKeyDown={(e) => { if (e.key === "Enter") applyDepartmentCode(); }}
-                        inputMode="numeric"
-                        className="h-9"
-                        placeholder={t("veya üç haneli kod (567)", "or three-digit code (567)")}
-                        aria-label={t("Bölüm kodunu elle gir", "Enter department code manually")}
-                      />
-                      <Button size="sm" variant="outline" className="shrink-0" onClick={applyDepartmentCode} disabled={departmentCodeDraft.length !== 3}>{t("Kullan", "Use")}</Button>
-                    </div>
-                  </div>
-                </Field>
-              )}
               <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
                 {/* Five fixed options, so toggles rather than a multi-select:
                     every choice is visible and one click wide, and a dropdown
