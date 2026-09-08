@@ -102,6 +102,40 @@ frontend_releases="$DEPLOY_DIR/.frontend-releases"
 frontend_release="$frontend_releases/$DEPLOY_SHA-$stamp"
 mkdir -p "$frontend_releases"
 
+# A rollback archive is useful only while there is room to create the next
+# one. Older versions accumulated forever and eventually filled the host while
+# tar was writing a new snapshot, before any serving file had changed. Remove
+# only files created by this script, keep the two newest of each backup type,
+# and discard interrupted zero-byte outputs before taking the next snapshot.
+prune_deploy_files() {
+  local directory="$1" pattern="$2" keep="$3"
+  local files=()
+  mapfile -t files < <(find "$directory" -maxdepth 1 -type f -name "$pattern" -printf '%f\n' | sort)
+  local remove_count
+  remove_count=$((${#files[@]} - keep))
+  if (( remove_count > 0 )); then
+    for name in "${files[@]:0:remove_count}"; do
+      rm -f -- "$directory/$name"
+    done
+  fi
+}
+
+find "$BACKUP_DIR" -maxdepth 1 -type f \
+  \( -name 'source-*.tar.gz' -o -name 'devrimo-*.dump' \) -size 0 -delete
+# One complete source snapshot and one matching-generation database dump are
+# sufficient for rollback; the live tree and frontend release retain their own
+# previous versions separately.
+prune_deploy_files "$BACKUP_DIR" 'source-*.tar.gz' 1
+prune_deploy_files "$BACKUP_DIR" 'devrimo-*.dump' 1
+
+# Failed workflows upload a uniquely named archive and cannot reach the normal
+# success cleanup. The current archive is retained; every other file matching
+# the workflow's exact release prefix is stale and safe to remove.
+current_archive="$(basename "$RELEASE_ARCHIVE")"
+while IFS= read -r -d '' archive; do
+  [ "$(basename "$archive")" = "$current_archive" ] || rm -f -- "$archive"
+done < <(find /tmp -maxdepth 1 -type f -name 'devrimo-release-*.tar.gz' -print0)
+
 # Keep a compact source rollback snapshot. Runtime dependencies, caches,
 # credentials, campus state, and databases are deliberately excluded.
 tar -czf "$BACKUP_DIR/source-$stamp.tar.gz" \
