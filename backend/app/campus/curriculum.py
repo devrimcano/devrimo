@@ -73,49 +73,6 @@ def next_semester_courses(board: Any) -> list[dict]:
     return [row for row in rows if not row["grade"].strip()]
 
 
-def all_semester_courses(board: Any) -> list[dict]:
-    """Normalize the complete SAIS curriculum board for browse views.
-
-    This intentionally keeps completed and failed attempts visible. The
-    planner may recommend only outstanding rows, while the curriculum view
-    needs to explain why a course is already satisfied or still outstanding.
-    """
-    if isinstance(board, dict) and set(board) == {"result"}:
-        board = board["result"]
-    if not isinstance(board, dict) or not isinstance(board.get("semesters"), list) or not board["semesters"]:
-        raise ValueError("SAIS Curriculum semester boxes could not be read")
-    normalized: list[dict] = []
-    for semester in sorted(board["semesters"], key=lambda item: item.get("semester", 99) if isinstance(item, dict) else 99):
-        if (
-            not isinstance(semester, dict)
-            or type(semester.get("semester")) is not int
-            or semester["semester"] < 1
-            or type(semester.get("completed")) is not bool
-            or not isinstance(semester.get("courses"), list)
-        ):
-            raise ValueError("SAIS Curriculum completion markers could not be read")
-        for row in semester["courses"]:
-            if not isinstance(row, dict) or not isinstance(row.get("grade"), str):
-                raise ValueError("SAIS Curriculum course grades could not be read")
-            code = normalise_code(row.get("course_code"))
-            if not code:
-                continue
-            grade = row["grade"].strip()
-            status = "outstanding" if not grade else "completed" if has_passed(grade) else "failed"
-            normalized.append(
-                {
-                    "semester": semester["semester"],
-                    "semester_completed": semester["completed"],
-                    "course_code": code,
-                    "course_name": " ".join(str(row.get("course_name") or "").split()),
-                    "grade": grade or None,
-                    "status": status,
-                    "credit": row.get("credit") or row.get("credits"),
-                }
-            )
-    return normalized
-
-
 def normalise_code(value: Any) -> str | None:
     """A curriculum row's course code as METU's seven digits, or nothing.
 

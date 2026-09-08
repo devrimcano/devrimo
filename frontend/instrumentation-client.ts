@@ -16,44 +16,6 @@ import { serviceProperties } from "@/lib/telemetry";
 
 const key = getPostHogKey();
 
-const ACADEMIC_CONTENT_KEY = /(?:prompt|completion|messages?|content|transcript|course|section|surname|grade|student|academic|context|tool[_-]?result|detail|error(?:s|[_-]?(?:message|detail|body))?|instructions?|answer|response|input|output|\$ai_error(?:_|$))/i;
-const USAGE_METRIC_KEY = /(^|_)(tokens?|latency|duration|count|status|price|cost|seconds?|milliseconds?)($|_)/i;
-const ACADEMIC_REDACTED = "[academic content redacted]";
-const SAFE_TYPE_KEYS = new Set(["error_type", "exception_type", "$ai_error_type"]);
-const SAFE_TYPE_VALUE = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
-
-function safeTypeValue(keyName: string | undefined, value: unknown): boolean {
-  return !keyName || !SAFE_TYPE_KEYS.has(keyName.toLowerCase()) || value == null ||
-    (typeof value === "string" && SAFE_TYPE_VALUE.test(value.trim()));
-}
-
-function redactAcademicTelemetry(value: unknown, keyName?: string, depth = 0): unknown {
-  if (depth > 12) return ACADEMIC_REDACTED;
-  if (typeof value === "string") {
-    if (keyName && SAFE_TYPE_KEYS.has(keyName.toLowerCase())) {
-      return safeTypeValue(keyName, value) ? value : ACADEMIC_REDACTED;
-    }
-    return keyName && ACADEMIC_CONTENT_KEY.test(keyName) ? ACADEMIC_REDACTED : value;
-  }
-  if (Array.isArray(value)) return value.map((item) => redactAcademicTelemetry(item, keyName, depth + 1));
-  if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
-  for (const [childKey, childValue] of Object.entries(value)) {
-    const safeType = safeTypeValue(childKey, childValue);
-    if (
-      (ACADEMIC_CONTENT_KEY.test(childKey) ||
-        ["$exception_list", "exception", "stack", "error", "error_message", "error_detail", "error_body"].includes(childKey)) &&
-      !USAGE_METRIC_KEY.test(childKey) &&
-      !safeType
-    ) {
-      output[childKey] = ACADEMIC_REDACTED;
-    } else {
-      output[childKey] = redactAcademicTelemetry(childValue, childKey, depth + 1);
-    }
-  }
-  return output;
-}
-
 if (key) {
   // Next warns if this file takes longer than 16ms, and an instrumentation
   // failure must never be able to stop the app from becoming interactive.
@@ -83,12 +45,6 @@ if (key) {
       disable_session_recording: false,
       session_recording: {
         maskAllInputs: true,
-        // Keep PostHog's built-in privacy classes when adding the academic
-        // selector. A custom block/ignore class would otherwise replace the
-        // SDK defaults and make `ph-no-capture` ineffective.
-        blockClass: "ph-no-capture",
-        ignoreClass: "ph-ignore-input",
-        maskTextClass: "ph-mask",
         maskTextSelector: "[data-ph-mask]",
         recordCrossOriginIframes: false,
       },
@@ -110,16 +66,8 @@ if (key) {
       // deprecated in this SDK version, and only this one sees `$set_once`.
       before_send: (event) => {
         if (!event) return event;
-        // AI traces, exception properties and explicit product events can all
-        // pass through this hook. Keep aggregate measurements and correlation
-        // ids, but remove academic content even when a future call site forgets
-        // to use the safe product-event helper.
         for (const bag of [event.properties, event.$set, event.$set_once]) {
           if (!bag) continue;
-          const safe = redactAcademicTelemetry(bag);
-          if (safe && typeof safe === "object" && !Array.isArray(safe)) {
-            Object.assign(bag, safe);
-          }
           for (const [key, value] of Object.entries(bag)) {
             if (typeof value !== "string") continue;
             if (!/(^\$|_)(current_url|pathname|referrer|url|host)$/.test(key) && !key.includes("_url")) {

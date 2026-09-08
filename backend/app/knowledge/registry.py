@@ -9,7 +9,6 @@ from app.db.models import CampusIngestionJob, CampusSource, CampusSourceRevision
 from app.knowledge.adapters import adapter_for
 from app.knowledge.chunking import chunk_records, validate_chunk_config
 from app.knowledge.fetcher import FetchPolicy, fetch_document
-from app.knowledge.indexes import lock_index_publication
 from app.knowledge.types import ParsedRecord
 
 REMOTE_KINDS = {"drupal", "html_page", "html_table", "rss", "ical", "json", "pdf", "approved_social"}
@@ -84,9 +83,11 @@ async def create_source(
 async def revise_source(
     db: AsyncSession, source: CampusSource, *, actor_id: UUID, config: dict
 ) -> CampusSourceRevision:
-    next_revision = await db.scalar(
-        select(func.coalesce(func.max(CampusSourceRevision.revision), 0) + 1).where(
-            CampusSourceRevision.source_id == source.id
+    next_revision = (
+        await db.scalar(
+            select(func.coalesce(func.max(CampusSourceRevision.revision), 0) + 1).where(
+                CampusSourceRevision.source_id == source.id
+            )
         )
     )
     validation = validate_source(source, config)
@@ -135,7 +136,6 @@ async def publish_revision(
 ) -> CampusIngestionJob:
     if revision.source_id != source.id or not revision.validation.get("ok"):
         raise ValueError("Only a valid revision for this source can be published")
-    await lock_index_publication(db, source.organization_id)
     await db.refresh(source, with_for_update=True)
     now = datetime.now(UTC)
     old = (

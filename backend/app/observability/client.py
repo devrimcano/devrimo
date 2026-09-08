@@ -15,11 +15,10 @@ announced through ``app.observability.diagnostics``, which writes to stdout —
 the one channel that still works when the telemetry pipeline is the thing that
 is broken.
 
-*Never leak private academic content or a secret.* ``before_send`` is the last
-gate every SDK event passes through, and it scrubs credential-shaped values and
-academic payloads regardless of which call site produced them. Aggregate usage,
-latency and safe type labels remain available; prompts, completions, tool
-content, transcripts and exception bodies do not.
+*Never leak a secret.* ``before_send`` is the last gate every SDK event passes
+through, and it scrubs credential-shaped values regardless of which call site
+produced them. Prompt, completion, and tool content is deliberately allowed
+through; keys, tokens, and passwords are not.
 
 *Never redact a measurement.* The rule above used to cost real data: the word
 "token" appears in ``input_tokens``, ``total_tokens`` and ``tokens_scholar``
@@ -78,66 +77,6 @@ _USAGE_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _REDACTED = "[redacted]"
-_ACADEMIC_REDACTED = "[academic content redacted]"
-_ROUTE_REDACTED = "[route redacted]"
-_SAFE_TYPE_KEYS = {"error_type", "exception_type", "$ai_error_type"}
-_SAFE_TYPE_VALUE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}")
-
-# Academic context is data, not an observability dimension. These keys cover
-# the PostHog AI fields, tool states, exception details and the structured
-# fields used by the Scholar turn/span events. Numeric values under these keys
-# remain available as aggregate measurements; strings/objects are removed.
-_ACADEMIC_KEY_PATTERN = re.compile(
-    r"(?:^|_)(?:prompt|completion|messages?|content|transcript|course|courses|section|sections|surname|grade|student|academic|context|"
-    r"tool[_-]?result|detail|error[_-]?(?:message|detail|body)|errors?|instructions?|answer|response|input|output)(?:$|_)|"
-    r"^\$ai_(?:input|output|error|instructions?|input_state|output_state)|^\$exception_list$",
-    re.IGNORECASE,
-)
-
-
-def _is_academic_key(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    normalized = key.strip().lower()
-    # Preserve safe type labels and aggregate dimensions even though their
-    # names contain one of the broad words above.
-    if normalized in {
-        "error_type",
-        "exception_type",
-        "$ai_error_type",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-    }:
-        return False
-    if normalized in {
-        "display_name",
-        "metu_username",
-        "surname_prefix",
-        "department",
-        "degree_level",
-        "program_code",
-        "campus",
-    }:
-        return True
-    # Generic exception fields are populated with ``str(exc)`` at several
-    # legacy call sites. Keep the explicit type fields for grouping, but never
-    # forward the free-form error, reason, or traceback text.
-    if normalized in {"error", "exception", "reason", "stack", "stacktrace"}:
-        return True
-    return bool(_ACADEMIC_KEY_PATTERN.search(normalized))
-
-
-def _is_concrete_route_key(key: Any) -> bool:
-    return isinstance(key, str) and key.strip().lower() in {"path", "url", "request_url", "route_path"}
-
-
-def _is_safe_type_value(key: Any, value: Any) -> bool:
-    if not isinstance(key, str) or key.strip().lower() not in _SAFE_TYPE_KEYS:
-        return True
-    return value is None or (
-        isinstance(value, str) and _SAFE_TYPE_VALUE_PATTERN.fullmatch(value.strip()) is not None
-    )
 
 # Explicitly recorded when a provider reports no usage, so "we did not measure
 # this" is distinguishable from "this cost nothing".
@@ -207,7 +146,7 @@ def _add_ai_cost_properties(event: Any) -> None:
 
 
 def _scrub(value: Any, depth: int = 0) -> Any:
-    """Recursively redact secrets and academic content from outbound telemetry."""
+    """Recursively redact credential-shaped keys and values."""
     # Event payloads are JSON-shaped and therefore acyclic by the time the SDK
     # accepts them. A generous ceiling avoids pathological recursion without
     # ever returning an uninspected deep value that could contain a credential.
@@ -216,29 +155,15 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     if isinstance(value, dict):
         return {
             key: (
-                _ACADEMIC_REDACTED
-                if isinstance(key, str)
-                and key.strip().lower() in _SAFE_TYPE_KEYS
-                and not _is_safe_type_value(key, item)
-                else (
                 _REDACTED
                 if isinstance(key, str)
                 and _SECRET_KEY_PATTERN.search(key)
                 and not _is_usage_metric(key, item)
-                else _ROUTE_REDACTED
-                if _is_concrete_route_key(key)
-                else (
-                    item
-                    if _is_academic_key(key) and isinstance(item, (int, float, bool))
-                    else _ACADEMIC_REDACTED
-                    if _is_academic_key(key)
-                    else _scrub(item, depth + 1)
-                )
-                )
+                else _scrub(item, depth + 1)
             )
             for key, item in value.items()
         }
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, (list, tuple)):
         return [_scrub(item, depth + 1) for item in value]
     if isinstance(value, str):
         return _SECRET_VALUE_PATTERN.sub(_REDACTED, value)
@@ -316,17 +241,14 @@ def get_posthog() -> Posthog | None:
             # limited so a hot loop of failures cannot flood the queue.
             enable_exception_autocapture=True,
             enable_exception_autocapture_rate_limiting=True,
-            # The SDK's diagnostic logger formats the exception message into
-            # local stdout. Keep the PostHog issue, but do not duplicate a
-            # provider response or student prompt into application logs.
-            log_captured_exceptions=False,
+            log_captured_exceptions=True,
             # A failed upload is otherwise only visible in the SDK's own stdlib
             # logger, which nothing was listening to.
             on_error=_on_export_error,
-            # Exception locals can contain the Scholar prompt, transcript or
-            # campus tool response. Keep the exception type/stack and aggregate
-            # context, but never serialize local variable values.
-            capture_exception_code_variables=False,
+            # Local variables at the point of the throw, with secret detection on.
+            # This is the difference between "MCPError" and knowing which server,
+            # which argument, and which student hit it.
+            capture_exception_code_variables=True,
             code_variables_detect_secrets=True,
             code_variables_mask_url_credentials=True,
             code_variables_mask_patterns=[
@@ -340,12 +262,11 @@ def get_posthog() -> Posthog | None:
             ],
             project_root="/app",
             in_app_modules=["app"],
-            # Academic prompts, completions and tool state are private student
-            # data. PostHog privacy mode keeps generation metadata and token
-            # usage while omitting those payloads; the outbound scrubber below
-            # protects ordinary events and OTLP exception/log properties too.
-            privacy_mode=True,
-            enable_full_ai_capture=False,
+            # Full AI capture is deliberate: prompts, completions, and tool state
+            # are the evidence needed to debug a turn. ``before_send`` still strips
+            # credential-shaped keys and values from every SDK event.
+            privacy_mode=False,
+            enable_full_ai_capture=True,
             capture_trace_context=True,
             before_send=_before_send,
         )

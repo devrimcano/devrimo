@@ -8,9 +8,13 @@ from evals.scorers import NoForbiddenTools
 
 
 def build_cases() -> list[Case]:
-    agent = build_scholar_agent()
-    # Synthetic upstream tools belong only to this eval fixture.
-    agent.tools = [SyntheticSaisTools(), SyntheticOdtuclassTools(), SyntheticWebmailTools()]
+    agent = build_scholar_agent(
+        [
+            SyntheticSaisTools(),
+            SyntheticOdtuclassTools(),
+            SyntheticWebmailTools(),
+        ]
+    )
     return [
         Case(
             name="turkish-grounded-cgpa",

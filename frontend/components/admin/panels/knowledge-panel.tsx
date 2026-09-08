@@ -326,13 +326,10 @@ function KnowledgeSearchLab({ sources }: { sources: KnowledgeSource[] }) {
   const [sourceId, setSourceId] = useState("");
   const [language, setLanguage] = useState("");
   const [recordType, setRecordType] = useState("");
-  const [generationId, setGenerationId] = useState("active");
-  const indexes = useQuery({ queryKey: ["admin", "embedding-settings"], queryFn: () => adminGet<EmbeddingSettings>("embedding-settings") });
   const search = useMutation({
     mutationFn: (value: string) => {
       const params = new URLSearchParams({ q: value, limit });
       if (sourceId) params.set("source_id", sourceId);
-      if (generationId !== "active") params.set("generation_id", generationId);
       if (language) params.set("language", language);
       if (recordType) params.set("record_type", recordType);
       return adminGet<KnowledgeSearchResponse>(
@@ -364,20 +361,6 @@ function KnowledgeSearchLab({ sources }: { sources: KnowledgeSource[] }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <Label>{pick({ tr: "Arama indeksi", en: "Search index" })}</Label>
-          <Select value={generationId} onValueChange={(value) => { setGenerationId(value ?? "active"); search.reset(); }}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">{pick({ tr: "Etkin indeks", en: "Active index" })}</SelectItem>
-              {(indexes.data?.generations ?? []).map((generation) => (
-                <SelectItem key={generation.id} value={generation.id}>
-                  {generation.model} · {generation.ready}/{generation.total} · {generation.id.slice(0, 8)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
         <form
           className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8rem_auto]"
           onSubmit={(event) => {
@@ -722,14 +705,6 @@ function EmbeddingPanelEditor({
     },
     onError: (error) => toast.error(error.message),
   });
-  const activate = useMutation({
-    mutationFn: (id: string) => adminMutate<EmbeddingSettings>(`embedding/generations/${id}/activate`, "POST", {}),
-    onSuccess: () => {
-      toast.success(pick({ tr: "Arama indeksi etkinleştirildi", en: "Search index activated" }));
-      onDone();
-    },
-    onError: (error) => toast.error(error.message),
-  });
   const coverage = settings.total_records
     ? Math.round(
         (settings.current_model_records / settings.total_records) * 100,
@@ -1003,31 +978,6 @@ function EmbeddingPanelEditor({
             </Button>
           </div>
         </div>
-
-        <section className="space-y-3" aria-label={pick({ tr: "İndeks sürümleri", en: "Index generations" })}>
-          <p className="text-sm text-muted-foreground">
-            {pick({
-              tr: "Ayarları kaydetmek yeni bir indeks oluşturur. Kapsam tamamlandığında arama denemelerini kontrol edip etkinleştirin. Önceki indeksi buradan tekrar etkinleştirebilirsiniz.",
-              en: "Saving settings builds a new index. When coverage is complete, review search results and activate it. You can reactivate an earlier index here.",
-            })}
-          </p>
-          {(settings.generations ?? []).map((generation) => (
-            <div key={generation.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{generation.model} · {generation.dimensions}</p>
-                <p className="text-xs text-muted-foreground">
-                  {generation.ready}/{generation.total} · {generation.status}
-                  {generation.error ? ` · ${generation.error}` : ""}
-                </p>
-              </div>
-              <Button variant={generation.active ? "secondary" : "outline"} size="sm"
-                disabled={!canWrite || generation.active || !generation.can_activate || activate.isPending}
-                onClick={() => activate.mutate(generation.id)}>
-                {generation.active ? pick({ tr: "Etkin", en: "Active" }) : pick({ tr: "Etkinleştir", en: "Activate" })}
-              </Button>
-            </div>
-          ))}
-        </section>
 
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border bg-background/55 p-4">

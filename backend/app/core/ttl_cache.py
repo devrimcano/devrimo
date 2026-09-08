@@ -50,20 +50,6 @@ class TTLCache:
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
 
-    def remaining_seconds(self, key: Hashable) -> float | None:
-        """Return the live entry's remaining lifetime without touching its value."""
-
-        entry = self._entries.get(key)
-        if entry is None:
-            return None
-        stored_at, _ = entry
-        remaining = self._ttl - (time.monotonic() - stored_at)
-        if remaining <= 0:
-            del self._entries[key]
-            return None
-        self._entries.move_to_end(key)
-        return remaining
-
     def purge(self, matches: Callable[[Hashable], bool]) -> None:
         """Forget every entry whose key satisfies ``matches``.
 

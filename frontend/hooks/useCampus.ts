@@ -57,8 +57,6 @@ export function useCampus() {
     connection: query.data ?? null,
     tools: query.data?.tools ?? [],
     isLoading: query.isLoading,
-    isFetching: query.isFetching,
-    queryError: query.error,
     error: query.error ?? connect.error ?? disconnect.error ?? apply.error,
     refetch: query.refetch,
     connect,

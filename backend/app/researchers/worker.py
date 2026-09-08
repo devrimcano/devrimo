@@ -5,13 +5,11 @@ import asyncio
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.db.session import engine, get_session_factory
+from app.db.session import SessionLocal, engine
 from app.logging import get_logger
 from app.researchers.client import AvesisClient, ImportFailure
 from app.researchers.models import ResearcherImportRun
 from app.researchers.service import synchronize
-
-SessionLocal = get_session_factory("researcher")
 
 logger = get_logger(__name__)
 

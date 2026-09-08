@@ -1,11 +1,8 @@
-import { createHash } from "node:crypto";
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { UIMessage } from "ai";
 import { streamChatCompletions } from "@/lib/api/chat";
-import { observeChatStream } from "@/lib/api/stream-outcome";
 import { authenticatedRoute } from "@/lib/api/route-utils";
-import { reportServerEvent, reportServerException, tracingHeadersFrom } from "@/lib/posthog-server";
-import { OUTCOME_SUCCESS, OUTCOME_UNEXPECTED_FAILURE } from "@/lib/telemetry";
+import { reportServerException, tracingHeadersFrom } from "@/lib/posthog-server";
 import type { ChatMessage, ChatRole } from "@/lib/types";
 
 function textFromParts(message: UIMessage) {
@@ -37,8 +34,6 @@ export const POST = authenticatedRoute(
 
     const messages = toChatMessages(body.messages ?? []);
     const clientId = body.id;
-    const messageId = body.messages?.findLast((message) => message.role === "user")?.id;
-    const idempotencyKey = messageId ? createHash("sha256").update(`${clientId}:${messageId}`).digest("hex") : undefined;
     const textId = "assistant-text";
     // Forwarded to the broker so its LLM traces, exceptions and logs land on the
     // same person, the same session replay and the same correlation id as this
@@ -47,26 +42,14 @@ export const POST = authenticatedRoute(
 
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
-        const started = Date.now();
         writer.write({ type: "text-start", id: textId });
         try {
-          for await (const event of observeChatStream(streamChatCompletions(
+          for await (const event of streamChatCompletions(
             context.auth.accessToken,
-            { messages, client_id: clientId, idempotency_key: idempotencyKey, stream: true },
+            { messages, client_id: clientId, stream: true },
             tracing,
-          ), (result) => reportServerEvent("chat_stream_completed", {
-            requestId: context.requestId,
-            distinctId: context.distinctId,
-            sessionId: context.sessionId,
-            route: context.route,
-            ...result,
-            outcome: result.status === "completed" || result.status === "awaiting_confirmation"
-              ? OUTCOME_SUCCESS : OUTCOME_UNEXPECTED_FAILURE,
-            duration_seconds: (Date.now() - started) / 1000,
-          }))) {
-            if (event.type === "run") {
-              writer.write({ type: "data-run", data: { runId: event.runId } });
-            } else if (event.type === "text") {
+          )) {
+            if (event.type === "text") {
               writer.write({ type: "text-delta", id: textId, delta: event.delta });
             } else if (event.type === "confirmation") {
               writer.write({ type: "data-confirmation", data: event.confirmation });

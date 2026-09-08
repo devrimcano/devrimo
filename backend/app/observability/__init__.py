@@ -14,7 +14,7 @@ from app.observability.context import (
     current_request_id,
     telemetry_context,
 )
-from app.observability.jobs import capture_worker_lifecycle, observed_job
+from app.observability.jobs import observed_job
 from app.observability.llm import (
     build_traced_async_client,
     current_session_id,
@@ -36,7 +36,6 @@ __all__ = [
     "build_traced_async_client",
     "capture",
     "capture_exception",
-    "capture_worker_lifecycle",
     "current_request_id",
     "current_session_id",
     "current_trace_id",

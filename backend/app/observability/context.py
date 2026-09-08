@@ -47,7 +47,6 @@ OUTCOMES = (OUTCOME_SUCCESS, OUTCOME_EXPECTED_FAILURE, OUTCOME_UNEXPECTED_FAILUR
 # single query answers "what is failing" across chat, admin, campus and jobs.
 EVENT_REQUEST_COMPLETED = "api_request_completed"
 EVENT_JOB_COMPLETED = "background_job_completed"
-EVENT_WORKER_LIFECYCLE = "background_worker_lifecycle"
 
 
 def new_request_id() -> str:

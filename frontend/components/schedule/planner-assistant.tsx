@@ -93,7 +93,7 @@ export function PlannerAssistant({ className }: { className?: string }) {
   }
 
   return (
-    <Card className={cn("overflow-hidden", className)} data-ph-mask>
+    <Card className={cn("overflow-hidden", className)}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}

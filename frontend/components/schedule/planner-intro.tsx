@@ -18,14 +18,14 @@ const HIGHLIGHT = ["ring-2", "ring-primary", "ring-offset-2", "ring-offset-backg
  * Each step names an element by `data-tour`; a step whose element is not on the
  * page is still shown, it simply lights nothing.
  */
-export function PlannerIntro({ className, activeStep }: { className?: string; activeStep?: "courses" | "timetable" }) {
+export function PlannerIntro({ className }: { className?: string }) {
   const { pick } = useLocale();
   const t = (tr: string, en: string) => pick({ tr, en });
   const [running, setRunning] = useState(false);
   const [step, setStep] = useState(0);
   const [seen, setSeen] = useState(true);
 
-  const allSteps: { target: string; title: string; body: string }[] = [
+  const steps: { target: string; title: string; body: string }[] = [
     {
       target: "pool",
       title: t("1 · Ders havuzu", "1 · Your course pool"),
@@ -78,8 +78,8 @@ export function PlannerIntro({ className, activeStep }: { className?: string; ac
       target: "grid",
       title: t("7 · Program", "7 · The grid"),
       body: t(
-        "Bir derse tıklayarak ayrıntılarını ve alternatif şubelerini aç. Kişisel blokları takvimde sürükleyebilir, çakışmaları kırmızı çerçevede görebilirsin.",
-        "Click a course to open its details and alternative sections. Drag personal blocks on the calendar and spot conflicts with the red outline.",
+        "Bir dersin herhangi bir saatine tıklamak o şubenin tüm saatlerini kaldırır. Çakışmalar kırmızı çerçeveyle işaretlenir.",
+        "Clicking any hour of a course removes that whole section, not just the hour you clicked. Conflicts are outlined in red.",
       ),
     },
     {
@@ -91,10 +91,6 @@ export function PlannerIntro({ className, activeStep }: { className?: string; ac
       ),
     },
   ];
-  // The course step intentionally has no hidden timetable controls. Mounting
-  // the walkthrough with the step key resets its position when the student
-  // moves between pages, so each spotlight always points at visible UI.
-  const steps = activeStep === "courses" ? allSteps.slice(0, 5) : allSteps;
 
   useEffect(() => {
     // Deferred like every other localStorage read here: reading during render

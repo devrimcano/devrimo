@@ -18,10 +18,7 @@ export function useMemories() {
   return {
     memories: query.data?.memories ?? [],
     isLoading: query.isLoading,
-    isFetching: query.isFetching,
-    queryError: query.error,
     error: query.error ?? clear.error,
-    refetch: query.refetch,
     clear,
   };
 }

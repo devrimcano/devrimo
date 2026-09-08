@@ -1,4 +1,3 @@
-import { readPersistedFrames } from "./run-stream";
 import { apiFetch } from "@/lib/api/client";
 import { getApiBaseUrl } from "@/lib/env";
 import { apiErrorFromResponse } from "@/lib/api/fetcher";
@@ -29,7 +28,6 @@ export type ChatStreamError = {
 };
 
 export type ChatStreamEvent =
-  | { type: "run"; runId: string }
   | { type: "text"; delta: string }
   | { type: "confirmation"; confirmation: ChatConfirmation }
   | { type: "tool"; tool: ChatToolEvent }
@@ -124,22 +122,6 @@ function parseSseEvent(data: string): ChatStreamEvent | null {
   }
 }
 
-/** Resume only persisted frames. Reconnecting never repeats a model or email command. */
-async function* readRunStream(initial: Response, token: string): AsyncGenerator<ChatStreamEvent> {
-  if (!initial.ok || !initial.body) throw await apiErrorFromResponse(initial);
-  const runId = initial.headers.get("X-Run-ID");
-  if (runId) yield { type: "run", runId };
-  for await (const data of readPersistedFrames(initial, {
-    resume: runId ? (cursor) => fetch(`${getApiBaseUrl()}/api/v1/chat/runs/${runId}/events?after=${cursor}`, {
-      headers: { Accept: "text/event-stream", Authorization: `Bearer ${token}` },
-    }) : undefined,
-    responseError: apiErrorFromResponse,
-  })) {
-    const event = parseSseEvent(data);
-    if (event) yield event;
-  }
-}
-
 export async function* streamChatCompletions(
   token: string,
   request: ChatCompletionsRequest,
@@ -148,18 +130,48 @@ export async function* streamChatCompletions(
   const response = await fetch(`${getApiBaseUrl()}/api/v1/chat/completions`, {
     method: "POST",
     headers: {
-      Accept: "text/event-stream", "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`, ...tracingHeaders,
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...tracingHeaders,
     },
     body: JSON.stringify({
+      // The broker picks the model from AGENT_MODEL; this is only a label
+      // echoed back on each chunk.
       model: request.model ?? "devrimo",
       messages: request.messages.map(({ role, content }) => ({ role, content })),
       session_id: request.client_id,
-      idempotency_key: request.idempotency_key,
       stream: true,
     }),
   });
-  yield* readRunStream(response, token);
+
+  if (!response.ok || !response.body) {
+    if (response.status === 409) {
+      throw new Error("Your agent is answering another message. Please wait.");
+    }
+    throw await apiErrorFromResponse(response);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === "[DONE]") return;
+      const event = parseSseEvent(data);
+      if (event) yield event;
+    }
+  }
 }
 
 export async function continueChatRun(
@@ -172,20 +184,41 @@ export async function continueChatRun(
   const response = await fetch(`${getApiBaseUrl()}/api/v1/chat/confirmations`, {
     method: "POST",
     headers: {
-      Accept: "text/event-stream", "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`, ...tracingHeaders,
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...tracingHeaders,
     },
     body: JSON.stringify({
-      run_id: confirmation.run_id, session_id: confirmation.session_id,
-      requirement_id: requirementId, approved,
+      run_id: confirmation.run_id,
+      session_id: confirmation.session_id,
+      requirement_id: requirementId,
+      approved,
     }),
   });
+  if (!response.ok || !response.body) {
+    throw await apiErrorFromResponse(response);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
   let text = "";
   let nextConfirmation: ChatConfirmation | null = null;
-  for await (const event of readRunStream(response, token)) {
-    if (event.type === "text") text += event.delta;
-    if (event.type === "confirmation") nextConfirmation = event.confirmation;
-    if (event.type === "error") throw new Error(event.error.message);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const event = parseSseEvent(trimmed.slice(5).trim());
+      if (event?.type === "text") text += event.delta;
+      if (event?.type === "confirmation") nextConfirmation = event.confirmation;
+      if (event?.type === "error") throw new Error(event.error.message);
+    }
   }
   return { text, confirmation: nextConfirmation };
 }

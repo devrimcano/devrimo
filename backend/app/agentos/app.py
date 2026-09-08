@@ -25,7 +25,7 @@ def build_agentos_app():
         description="Internal, read-oriented operations surface for Scholar runs, evals, metrics, and traces.",
         db=get_agno_db(),
         # Deliberately register no runnable credential-bearing agent. Production
-        # Scholar runs in the assistant worker and writes to the shared DB.
+        # Scholar runs in the broker and writes sessions/traces to the shared DB.
         agents=[],
         authorization=True,
         authorization_config=AuthorizationConfig(
@@ -45,6 +45,6 @@ def build_agentos_app():
         ),
         tracing=False,
         telemetry=False,
-        auto_provision_dbs=False,
+        auto_provision_dbs=True,
     )
     return agent_os.get_app()

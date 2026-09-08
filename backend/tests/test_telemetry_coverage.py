@@ -326,9 +326,9 @@ def test_long_log_values_are_bounded(monkeypatch):
     emitted: list[dict] = []
     monkeypatch.setattr(logs, "_setup", lambda: type("L", (), {"emit": lambda self, **r: emitted.append(r)})())
 
-    logs.posthog_log_processor(None, "info", {"event": "x", "level": "info", "notes": "y" * 10_000})
+    logs.posthog_log_processor(None, "info", {"event": "x", "level": "info", "detail": "y" * 10_000})
 
-    assert len(emitted[0]["attributes"]["notes"]) == logs.MAX_ATTRIBUTE_CHARS + 1
+    assert len(emitted[0]["attributes"]["detail"]) == logs.MAX_ATTRIBUTE_CHARS + 1
 
 
 def test_telemetry_diagnostics_are_never_forwarded_over_the_exporter(monkeypatch):

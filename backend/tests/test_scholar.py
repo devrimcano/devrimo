@@ -1,6 +1,7 @@
 """Scholar production controls and the deterministic tool-call harness."""
 
 import json
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import httpx
@@ -10,12 +11,13 @@ from agno.models.response import ModelResponse
 from agno.tools.decorator import tool
 from sqlalchemy import select
 
+from app.agents import manager
+from app.agents.pool import AgentPool, get_pool, reset_pool
 from app.agents.scholar.hooks import production_tool_hook
 from app.agents.scholar.prompt import build_instructions
 from app.agents.scripted_model import ScriptedModel
 from app.agents.store import get_agno_db
 from app.campus.catalog import TOOLS_BY_ID
-from app.campus.session_pool import close_all, session_count
 from app.config import get_settings
 from app.db.models import Agent as BrokerAgent
 from app.db.models import AgentToolAudit, ChatSession
@@ -54,9 +56,36 @@ def test_webmail_authority_is_narrow_and_confirmed():
 
 
 def test_prompt_mentions_only_connected_toolkits():
-    instructions = "\n".join(build_instructions())
+    instructions = "\n".join(build_instructions([SimpleNamespace(name="campus:sais")]))
     assert "SAIS" in instructions
     assert "Webmail" not in instructions
+
+
+async def test_pool_rebuilds_when_credentials_rotate():
+    pool = AgentPool()
+    user_id = uuid4()
+    first = await pool.acquire(user_id, [], credential_revision=1)
+    second = await pool.acquire(user_id, [], credential_revision=2)
+
+    assert second is not first
+    assert first.retired is True
+    assert first.closed is True
+    assert second.credential_revision == 2
+    await pool.close_all()
+
+
+async def test_active_lease_defers_runtime_close():
+    pool = AgentPool()
+    user_id = uuid4()
+    lease = await pool.lease(user_id, [], credential_revision=1)
+    entry = lease.resident
+
+    await pool.invalidate(user_id)
+    assert entry.retired is True
+    assert entry.closed is False
+
+    await lease.release()
+    assert entry.closed is True
 
 
 async def test_scripted_model_executes_a_real_agno_tool_call():
@@ -126,16 +155,16 @@ async def test_confirmation_pauses_before_email_and_audits_only_after_approval()
 async def test_confirmation_api_resumes_the_owner_scoped_paused_run(client, monkeypatch):
     calls: list[str] = []
 
-    @tool(name="send_email", requires_confirmation=True)
-    def send_email(draft: dict) -> str:
-        calls.append(draft["to"])
+    @tool(name="webmail_send_email", requires_confirmation=True)
+    def send_email(to: str, subject: str, body: str) -> str:
+        calls.append(to)
         return "sent"
 
     model = ScriptedModel(
         responses=[
             _tool_call(
-                "send_email",
-                {"draft": {"to": "student@example.edu", "subject": "Hello", "body": "Exact body"}},
+                "webmail_send_email",
+                {"to": "student@example.edu", "subject": "Hello", "body": "Exact body"},
             ),
             ModelResponse(role="assistant", content="sent after approval"),
         ]
@@ -167,7 +196,17 @@ async def test_confirmation_api_resumes_the_owner_scoped_paused_run(client, monk
     paused = await agno_agent.arun("send it", user_id=str(user_id), session_id="confirmation-api")
     requirement = paused.active_requirements[0]
 
-    monkeypatch.setattr("app.assistant.worker.build_agent", lambda *_args, **_kwargs: agno_agent)
+    class Lease:
+        agent = agno_agent
+        resident = SimpleNamespace(tool_ids=())
+
+        async def release(self):
+            return None
+
+    async def _lease_for(db, broker_agent):
+        return Lease()
+
+    monkeypatch.setattr(manager, "lease_for", _lease_for)
     response = await client.post(
         "/api/v1/chat/confirmations",
         headers=headers,
@@ -222,7 +261,7 @@ def test_scholar_config_uses_compression_not_offload(monkeypatch):
     monkeypatch.setenv("AGENT_COMPRESS_TOOL_RESULTS", "true")
     get_settings.cache_clear()
     try:
-        agent = build_scholar_agent()
+        agent = build_scholar_agent([])
         assert agent.learning is not None
         assert agent.compress_tool_results is True
         assert agent.offload_tool_results is False
@@ -234,20 +273,9 @@ def test_scholar_config_uses_compression_not_offload(monkeypatch):
 
 
 async def test_scholar_profile_runs_through_the_chat_api(client, monkeypatch):
-    from app.assistant import worker
-
-    original_build = worker.build_agent
-    built_ids = []
-
-    def tracked_build(*args, **kwargs):
-        agent = original_build(*args, **kwargs)
-        built_ids.append(agent.id)
-        return agent
-
-    monkeypatch.setattr(worker, "build_agent", tracked_build)
     monkeypatch.setenv("AGENT_PROFILE", "scholar")
     get_settings.cache_clear()
-    await close_all()
+    await reset_pool()
     user_id = new_user_id()
     headers = auth_header(user_id)
     try:
@@ -260,10 +288,9 @@ async def test_scholar_profile_runs_through_the_chat_api(client, monkeypatch):
         assert response.status_code == 200
         assert '"content": "[echo]"' in response.text
         assert '"content": " Merhaba"' in response.text
-        assert built_ids == ["devrimo-scholar"]
-        assert session_count(user_id) == 0
+        assert get_pool().get(user_id).agent.id == "devrimo-scholar"
     finally:
-        await close_all()
+        await reset_pool()
         get_settings.cache_clear()
 
 

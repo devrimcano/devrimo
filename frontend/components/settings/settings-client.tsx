@@ -40,12 +40,11 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { formatMetuDepartment } from "@/lib/metu-course-code";
-import { SettingsQueryError } from "@/components/settings/query-state";
 
 export function SettingsClient() {
   const { pick } = useLocale();
-  const { profile, isLoading: profileLoading, isFetching: profileFetching, queryError: profileError, refetch: refetchProfile, update: updateProfile } = useProfile();
-  const { memories, isLoading: memoriesLoading, isFetching: memoriesFetching, queryError: memoriesError, refetch: refetchMemories, clear: clearMemories } = useMemories();
+  const { profile, update: updateProfile } = useProfile();
+  const { memories, isLoading: memoriesLoading, clear: clearMemories } = useMemories();
 
   useEffect(() => {
     captureProductEvent("settings_opened", {});
@@ -127,7 +126,7 @@ export function SettingsClient() {
 
           <Card id="personalization" className="motion-enter surface-raised scroll-mt-32 border-0 ring-1 ring-foreground/8 [animation-delay:40ms] lg:scroll-mt-24">
             <CardHeader className="border-b bg-muted/20"><div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><SparklesIcon className="size-4" /></span><div><CardTitle>{pick({ tr: "Kişiselleştirme ve güncellemeler", en: "Personalization and updates" })}</CardTitle><CardDescription className="mt-1">{pick({ tr: "İlgi alanlarını düzenle ve e-postadan yalnızca yapılandırılmış tarih/etkinlik bilgisi çıkarılmasına izin ver.", en: "Edit your interests and choose whether email may yield structured date and event facts." })}</CardDescription></div></div></CardHeader>
-            <CardContent className="space-y-5"><AcademicContextSummary /><AcademicDataManager /><PreferenceEditor /><div className="grid grid-cols-[1fr_auto] items-start gap-4 rounded-xl border bg-background/55 p-4"><div><Label htmlFor="mail-facts" className="font-semibold">{pick({ tr: "E-postadan yapılandırılmış güncellemeler", en: "Structured updates from email" })}</Label><p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Etkinlik ve son tarihlerin yalnızca başlığı, özeti ve zamanı saklanır. E-posta gövdesi kaydedilmez.", en: "Only the title, summary, and time of events and deadlines are kept. Email bodies are not stored." })}</p></div>{profileLoading ? <Loader2Icon className="mt-1 size-4 animate-spin text-muted-foreground" aria-label={pick({ tr: "Yükleniyor", en: "Loading" })} /> : profileError ? <SettingsQueryError message={pick({ tr: "Profil ayarları yüklenemedi.", en: "Profile settings could not be loaded." })} retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })} retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })} retry={refetchProfile} retrying={profileFetching} /> : <Switch id="mail-facts" checked={profile?.mail_facts_enabled ?? false} disabled={!profile || updateProfile.isPending} onCheckedChange={(checked) => void updateProfile.mutateAsync({ mail_facts_enabled: checked }).catch((error) => toast.error(error instanceof Error ? error.message : "Update failed"))} />}</div></CardContent>
+            <CardContent className="space-y-5"><AcademicContextSummary /><AcademicDataManager /><PreferenceEditor /><div className="grid grid-cols-[1fr_auto] items-start gap-4 rounded-xl border bg-background/55 p-4"><div><Label htmlFor="mail-facts" className="font-semibold">{pick({ tr: "E-postadan yapılandırılmış güncellemeler", en: "Structured updates from email" })}</Label><p className="mt-1 text-sm leading-5 text-muted-foreground">{pick({ tr: "Etkinlik ve son tarihlerin yalnızca başlığı, özeti ve zamanı saklanır. E-posta gövdesi kaydedilmez.", en: "Only the title, summary, and time of events and deadlines are kept. Email bodies are not stored." })}</p></div><Switch id="mail-facts" checked={profile?.mail_facts_enabled ?? false} disabled={!profile || updateProfile.isPending} onCheckedChange={(checked) => void updateProfile.mutateAsync({ mail_facts_enabled: checked }).catch((error) => toast.error(error instanceof Error ? error.message : "Update failed"))} /></div></CardContent>
           </Card>
 
           <Card id="memory" className="motion-enter surface-raised scroll-mt-32 border-0 ring-1 ring-foreground/8 [animation-delay:70ms] lg:scroll-mt-24">
@@ -137,20 +136,12 @@ export function SettingsClient() {
                   <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><BrainIcon className="size-4" /></span>
                   <div><CardTitle>{pick({ tr: "Hatırlanan tercihler", en: "Remembered preferences" })}</CardTitle><CardDescription className="mt-1">{pick({ tr: "Yalnızca açıkça hatırlamasını istediğin, hassas olmayan tercihler burada tutulur.", en: "Only non-sensitive preferences you explicitly asked the assistant to remember are kept here." })}</CardDescription></div>
                 </div>
-              {!memoriesLoading && !memoriesError ? <Badge variant="secondary">{memories.length} {pick({ tr: "kayıt", en: memories.length === 1 ? "item" : "items" })}</Badge> : null}
+                {!memoriesLoading ? <Badge variant="secondary">{memories.length} {pick({ tr: "kayıt", en: memories.length === 1 ? "item" : "items" })}</Badge> : null}
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
               {memoriesLoading ? (
                 <div className="flex min-h-28 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="size-4 animate-spin" />{pick({ tr: "Hatırlananlar yükleniyor…", en: "Loading remembered items…" })}</div>
-              ) : memoriesError ? (
-                <SettingsQueryError
-                  message={pick({ tr: "Hatırlanan tercihler yüklenemedi.", en: "Remembered preferences could not be loaded." })}
-                  retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-                  retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-                  retry={refetchMemories}
-                  retrying={memoriesFetching}
-                />
               ) : memories.length ? (
                 <ul className="grid gap-2 sm:grid-cols-2">
                   {memories.map((memory) => <li key={memory.id} className="rounded-xl border bg-background/55 px-4 py-3 text-sm leading-5">{memory.content}</li>)}
@@ -205,22 +196,16 @@ function AcademicContextSummary() {
     { key: "campus", label: pick({ tr: "Kampüs", en: "Campus" }), value: context?.campus },
   ];
 
-  return <section aria-labelledby="academic-context-heading" className="rounded-xl border bg-background/55 p-4" data-ph-mask>
+  return <section aria-labelledby="academic-context-heading" className="rounded-xl border bg-background/55 p-4">
     <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
       <div>
         <p id="academic-context-heading" className="font-semibold">{pick({ tr: "Akademik bağlam", en: "Academic context" })}</p>
         <p className="mt-0.5 max-w-xl text-xs leading-5 text-muted-foreground">{pick({ tr: "Ders planlayıcı ve sohbet bu bilgileri SAIS kaydından kullanır. Değişiklik için ODTÜ'den yeniden yenile.", en: "The planner and chat use these details from your SAIS record. Refresh from METU to update them." })}</p>
       </div>
-      {query.isLoading ? <Loader2Icon className="size-4 animate-spin text-muted-foreground" aria-label={pick({ tr: "Yükleniyor", en: "Loading" })} /> : query.error ? null : context ? <Badge variant={context.verified_at ? "secondary" : "outline"}>SAIS</Badge> : null}
+      {query.isLoading ? <Loader2Icon className="size-4 animate-spin text-muted-foreground" /> : context ? <Badge variant={context.verified_at ? "secondary" : "outline"}>SAIS</Badge> : null}
     </div>
 
-    {query.isLoading ? <div className="flex min-h-20 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="size-4 animate-spin" />{pick({ tr: "Akademik bağlam yükleniyor…", en: "Loading academic context…" })}</div> : query.error ? <SettingsQueryError
-      message={pick({ tr: "Akademik bağlam yüklenemedi.", en: "Academic context could not be loaded." })}
-      retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-      retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-      retry={() => query.refetch()}
-      retrying={query.isFetching}
-    /> : context ? <dl className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3">
+    {context ? <dl className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3">
       {rows.map((row) => <div key={row.key} className={row.key === "department" ? "col-span-2 sm:col-span-1" : undefined}>
         <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{row.label}</dt>
         <dd className={row.value ? "text-sm font-medium" : "text-sm text-muted-foreground"}>{row.value || "—"}</dd>
@@ -267,18 +252,12 @@ function AcademicDataManager() {
     onError: (error) => toast.error(error.message),
   });
   const latest = query.data?.snapshots[0];
-  return <div className="rounded-xl border bg-background/55 p-4" data-ph-mask>
+  return <div className="rounded-xl border bg-background/55 p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><p className="font-semibold">{pick({ tr: "Kayıtlı akademik veriler", en: "Stored academic data" })}</p><p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{pick({ tr: "Bölümün ve transkriptindeki ders kodları ilk kullanımda bir kez alınır. Notlar burada gösterilmez veya yapay zekâ belleğine eklenmez.", en: "Your department and transcript course codes are fetched once on first use. Grades are not shown here or added to AI memory." })}</p></div>
-      {query.isLoading ? <Loader2Icon className="size-4 animate-spin text-muted-foreground" aria-label={pick({ tr: "Yükleniyor", en: "Loading" })} /> : query.error ? null : <Badge variant={query.data?.has_cached_data ? "secondary" : "outline"}>{query.data?.has_cached_data ? pick({ tr: "Kayıtlı", en: "Stored" }) : pick({ tr: "Henüz alınmadı", en: "Not fetched" })}</Badge>}
+      {query.isLoading ? <Loader2Icon className="size-4 animate-spin text-muted-foreground" /> : <Badge variant={query.data?.has_cached_data ? "secondary" : "outline"}>{query.data?.has_cached_data ? pick({ tr: "Kayıtlı", en: "Stored" }) : pick({ tr: "Henüz alınmadı", en: "Not fetched" })}</Badge>}
     </div>
-    {query.isLoading ? <div className="flex min-h-20 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="size-4 animate-spin" />{pick({ tr: "Akademik veriler yükleniyor…", en: "Loading academic data…" })}</div> : query.error ? <div className="mt-3"><SettingsQueryError
-      message={pick({ tr: "Akademik veriler yüklenemedi.", en: "Academic data could not be loaded." })}
-      retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-      retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-      retry={() => query.refetch()}
-      retrying={query.isFetching}
-    /></div> : latest ? <div className="mt-3 rounded-lg border bg-muted/20 p-3 text-sm">
+    {latest ? <div className="mt-3 rounded-lg border bg-muted/20 p-3 text-sm">
       <p className="font-medium">{latest.completed_course_count} {pick({ tr: "tamamlanmış ders", en: "completed courses" })} · {latest.enrolled_course_count ? `${latest.enrolled_course_count} ${pick({ tr: "kayıtlı ders", en: "enrolled courses" })}` : pick({ tr: "Bu dönem kayıtlı ders yok", en: "No courses enrolled this term" })}</p>
       <p className="mt-1 text-xs text-muted-foreground">{pick({ tr: "Dönem", en: "Term" })}: {formatAcademicTerm(latest.term, locale)}</p>
       <p className="mt-0.5 text-xs text-muted-foreground">{pick({ tr: "Son yenileme", en: "Last refreshed" })}: {new Date(latest.fetched_at).toLocaleDateString(locale === "tr" ? "tr-TR" : "en-US", { dateStyle: "medium" })} · {new Date(latest.fetched_at).toLocaleTimeString(locale === "tr" ? "tr-TR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</p>
@@ -286,12 +265,12 @@ function AcademicDataManager() {
         <p className={`mt-2 text-xs leading-5 text-muted-foreground ${coursesExpanded ? "" : "line-clamp-2"}`}>{latest.completed_course_codes.join(" · ")}</p>
         {latest.completed_course_codes.length > 8 ? <Button variant="ghost" size="sm" className="mt-1 h-8 px-2 text-xs" aria-expanded={coursesExpanded} onClick={() => setCoursesExpanded((current) => !current)}>{coursesExpanded ? pick({ tr: "Dersleri daralt", en: "Show fewer courses" }) : pick({ tr: `Tüm ${latest.completed_course_count} dersi göster`, en: `Show all ${latest.completed_course_count} courses` })}</Button> : null}
       </> : null}
-    </div> : <p className="mt-3 rounded-lg border border-dashed bg-muted/15 p-3 text-sm text-muted-foreground">{pick({ tr: "Henüz kayıtlı akademik veri yok. Bir dönem seçip ODTÜ'den yenileyebilirsin.", en: "No academic data is stored yet. Choose a term and refresh it from METU." })}</p>}
+    </div> : null}
     <div className="mt-4 flex flex-wrap items-end gap-2"><div className="space-y-1"><Label htmlFor="academic-term" className="text-xs">{pick({ tr: "Dönem", en: "Term" })}</Label><select id="academic-term" value={term} onChange={(event) => setTerm(event.target.value)} className="h-10 rounded-md border bg-background px-3 text-sm">{AVAILABLE_TERMS.map((item) => <option key={item.value} value={item.value}>{item[locale]}</option>)}</select></div><Button variant="outline" disabled={sync.isPending || term.trim().length < 3} onClick={() => sync.mutate()}>{sync.isPending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}{pick({ tr: "ODTÜ'den yenile", en: "Refresh from METU" })}</Button>
       {/* Kept from the planner work: the read really does take a minute or two,
           and a button that looks stuck is the reason people reload mid-scrape. */}
       {sync.isPending ? <p className="w-full text-xs text-muted-foreground">{pick({ tr: "ODTÜ kayıtların okunuyor; bu bir iki dakika sürebilir. Sayfayı açık bırak.", en: "Your METU records are being read; this can take a minute or two. Keep the page open." })}</p> : null}
-      {query.data?.has_cached_data ? <AlertDialog><AlertDialogTrigger render={<Button variant="outline" className="text-destructive" />}><Trash2Icon />{pick({ tr: "Akademik verileri sıfırla", en: "Reset academic data" })}</AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{pick({ tr: "Akademik veriler silinsin mi?", en: "Delete academic data?" })}</AlertDialogTitle><AlertDialogDescription>{pick({ tr: "Kayıtlı bölüm ve transkript dersleri ile bu verilere bağlı kayıtlı programların ve program geçmişlerinin tamamı kalıcı olarak silinir. ODTÜ bağlantın ve giriş bilgilerin silinmez; gerektiğinde veriler tekrar alınabilir.", en: "Stored department and transcript courses, plus saved schedules and their history derived from them, are permanently deleted. Your METU connection and credentials remain; the data can be fetched again when needed." })}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{pick({ tr: "Vazgeç", en: "Cancel" })}</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={reset.isPending} onClick={() => reset.mutate()}>{reset.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}{pick({ tr: "Sil ve sıfırla", en: "Delete and reset" })}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}
+      {query.data?.has_cached_data ? <AlertDialog><AlertDialogTrigger render={<Button variant="outline" className="text-destructive" />}><Trash2Icon />{pick({ tr: "Akademik verileri sıfırla", en: "Reset academic data" })}</AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{pick({ tr: "Akademik veriler silinsin mi?", en: "Delete academic data?" })}</AlertDialogTitle><AlertDialogDescription>{pick({ tr: "Kayıtlı bölüm ve transkript dersleri kalıcı olarak silinir. ODTÜ bağlantın ve giriş bilgilerin silinmez; gerektiğinde veriler tekrar alınabilir.", en: "Stored department and transcript courses are permanently deleted. Your METU connection and credentials remain; the data can be fetched again when needed." })}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{pick({ tr: "Vazgeç", en: "Cancel" })}</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={reset.isPending} onClick={() => reset.mutate()}>{reset.isPending ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}{pick({ tr: "Sil ve sıfırla", en: "Delete and reset" })}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}
     </div>
   </div>;
 }
@@ -325,12 +304,6 @@ function PreferenceEditor() {
       <div className="space-y-2"><Label htmlFor="device-platform">{pick({ tr: "Cihaz", en: "Device" })}</Label><Select value={device} onValueChange={(value) => setDevice(value ?? "unspecified")}><SelectTrigger id="device-platform" aria-label={pick({ tr: "Cihaz", en: "Device" })} className="w-full"><SelectValue>{deviceOptions.find((option) => option.value === device)?.label}</SelectValue></SelectTrigger><SelectContent>{deviceOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></div>
       <div className="flex items-end"><Button variant="outline" className="disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100" disabled={save.isPending || (!interests.trim() && device === "unspecified")} onClick={() => { if (interests.trim()) save.mutate({ key: "interests", value: { items: interests.split(",").map((item) => item.trim()).filter(Boolean) } }); if (device !== "unspecified") save.mutate({ key: "device_platform", value: { platform: device } }); }}>{pick({ tr: "Tercihleri kaydet", en: "Save preferences" })}</Button></div>
     </div>
-    {query.isLoading ? <div className="flex min-h-12 items-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="size-4 animate-spin" />{pick({ tr: "Tercihler yükleniyor…", en: "Loading preferences…" })}</div> : query.error ? <SettingsQueryError
-      message={pick({ tr: "Tercihler yüklenemedi.", en: "Preferences could not be loaded." })}
-      retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-      retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-      retry={() => query.refetch()}
-      retrying={query.isFetching}
-    /> : query.data?.items.length ? <div className="flex flex-wrap gap-2">{query.data.items.map((item) => <Badge key={item.key} variant="secondary" className="gap-2 py-1.5">{preferenceLabel(item.key)} · {provenanceLabel(item.provenance)}<button type="button" className="rounded-full hover:text-destructive" aria-label={pick({ tr: `${preferenceLabel(item.key)} tercihini sil`, en: `Delete ${preferenceLabel(item.key)} preference` })} onClick={() => remove.mutate(item.key)}>×</button></Badge>)}</div> : <p className="rounded-lg border border-dashed bg-muted/15 p-3 text-sm text-muted-foreground">{pick({ tr: "Henüz kaydedilmiş bir tercih yok.", en: "No saved preferences yet." })}</p>}
+    {query.data?.items.length ? <div className="flex flex-wrap gap-2">{query.data.items.map((item) => <Badge key={item.key} variant="secondary" className="gap-2 py-1.5">{preferenceLabel(item.key)} · {provenanceLabel(item.provenance)}<button type="button" className="rounded-full hover:text-destructive" aria-label={pick({ tr: `${preferenceLabel(item.key)} tercihini sil`, en: `Delete ${preferenceLabel(item.key)} preference` })} onClick={() => remove.mutate(item.key)}>×</button></Badge>)}</div> : null}
   </section>;
 }

@@ -87,28 +87,6 @@ async def read_cached(key_hash: str) -> Any | None:
         return None
 
 
-async def cached_expiry(key_hash: str) -> datetime | None:
-    """Return the authoritative expiry for a live persistent cache row.
-
-    Planner evidence signs this deadline so a token issued from a nearly
-    expired Course Info answer cannot extend the answer's seven-day lifetime.
-    The payload itself is intentionally not returned here.
-    """
-
-    try:
-        async with SessionLocal() as db:
-            row = await db.get(ScheduleDataCache, key_hash)
-            if row is None:
-                return None
-            expires_at = row.expires_at
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=UTC)
-            return expires_at if expires_at > datetime.now(UTC) else None
-    except Exception as exc:
-        logger.warning("persistent_cache_expiry_read_failed", key=key_hash[:12], error=str(exc))
-        return None
-
-
 async def read_many_cached(key_hashes: list[str]) -> dict[str, Any]:
     """Every live row among ``key_hashes``, in one query.
 

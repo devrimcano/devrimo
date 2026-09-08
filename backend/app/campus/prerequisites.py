@@ -38,10 +38,7 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         for key in ("result", "prerequisites", "courses", "data", "items"):
             if isinstance(payload.get(key), list):
-                rows = payload[key]
-                if any(not isinstance(row, dict) for row in rows):
-                    raise ValueError("METU prerequisite rows could not be read")
-                return rows
+                return [row for row in payload[key] if isinstance(row, dict)]
         raise ValueError("METU prerequisite response could not be read")
     if isinstance(payload, list):
         if any(not isinstance(row, dict) for row in payload):

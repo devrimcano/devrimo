@@ -87,29 +87,17 @@ def _route_template(scope: Scope, path: str) -> str:
     Grouping by the concrete path gives one row per student and answers
     nothing; grouping by the template is the question anyone actually asks.
 
-    FastAPI can expose a route template relative to an included router. The
-    concrete scope path is used only to recover that prefix; values remain
-    replaced by the template's parameter markers.
+    Reconstructed from the path and its parameters rather than read off
+    ``scope["route"].path_format``: this FastAPI version mounts an included
+    router as a nested application, so the matched route's own
+    ``path_format`` is relative to it — ``/me`` rather than
+    ``/api/v1/agents/me`` — and the prefix appears nowhere in the scope.
+    Parameters are available only after the application has run, which is
+    where this is read.
     """
-    matched_route = scope.get("route")
-    route_format = getattr(matched_route, "path_format", None) or getattr(matched_route, "path", None)
-    if isinstance(route_format, str) and route_format.startswith("/"):
-        # FastAPI exposes an included route as e.g. ``/me`` while the scope
-        # still contains ``/api/v1/agents/me``. Recover only the static prefix
-        # by segment count; route parameters stay in braces.
-        route_segments = route_format.strip("/").split("/") if route_format.strip("/") else []
-        path_segments = path.strip("/").split("/") if path.strip("/") else []
-        if len(path_segments) >= len(route_segments):
-            prefix = path_segments[: len(path_segments) - len(route_segments)]
-            return "/" + "/".join([*prefix, *route_segments])
-        return route_format
-
     params = {str(value): name for name, value in (scope.get("path_params") or {}).items()}
     if not params:
-        # A failure before routing has no trustworthy template. Returning a
-        # concrete path here would leak values such as a course code, so use a
-        # safe bucket until the route matcher has supplied one.
-        return "/unknown"
+        return path
 
     substituted: set[str] = set()
     segments = []
@@ -170,11 +158,12 @@ class ObservabilityMiddleware:
             distinct_id=user_id,
             session_id=session_id,
             tags={
+                "path": path,
                 "method": method,
                 "agent_profile": settings.agent_profile,
                 "agent_runtime": settings.agent_runtime,
             },
-            log_fields={"method": method},
+            log_fields={"path": path, "method": method},
         ):
             await self._observe(scope, receive, send, request_id, path, method, user_id)
 
@@ -247,6 +236,7 @@ class ObservabilityMiddleware:
             exc,
             distinct_id=user_id,
             request_id=request_id,
+            path=path,
             route=_route_template(scope, path),
             operation=_operation(scope),
             method=method,
@@ -276,6 +266,7 @@ class ObservabilityMiddleware:
             fields = {
                 "request_id": request_id,
                 "route": route,
+                "path": path,
                 "method": method,
                 "operation": _operation(scope),
                 "status_code": status_code,

@@ -65,26 +65,20 @@ async def apply_verified_context(
     # that reaches SAIS but cannot parse one field must not erase a value the
     # student typed by hand — that turns a partial read into data loss, and the
     # student has no way to tell it happened.
-    incoming = (
+    found = 0
+    for field, value in (
         ("department", department),
         ("degree_level", degree_level),
         ("program_code", program_code),
         ("campus", campus),
         ("surname_prefix", surname_prefix),
         ("year_of_study", year_of_study),
-    )
-    was_verified = context.verified_at
-    retained_verified_fields = any(
-        value is None and getattr(context, field, None) not in (None, "")
-        for field, value in incoming
-    )
-    found = 0
-    for field, value in incoming:
+    ):
         if value:
             setattr(context, field, value)
             found += 1
     # Only claim SAIS verification when SAIS actually told us something.
-    if found and (was_verified is None or not retained_verified_fields):
+    if found:
         now = datetime.now(UTC)
         context.source = source
         context.verified_at = now
@@ -99,6 +93,30 @@ async def apply_verified_context(
     await db.commit()
     await db.refresh(context)
     return context
+
+
+async def save_preference(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    key: str,
+    value: dict,
+    provenance: str,
+    confidence: float,
+) -> UserPreference:
+    validate_preference(key, value)
+    preference = (
+        await db.execute(select(UserPreference).where(UserPreference.user_id == user_id, UserPreference.key == key))
+    ).scalar_one_or_none()
+    if preference is None:
+        preference = UserPreference(user_id=user_id, key=key, value=value, provenance=provenance)
+        db.add(preference)
+    preference.value = value
+    preference.provenance = provenance
+    preference.confidence = max(0, min(confidence, 1))
+    await db.commit()
+    await db.refresh(preference)
+    return preference
 
 
 async def list_preferences(db: AsyncSession, user_id: UUID) -> list[UserPreference]:

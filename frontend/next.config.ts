@@ -1,12 +1,13 @@
 import type { NextConfig } from "next";
 import { withPostHogConfig } from "@posthog/nextjs-config";
 
-const personalApiKey = process.env.POSTHOG_PERSONAL_API_KEY?.trim();
-const projectId = process.env.POSTHOG_PROJECT_ID?.trim();
 const nextConfig: NextConfig = {
-  // Generate browser maps only when the uploader can remove them after upload.
-  productionBrowserSourceMaps: Boolean(personalApiKey && projectId),
+  // Production stack traces are useless without maps to resolve them against.
+  productionBrowserSourceMaps: true,
 };
+
+const personalApiKey = process.env.POSTHOG_PERSONAL_API_KEY;
+const projectId = process.env.POSTHOG_PROJECT_ID;
 
 /**
  * Source maps are uploaded to PostHog at build time and then deleted from the
@@ -16,7 +17,7 @@ const nextConfig: NextConfig = {
  * This needs a *personal* API key (`phx_...`), which is a build-time secret and
  * therefore deliberately not a `NEXT_PUBLIC_` variable. Without it — a local
  * `next build`, or a fork's CI — the plugin is skipped and the build succeeds
- * without generating public browser source maps.
+ * unchanged.
  */
 export default personalApiKey && projectId
   ? withPostHogConfig(nextConfig, {

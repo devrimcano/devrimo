@@ -1,47 +1,116 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.agents.pool import reset_pool
+from app.agents.reconciler import run_reconciler_loop
 from app.api.v1 import router as api_v1_router
+from app.api.v1.admin import sync_directory
 from app.campus.manifest import commits_by_slug
-from app.campus.session_pool import close_all
 from app.config import get_settings
-from app.db.session import validate_runtime_database
+from app.db.session import SessionLocal
 from app.knowledge.embeddings import close_embedding_client
+from app.knowledge.retention import sweep_expired_schedule_cache
 from app.logging import configure_logging, get_logger
 from app.observability import ObservabilityMiddleware
 from app.observability.client import initialize as posthog_initialize
 from app.observability.client import report_exception
 from app.observability.client import shutdown as posthog_shutdown
 from app.observability.context import REQUEST_ID_HEADER, current_request_id
+from app.observability.jobs import observed_job
 from app.observability.logs import shutdown as posthog_logs_shutdown
 from app.observability.runtime import SERVICE_BROKER, configure_service
-from app.workspace.gateway import create_gateway
+from app.researchers.worker import run_admin_import_loop
 
 configure_service(SERVICE_BROKER)
 configure_logging()
 logger = get_logger(__name__)
 
 
-gateway_server, gateway_app = create_gateway()
+async def _run_directory_sync_loop(stop_event: asyncio.Event) -> None:
+    settings = get_settings()
+    if not settings.supabase_secret_key or not settings.supabase_url:
+        return
+    while not stop_event.is_set():
+        # Each pass is its own unit of work: a failing directory sync used to
+        # produce one warning line with no correlation id and no issue, so a
+        # user directory that had been stale for days looked like silence.
+        with observed_job("directory_sync") as job:
+            try:
+                async with SessionLocal() as db:
+                    synced = await sync_directory(db)
+                job.succeeded(users=synced)
+                logger.info("admin_directory_synced", users=synced)
+            except Exception as exc:
+                job.failed(exc)
+                logger.warning("admin_directory_sync_failed", error=str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=settings.admin_directory_sync_seconds)
+        except TimeoutError:
+            pass
+
+
+async def _run_retention_loop(stop_event: asyncio.Event) -> None:
+    """Reclaim expired ``schedule_data_cache`` rows.
+
+    Nothing else does. The read path drops a row it finds expired, which only
+    ever covers keys somebody asks for a second time — and a plan key includes
+    the course pool, so every pool a student tries once mints a row no read
+    will return to. ``ix_schedule_data_cache_expires`` existed for this sweep
+    before there was one.
+    """
+    settings = get_settings()
+    while not stop_event.is_set():
+        try:
+            async with SessionLocal() as db:
+                removed = await sweep_expired_schedule_cache(db)
+            if removed:
+                logger.info("schedule_cache_swept", rows=removed)
+        except Exception as exc:
+            logger.warning("schedule_cache_sweep_failed", error=str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=settings.schedule_cache_sweep_seconds)
+        except TimeoutError:
+            pass
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await validate_runtime_database()
+    settings = get_settings()
+    if settings.agent_tracing_enabled:
+        # OpenInference redaction flags are set in deployment configuration.
+        # This exporter writes to our Agno DB; it does not send traces to Agno.
+        from agno.tracing import setup_tracing
+
+        from app.agents.store import get_agno_db
+
+        setup_tracing(db=get_agno_db(), batch_processing=True)
     # Constructed eagerly so a missing or mis-configured key is reported at
     # boot rather than discovered later as an absence of data.
     posthog_initialize()
+    stop_event = asyncio.Event()
+    reconciler_task = asyncio.create_task(run_reconciler_loop(stop_event))
+    directory_sync_task = asyncio.create_task(_run_directory_sync_loop(stop_event))
+    retention_task = asyncio.create_task(_run_retention_loop(stop_event))
+    researcher_task = asyncio.create_task(run_admin_import_loop(stop_event))
     logger.info("startup_complete")
     try:
-        async with gateway_server.session_manager.run():
-            yield
+        yield
     finally:
-        # Shut down leased campus subprocesses before the API exits.
-        await close_all()
+        stop_event.set()
+        researcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await researcher_task
+        await reconciler_task
+        await directory_sync_task
+        await retention_task
+        # Every resident agent is holding MCP subprocesses that have a
+        # student's METU credentials in their environment; leaving them
+        # parented to a dead broker is not acceptable.
+        await reset_pool()
         await close_embedding_client()
         # Last, so anything the teardown above reported is still flushed. An
         # unflushed queue at SIGTERM loses exactly the events that explain
@@ -62,11 +131,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Run-ID", "X-Request-ID"],
 )
 
 app.include_router(api_v1_router, prefix="/api/v1")
-app.mount("/mcp", gateway_app)
 
 
 @app.get("/health")
@@ -98,7 +165,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     browser event, a proxy log and a broker issue all name the same id.
     """
     request_id = (
-        getattr(request.state, "request_id", None) or current_request_id.get() or request.headers.get(REQUEST_ID_HEADER)
+        getattr(request.state, "request_id", None)
+        or current_request_id.get()
+        or request.headers.get(REQUEST_ID_HEADER)
     )
     logger.error("unhandled_exception", path=request.url.path, error=str(exc), request_id=request_id)
     reported = report_exception(

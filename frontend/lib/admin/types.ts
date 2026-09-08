@@ -17,8 +17,7 @@ export type Overview = {
   onboarding_completed: number;
   campus_connected: number;
   agents: Record<string, number>;
-  integration_sessions: number;
-  assistant_runs: Record<string, number>;
+  resident_agents: number;
   usage: {
     runs: number;
     input_tokens: number;
@@ -56,7 +55,7 @@ export type AgentRow = {
   email: string | null;
   display_name: string | null;
   status: string;
-  integration_connected: boolean;
+  resident: boolean;
   last_active_at: string | null;
   has_error: boolean;
 };
@@ -108,9 +107,8 @@ export type SystemHealth = {
   posthog_dashboard_url: string | null;
   supabase_admin: string;
   agent_runtime: string;
-  integration_sessions: number;
-  assistant_runs: Record<string, number>;
-  integration_capacity: number;
+  resident_agents: number;
+  pool_capacity: number;
   checked_at: string;
 };
 
@@ -179,21 +177,6 @@ export type EmbeddingSettings = {
   embedded_records: number;
   current_model_records: number;
   active_jobs: number;
-  active_generation_id: string | null;
-  generations: {
-    id: string;
-    model: string;
-    model_label: string;
-    provider: string;
-    dimensions: number;
-    active: boolean;
-    total: number;
-    ready: number;
-    can_activate: boolean;
-    status: string;
-    error: string | null;
-    created_at: string;
-  }[];
 };
 
 export type IngestionJob = {

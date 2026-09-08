@@ -3,7 +3,7 @@
 Replaces the Hermes ``config.yaml`` rendering this module used to do. Agno
 launches each server itself, as a subprocess of the broker, so there is no
 config file to merge and no container to stage it into — a spec here becomes
-an ``mcp.StdioServerParameters`` in :mod:`app.campus.toolkits` and nothing else.
+an ``mcp.StdioServerParameters`` in :mod:`app.agents.toolset` and nothing else.
 
 The credential isolation that used to come from one container per student now
 comes from process environment: the MCP SDK spawns each server with only
@@ -19,10 +19,10 @@ spec is a pure function of the four.
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from app.config import get_settings
+
 from app.campus.catalog import CAMPUS_TOOLS, CampusTool
 from app.campus.credentials import CampusSecrets
-from app.campus.validation import validate_odtuclass_base_url
-from app.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -106,17 +106,6 @@ def build_server_specs(
 
     specs: list[CampusServerSpec] = []
     for tool in enabled_tools(enabled_ids, secrets):
-        launch_values = values
-        if tool.id == "odtuclass":
-            # Validate again at the launch boundary so legacy rows or direct
-            # service callers cannot bypass the request model and hand an
-            # arbitrary endpoint to the credential-bearing MCP process. Keep
-            # this check inside the ODTUClass branch: an old invalid optional
-            # URL must not disable unrelated campus servers.
-            launch_values = {
-                **values,
-                "odtuclass_base_url": validate_odtuclass_base_url(values.get("odtuclass_base_url")) or "",
-            }
         venv_root = f"{root}/{tool.venv_slug}"
         specs.append(
             CampusServerSpec(
@@ -126,7 +115,7 @@ def build_server_specs(
                 # package, so it is launched by script path — which is only
                 # knowable once the install root is.
                 args=tuple(arg.format(venv_root=venv_root) for arg in tool.args),
-                env=_render_env(tool, launch_values),
+                env=_render_env(tool, values),
                 cwd=state_dir_for(state_root, user_id, tool),
                 include_tools=tool.include_tools,
                 requires_confirmation_tools=tool.requires_confirmation_tools,

@@ -29,7 +29,7 @@ from app.observability.llm import current_session_id, current_trace_id
 
 logger = get_logger(__name__)
 MAX_TOOL_RESULT_CHARS = 16_000
-MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email", "send_email", "update", "undo"}
+MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email"}
 # Span payloads are bounded separately from tool results: a 16k result is
 # fine for the model but wasteful on every span.
 MAX_SPAN_STATE_CHARS = 4_000
@@ -157,9 +157,7 @@ def _capture_tool_span(
         "$ai_span_id": str(uuid4()),
         "$ai_span_name": name,
         "$ai_latency": round(time.monotonic() - started, 3),
-        "$ai_input_state": {"argument_digest": _canonical_digest(arguments)}
-        if name in {"search", "read", "plan", "update", "undo", "send_email", "compute"}
-        else _span_state(arguments),
+        "$ai_input_state": _span_state(arguments),
         "tool": name,
         "tool_server": _tool_server(name),
         "requires_confirmation": name in MUTATING_TOOL_NAMES,
@@ -169,11 +167,7 @@ def _capture_tool_span(
         properties["$ai_is_error"] = True
         properties["$ai_error"] = f"{error.__class__.__name__}: {error}"
     else:
-        properties["$ai_output_state"] = (
-            {"omitted": "workspace privacy boundary"}
-            if name in {"search", "read", "plan", "update", "undo", "send_email", "compute"}
-            else _span_state(result)
-        )
+        properties["$ai_output_state"] = _span_state(result)
 
     capture("$ai_span", distinct_id=user_id, **properties)
 

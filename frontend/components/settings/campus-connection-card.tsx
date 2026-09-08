@@ -32,7 +32,6 @@ import { useLocale } from "@/components/locale-provider";
 import { useCampus } from "@/hooks/useCampus";
 import { captureError, captureProductEvent } from "@/components/posthog-analytics";
 import { DataAccessChoice } from "@/components/settings/data-access-choice";
-import { SettingsQueryError } from "@/components/settings/query-state";
 
 const CORE_ACCESS = ["sais", "course_info"];
 
@@ -43,7 +42,7 @@ type PrivacyChoices = {
 
 export function CampusConnectionCard() {
   const { pick, locale } = useLocale();
-  const { connection, isLoading, isFetching, queryError, refetch, connect, disconnect, apply } = useCampus();
+  const { connection, isLoading, connect, disconnect, apply } = useCampus();
   const [usernameDraft, setUsernameDraft] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [privacyDraft, setPrivacyDraft] = useState<PrivacyChoices | null>(null);
@@ -152,25 +151,8 @@ export function CampusConnectionCard() {
             <Loader2Icon className="size-4 animate-spin" />
             {pick({ tr: "Bağlantı bilgileri yükleniyor…", en: "Loading connection details…" })}
           </div>
-        ) : queryError && !connection ? (
-          <SettingsQueryError
-            message={pick({ tr: "Bağlantı bilgileri yüklenemedi.", en: "Connection details could not be loaded." })}
-            retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-            retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-            retry={refetch}
-            retrying={isFetching}
-          />
         ) : (
           <>
-            {queryError ? (
-              <SettingsQueryError
-                message={pick({ tr: "Bağlantı bilgileri yenilenemedi; gösterilen bilgiler son kayıtlı durum olabilir.", en: "Connection details could not be refreshed; the displayed information may be stale." })}
-                retryLabel={pick({ tr: "Tekrar dene", en: "Try again" })}
-                retryingLabel={pick({ tr: "Yenileniyor…", en: "Retrying…" })}
-                retry={refetch}
-                retrying={isFetching}
-              />
-            ) : null}
             {connection?.verification_error ? (
               <div className="flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/8 p-3 text-sm text-amber-800 dark:text-amber-300">
                 <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />

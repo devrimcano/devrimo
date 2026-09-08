@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from agno.agent import Agent
+from agno.tools.mcp import MCPTools
 
 from app.agents.models import build_model
 from app.agents.platform_tools import build_platform_tools
@@ -16,7 +17,7 @@ from app.observability.flags import FLAG_HISTORY_RUNS, FLAG_TOOL_CALL_LIMIT, int
 
 
 def build_scholar_agent(
-    runtime: AgentRuntimeConfig | None = None, *, user_id: UUID | None = None
+    connected: list[MCPTools], runtime: AgentRuntimeConfig | None = None, *, user_id: UUID | None = None
 ) -> Agent:
     settings = get_settings()
     runtime = runtime or default_runtime_config()
@@ -28,12 +29,12 @@ def build_scholar_agent(
         description="A grounded, privacy-conscious ODTÜ student assistant.",
         model=model,
         db=get_agno_db(),
-        tools=build_platform_tools(user_id) if user_id else [],
+        tools=[*connected, *(build_platform_tools(user_id, connected) if user_id else [])],
         tool_hooks=[production_tool_hook],
         # Tunable without a deploy: a model looping through tool calls is a
         # live incident, and this is the dial that stops it.
         tool_call_limit=int_payload(FLAG_TOOL_CALL_LIMIT, default=runtime.tool_call_limit),
-        instructions=runtime_instructions(),
+        instructions=runtime_instructions(connected),
         use_instruction_tags=True,
         add_history_to_context=True,
         num_history_runs=int_payload(FLAG_HISTORY_RUNS, default=runtime.scholar_history_runs),

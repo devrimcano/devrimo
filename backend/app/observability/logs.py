@@ -166,9 +166,8 @@ def posthog_log_processor(_logger: Any, _method: str, event_dict: dict[str, Any]
         from opentelemetry._logs import SeverityNumber
 
         # OTLP bypasses the PostHog SDK and therefore its before_send hook.
-        # Apply the same secret/academic-content scrubber here while leaving the
-        # dictionary returned to structlog untouched, so local stdout remains
-        # byte-identical.
+        # Apply the same secret-only scrubber here while leaving the dictionary
+        # returned to structlog untouched, so local stdout remains byte-identical.
         safe_event = _scrub(event_dict)
         if not isinstance(safe_event, dict):  # pragma: no cover - event_dict is typed as a dict
             return event_dict

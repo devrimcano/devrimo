@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.campus.catalog import DEFAULT_ENABLED_TOOL_IDS, normalize_tool_ids
 from app.campus.credentials import CampusSecrets, secrets_for
 from app.campus.mcp_config import CampusServerSpec, build_server_specs
-from app.campus.validation import validate_odtuclass_base_url
 from app.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.db.models import CampusCredential, UserProfile
@@ -88,22 +87,19 @@ async def upsert_credential(
         credential.metu_password_enc = encrypt_secret(metu_password) if metu_password else None
     if odtuclass_token is not None:
         credential.odtuclass_token_enc = encrypt_secret(odtuclass_token) if odtuclass_token else None
-    credential.odtuclass_base_url = validate_odtuclass_base_url(odtuclass_base_url)
+    credential.odtuclass_base_url = odtuclass_base_url or None
     credential.locale = locale
     credential.enabled_tools = normalize_tool_ids(
         enabled_tools if enabled_tools is not None else credential.enabled_tools or list(DEFAULT_ENABLED_TOOL_IDS)
     )
     credential.verified_at = datetime.now(UTC) if verified else None
     credential.verification_error = verification_error
-    # Integration leases validate the current credential revision; no model
-    # restart is required, including while assistant execution is stopped.
-    credential.config_dirty = False
+    # Any change here invalidates the toolset the resident agent was built
+    # with; the pool drops that agent so the next turn rebuilds it.
+    credential.config_dirty = True
 
     await db.commit()
     await db.refresh(credential)
-    from app.campus.session_pool import retire_user
-
-    await retire_user(user_id)
     return credential
 
 
@@ -113,9 +109,6 @@ async def delete_credential(db: AsyncSession, user_id: UUID) -> bool:
         return False
     await db.delete(credential)
     await db.commit()
-    from app.campus.session_pool import retire_user
-
-    await retire_user(user_id)
     return True
 
 
@@ -140,17 +133,13 @@ async def users_with_tool(db: AsyncSession, tool_id: str) -> list[UUID]:
     the job stopped for everyone.
     """
     rows = (
-        (
-            await db.execute(
-                select(CampusCredential).where(
-                    CampusCredential.verified_at.is_not(None),
-                    CampusCredential.metu_password_enc.is_not(None),
-                )
+        await db.execute(
+            select(CampusCredential).where(
+                CampusCredential.verified_at.is_not(None),
+                CampusCredential.metu_password_enc.is_not(None),
             )
         )
-        .scalars()
-        .all()
-    )
+    ).scalars().all()
     return [row.user_id for row in rows if tool_id in enabled_tool_ids(row)]
 
 

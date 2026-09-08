@@ -18,18 +18,20 @@ import re
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.pool import get_pool
+from app.agents.toolset import close_toolkits, connect_campus_toolkits
 from app.campus import departments as department_directory
 from app.campus import service as campus_service
 from app.campus.mcp_results import mcp_payload, parse_json_document
+from app.config import get_settings
 from app.core.digest import stable_digest
-from app.core.persistent_cache import cached_expiry, read_cached, read_many_cached, write_cached
+from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
 from app.logging import get_logger
 
@@ -61,37 +63,12 @@ async def _campus_lock(user_id: UUID) -> asyncio.Lock:
     async with _lock_registry:
         return _campus_locks.setdefault(user_id, asyncio.Lock())
 
-
 # Catalog data changes when the registrar publishes, not between page loads, so
 # a quarter hour is generous; the bound exists so a long-lived worker's cache
 # cannot grow with every course any student has ever opened.
 _catalog = TTLCache(ttl_seconds=15 * 60, max_entries=4096)
 
 CATALOG_NAMESPACE = "course-catalog"
-
-
-async def catalog_answer_expires_at(
-    db: AsyncSession,
-    user_id: UUID,
-    tool_suffix: str,
-    values: dict[str, str],
-) -> datetime | None:
-    """Return the live cache deadline for one catalog answer.
-
-    This is used only when issuing eligibility evidence. Normal callers keep
-    receiving the raw catalog payload; the signed proof additionally carries
-    the deadline of the exact shared answer that supplied its rows.
-    """
-
-    shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
-    if shared_ttl is None:
-        return datetime.now(UTC) + timedelta(minutes=15)
-    identity, key_hash = catalog_key(tool_suffix, values)
-    memory_key = identity
-    remaining = _catalog.remaining_seconds(memory_key)
-    if remaining is not None:
-        return datetime.now(UTC) + timedelta(seconds=remaining)
-    return await cached_expiry(key_hash)
 
 # Tools whose answer depends only on the catalog, never on who is asking, and
 # may therefore be cached once and served to every student.
@@ -242,26 +219,19 @@ class CatalogSession:
     connects at all, which is the common case and must stay free.
     """
 
-    __slots__ = ("_db", "_user_id", "_stack", "_toolkit", "_connect_lock")
+    __slots__ = ("_db", "_user_id", "_stack", "_toolkit")
 
     def __init__(self, db: AsyncSession, user_id: UUID) -> None:
         self._db = db
         self._user_id = user_id
         self._stack: AsyncExitStack | None = None
         self._toolkit: Any = None
-        self._connect_lock = asyncio.Lock()
 
     async def toolkit(self) -> Any:
-        async with self._connect_lock:
-            if self._stack is None:
-                stack = AsyncExitStack()
-                try:
-                    self._toolkit = await stack.enter_async_context(_catalog_toolkit(self._db, self._user_id))
-                except BaseException:
-                    await stack.aclose()
-                    raise
-                self._stack = stack
-            return self._toolkit
+        if self._stack is None:
+            self._stack = AsyncExitStack()
+            self._toolkit = await self._stack.enter_async_context(_catalog_toolkit(self._db, self._user_id))
+        return self._toolkit
 
     async def aclose(self) -> None:
         if self._stack is not None:
@@ -277,17 +247,6 @@ async def catalog_session(db: AsyncSession, user_id: UUID) -> AsyncIterator[Cata
         yield session
     finally:
         await session.aclose()
-
-
-async def require_catalog_access(db: AsyncSession, user_id: UUID) -> None:
-    """Recheck account and consent even on a cache hit."""
-    from app.admin.directory import active_account
-
-    if await active_account(db, user_id) is None:
-        raise HTTPException(403, "Account is inactive")
-    credential = await campus_service.get_credential(db, user_id)
-    if "course_info" not in campus_service.enabled_tool_ids(credential):
-        raise HTTPException(403, "Course catalog access is not enabled")
 
 
 async def call_course_info(
@@ -311,7 +270,6 @@ async def call_course_info(
     Pass ``session`` when a request makes several of these calls, so they share
     one connection instead of spawning a campus server each.
     """
-    await require_catalog_access(db, user_id)
     shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
     identity, key_hash = catalog_key(tool_suffix, values)
     # A shared answer must not be keyed by the student who happened to ask for
@@ -362,11 +320,42 @@ async def call_course_info(
 
 @asynccontextmanager
 async def _catalog_toolkit(db: AsyncSession, user_id: UUID) -> AsyncIterator[Any]:
-    """Lease only this user's currently enabled catalog integration."""
-    from app.campus.sessions import integration_session
+    """The Course Info toolkit, without paying for the student's whole agent.
 
-    async with integration_session(user_id, "course_info") as connected:
+    Reading a public course page used to go through the agent pool, which
+    brings up *every* campus server the student has enabled — SAIS, ODTUClass,
+    webmail — because that is what a chat turn needs. Measured cold, that was
+    seven seconds to fetch one cached-for-a-week catalog page, and three of the
+    four subprocesses were never called.
+
+    So: reuse the resident agent when the student already has one up, since a
+    chat turn has already paid for it and its connection is warm. Otherwise
+    connect the catalog server alone and close it on the way out.
+
+    The reuse path holds no lease, so a concurrent eviction could in principle
+    close the toolkit mid-call. That is exactly the exposure the previous code
+    had; leasing cannot fix it here because acquiring a lease builds the whole
+    agent when one is not already resident, which is the cost being avoided.
+    """
+    resident = get_pool().get(user_id)
+    if resident is not None:
+        toolkit = next((item for item in resident.toolkits if item.name == TOOLKIT_NAME), None)
+        if toolkit is not None:
+            yield toolkit
+            return
+
+    specs = [spec for spec in await campus_service.campus_server_specs(db, user_id) if spec.tool_id == "course_info"]
+    if not specs:
+        yield None
+        return
+    settings = get_settings()
+    connected = await connect_campus_toolkits(
+        specs, timeout_seconds=settings.campus_catalog_timeout_seconds
+    )
+    try:
         yield next((item for item in connected if item.name == TOOLKIT_NAME), None)
+    finally:
+        await close_toolkits(connected)
 
 
 async def _invoke(
@@ -384,19 +373,16 @@ async def _invoke(
     taking the lock before entering the flight — deadlocks the whole catalog,
     and nothing in the type system says so, which is why it is written here.
     """
-    # Acquire the cross-process integration lease before the local call lock.
-    # A multi-read CatalogSession holds its lease between calls; acquiring the
-    # local lock while waiting for that lease would block its next call forever.
-    if session is not None:
-        toolkit = await session.toolkit()
-        async with await _campus_lock(user_id):
-            return await _call_toolkit(db, user_id, toolkit, tool_suffix, values)
-    async with _catalog_toolkit(db, user_id) as toolkit:
-        async with await _campus_lock(user_id):
+    async with await _campus_lock(user_id):
+        if session is not None:
+            return await _call_toolkit(db, user_id, await session.toolkit(), tool_suffix, values)
+        async with _catalog_toolkit(db, user_id) as toolkit:
             return await _call_toolkit(db, user_id, toolkit, tool_suffix, values)
 
 
-async def _call_toolkit(db: AsyncSession, user_id: UUID, toolkit: Any, tool_suffix: str, values: dict[str, str]) -> Any:
+async def _call_toolkit(
+    db: AsyncSession, user_id: UUID, toolkit: Any, tool_suffix: str, values: dict[str, str]
+) -> Any:
     if toolkit is None:
         # Two different situations, and the old wording only described one of
         # them. A student who never enabled the catalog and a student whose
@@ -544,7 +530,9 @@ async def resolve_department(
     """Look a department name or abbreviation up in the catalog itself."""
     if not query.strip():
         return None
-    departments = await call_course_info(db, user_id, "search_departments", {"query": query.strip()}, session=session)
+    departments = await call_course_info(
+        db, user_id, "search_departments", {"query": query.strip()}, session=session
+    )
     return department_code(departments, query)
 
 
@@ -589,6 +577,7 @@ async def department_for_course(
     if resolved is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"Could not identify which department owns {compact_course}. Use the course's full seven-digit METU code.",
+            f"Could not identify which department owns {compact_course}. "
+            "Use the course's full seven-digit METU code.",
         )
     return resolved

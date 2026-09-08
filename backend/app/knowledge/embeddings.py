@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.crypto import decrypt_secret
-from app.db.models import KnowledgeEmbeddingSettings
+from app.db.models import CampusKnowledgeRecord, KnowledgeEmbeddingSettings
 from app.logging import get_logger
 from app.observability.client import report_exception
 from app.observability.llm import EVENT_AI_EMBEDDING, observed_ai_operation
@@ -186,6 +186,24 @@ def _storage_vector(vector: Sequence[float], expected_dimensions: int) -> list[f
             f"Embedding provider returned {len(vector)} dimensions; expected {expected_dimensions}"
         )
     return [float(value) for value in vector]
+
+
+def embedding_column(dimensions: int):
+    columns = {
+        384: CampusKnowledgeRecord.embedding_384,
+        768: CampusKnowledgeRecord.embedding_768,
+        1536: CampusKnowledgeRecord.embedding_1536,
+    }
+    try:
+        return columns[dimensions]
+    except KeyError as exc:
+        raise ValueError(f"Embedding dimensions must be one of {SUPPORTED_VECTOR_DIMENSIONS}") from exc
+
+
+def assign_embedding(record: CampusKnowledgeRecord, vector: list[float] | None, dimensions: int) -> None:
+    record.embedding_384 = vector if dimensions == 384 else None
+    record.embedding_768 = vector if dimensions == 768 else None
+    record.embedding_1536 = vector if dimensions == 1536 else None
 
 
 async def embed_texts(
