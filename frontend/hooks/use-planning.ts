@@ -112,6 +112,10 @@ type PendingCommand = {
   changes?: PlanChanges;
 };
 
+export function isRetryablePlanningFailure(status: number | null): boolean {
+  return status === null || status === 408 || status === 429 || status >= 500;
+}
+
 const LEGACY_KEYS = ["devrimo:schedule:v1:plan", "devrimo:schedule:v1"];
 
 function isPlanState(value: unknown): value is PlanState {
@@ -275,6 +279,13 @@ export function usePlanning(term: string) {
         }
         blocked.current = true;
         pendingFailure.current = null;
+        setRetryable(false);
+      } else if (error instanceof ApiError && !isRetryablePlanningFailure(error.status)) {
+        // Validation and authorization failures did not commit. Replaying the
+        // same payload can never fix them, and locking the queue here prevents
+        // the student from removing the invalid section or clearing the plan.
+        pendingFailure.current = null;
+        blocked.current = false;
         setRetryable(false);
       } else {
         // Keep the exact request key and payload. The server may have committed
