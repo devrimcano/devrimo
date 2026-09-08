@@ -8,7 +8,7 @@ async def test_student_department_uses_setup_cache_without_catalog(monkeypatch):
     async def unexpected_catalog_call(*_args, **_kwargs):
         raise AssertionError("opening the planner must not contact SAIS for department data")
 
-    monkeypatch.setattr(schedule_api, "resolve_department", unexpected_catalog_call)
+    monkeypatch.setattr(schedule_api, "call_course_info", unexpected_catalog_call)
     context = StudentContext(
         user_id=uuid4(),
         department="Electrical and Electronics Engineering",

@@ -10,6 +10,7 @@ seconds in production and made opening the planner during a chat turn fail with
 a 409. It now reads the student's own curriculum listing directly.
 """
 
+import asyncio
 import re
 import time
 from typing import Any, Literal
@@ -31,7 +32,6 @@ from app.campus.course_info import (
     catalog_session,
     department_options,
     prefetch,
-    resolve_department,
     section_numbers,
 )
 from app.campus.warmer import record_wanted_courses
@@ -67,6 +67,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 _PLAN_CACHE_SECONDS = 6 * 60 * 60
+_NOT_PRELOADED = object()
 
 
 class AiScheduleCourse(BaseModel):
@@ -745,14 +746,77 @@ async def bulk_constraints(
             for course, owner in expanded.values()
         )
 
-        for raw, (compact_course, lookup_department) in expanded.items():
+        async def load_course_info(raw: str, compact_course: str, lookup_department: str):
             try:
-                results[raw] = await _constraints_for(
-                    db, user, catalog, raw, compact_course, lookup_department, body.semester, profile
+                info = await call_course_info(
+                    db,
+                    user.id,
+                    "get_course_info",
+                    {
+                        "department": lookup_department,
+                        "semester": body.semester,
+                        "course": compact_course,
+                    },
+                    session=catalog,
                 )
+                return raw, info
             except HTTPException as exc:
                 logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
+                return raw, _NOT_PRELOADED
+
+        loaded = await asyncio.gather(
+            *(
+                load_course_info(raw, compact_course, lookup_department)
+                for raw, (compact_course, lookup_department) in expanded.items()
+            )
+        )
+        course_info = {raw: info for raw, info in loaded if info is not _NOT_PRELOADED}
+
+        # Once the course pages reveal the section numbers, seed every section
+        # restriction from one persistent-cache query. Warm batches then avoid
+        # one database checkout per section (150 in the measured six-course
+        # case) before any verdict can be shown.
+        await prefetch(
+            (
+                "get_section_constraints",
+                {
+                    "department": expanded[raw][1],
+                    "semester": body.semester,
+                    "course": expanded[raw][0],
+                    "section": number,
+                },
+            )
+            for raw, info in course_info.items()
+            for number in section_numbers(info)
+        )
+
+        async def check_course(raw: str, compact_course: str, lookup_department: str):
+            try:
+                answer = await _constraints_for(
+                    db,
+                    user,
+                    catalog,
+                    raw,
+                    compact_course,
+                    lookup_department,
+                    body.semester,
+                    profile,
+                    info=course_info[raw],
+                )
+                return raw, answer
+            except HTTPException as exc:
+                logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
+                return raw, {"course": raw, "error": str(exc.detail), "sections": {}}
+
+        checked = await asyncio.gather(
+            *(
+                check_course(raw, compact_course, lookup_department)
+                for raw, (compact_course, lookup_department) in expanded.items()
+                if raw in course_info
+            )
+        )
+        results.update(checked)
     return {"courses": results}
 
 
@@ -804,14 +868,17 @@ async def _constraints_for(
     lookup_department: str,
     semester: str,
     profile: StudentProfile,
+    *,
+    info: Any = _NOT_PRELOADED,
 ) -> dict:
-    info = await call_course_info(
-        db,
-        user.id,
-        "get_course_info",
-        {"department": lookup_department, "semester": semester, "course": compact_course},
-        session=catalog,
-    )
+    if info is _NOT_PRELOADED:
+        info = await call_course_info(
+            db,
+            user.id,
+            "get_course_info",
+            {"department": lookup_department, "semester": semester, "course": compact_course},
+            session=catalog,
+        )
 
     # A section reserved for students who still need the course is closed to
     # one who has already passed it, and only the transcript knows which.

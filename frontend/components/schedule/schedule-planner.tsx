@@ -529,6 +529,7 @@ export function SchedulePlanner() {
   const saveTracker = useRef(new PlanSaveTracker());
   const localFingerprintRef = useRef("");
   const initialConstraintsFetched = useRef(false);
+  const constraintFlights = useRef(new Map<string, Promise<void>>());
   const poolRef = useRef<CatalogCourse[]>([]);
   useEffect(() => { poolRef.current = catalogCourses; }, [catalogCourses]);
   useEffect(() => {
@@ -900,44 +901,52 @@ export function SchedulePlanner() {
    * course from here meant one request each; the broker does them together
    * over a single catalog connection instead.
    */
-  const fetchAllConstraints = useCallback(async (courses: CatalogCourse[]) => {
+  const fetchAllConstraints = useCallback((courses: CatalogCourse[]): Promise<void> => {
     const wanted = courses.map((course) => course.rawCode).filter(Boolean);
-    if (!wanted.length) return;
+    if (!wanted.length) return Promise.resolve();
+    const flightKey = `${term}:${[...new Set(wanted)].sort().join(",")}`;
+    const active = constraintFlights.current.get(flightKey);
+    if (active) return active;
     setConstraintsBusy(true);
     // In small groups rather than one request. A cold read is one SAIS page
     // per section and a course can have forty-five, so a whole curriculum in
     // one call would run for minutes and show nothing until it finished.
     // Chunked, the red flags appear as they are decided, and no single
     // request is long enough to be cut off.
-    try {
-      for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
-        const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
-        try {
-          const response = await jsonFetch<{ courses?: Record<string, { sections?: Record<string, SectionVerdict> }> }>(
-            "/api/schedule/constraints",
-            { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
-          );
-          setConstraints((current) => {
-            const updated = { ...current };
-            for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
-              const identity = courseIdentity(rawCode);
-              // Ignore if the course was removed from the pool during the request
-              if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
-              const sections = payload?.sections ?? {};
-              // Never replace verdicts we already hold with an empty answer
-              if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
-              updated[identity] = sections;
-            }
-            return updated;
-          });
-        } catch {
-          // One failed group must not cost the rest their verdicts. A course
-          // with none is treated as unrestricted, exactly as before.
+    const request = (async () => {
+      try {
+        for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
+          const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
+          try {
+            const response = await jsonFetch<{ courses?: Record<string, { sections?: Record<string, SectionVerdict> }> }>(
+              "/api/schedule/constraints",
+              { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
+            );
+            setConstraints((current) => {
+              const updated = { ...current };
+              for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
+                const identity = courseIdentity(rawCode);
+                // Ignore if the course was removed from the pool during the request
+                if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
+                const sections = payload?.sections ?? {};
+                // Never replace verdicts we already hold with an empty answer
+                if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
+                updated[identity] = sections;
+              }
+              return updated;
+            });
+          } catch {
+            // One failed group must not cost the rest their verdicts. A course
+            // with none is treated as unrestricted, exactly as before.
+          }
         }
+      } finally {
+        constraintFlights.current.delete(flightKey);
+        if (!constraintFlights.current.size) setConstraintsBusy(false);
       }
-    } finally {
-      setConstraintsBusy(false);
-    }
+    })();
+    constraintFlights.current.set(flightKey, request);
+    return request;
   }, [department, term]);
 
   /**
