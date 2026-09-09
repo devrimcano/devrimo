@@ -15,7 +15,12 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The backend suite runs against a real pgvector service and now takes about
+    # eighteen minutes on a normal runner - it has been measured at 17m35s. At
+    # twenty the job was a coin flip: a slow runner cancelled the suite mid-run
+    # and left main red, which blocks every deploy behind it, for no reason
+    # anyone could read off the log.
+    timeout-minutes: 35
     services:
       # Retrieval is implemented in Postgres — stemmed full-text search,
       # trigram similarity and pgvector ANN — so the suite needs a real server.
