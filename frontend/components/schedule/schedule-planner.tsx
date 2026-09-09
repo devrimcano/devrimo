@@ -5,7 +5,7 @@ import { PlanSaveTracker } from "@/lib/planning-sync";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClipboardIcon, DownloadIcon, HeartIcon,
-  Loader2Icon, PlusIcon, RotateCcwIcon, SearchIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon,
+  ImageIcon, Loader2Icon, PlusIcon, RotateCcwIcon, SearchIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocale } from "@/components/locale-provider";
@@ -1656,7 +1656,7 @@ export function SchedulePlanner() {
   // the week is always fully visible without moving the page.
 
   return (
-    <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,rgb(227_24_55/8%),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden">
+    <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,rgb(227_24_55/8%),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden xl:py-3">
       <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1683,7 +1683,7 @@ export function SchedulePlanner() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <div className="mx-auto w-full max-w-[1500px] space-y-4 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-4 xl:space-y-0">
+      <div className="mx-auto w-full max-w-[1500px] space-y-4 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-3 xl:space-y-0">
         <div className="flex flex-wrap items-center justify-between gap-3 xl:shrink-0">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3">
             <h1 className="text-2xl font-semibold tracking-tight">{t("Ders programı", "Schedule")}</h1>
@@ -1723,8 +1723,8 @@ export function SchedulePlanner() {
           </div>
         ) : null}
 
-        <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
-          <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
+        <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)] xl:gap-3">
+          <aside className="min-w-0 space-y-4 xl:min-h-0 xl:space-y-3 xl:overflow-y-auto xl:pr-1">
             <Card data-tour="pool"><CardHeader className="pb-3"><CardTitle className="text-base">{t("Dönem dersleri", "Semester courses")}</CardTitle></CardHeader><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3">
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
               {/* One notice at a time, in the order a student cares about:
@@ -1948,7 +1948,7 @@ export function SchedulePlanner() {
               five day columns stay legible, and without this the single grid
               column below xl grows to that width and takes the whole page
               sideways with it. */}
-          <section aria-label={t("Haftalık program", "Weekly schedule")} className="min-w-0 space-y-3 xl:flex xl:min-h-0 xl:flex-col xl:gap-3 xl:space-y-0">
+          <section aria-label={t("Haftalık program", "Weekly schedule")} className="min-w-0 space-y-3 xl:flex xl:min-h-0 xl:flex-col xl:gap-2 xl:space-y-0">
             {/* A safety rule the student switched off, said where the result of
                 switching it off is looked at. In the sidebar it is one toggle
                 among three; here it explains why a red section is on the week. */}
@@ -1978,7 +1978,20 @@ export function SchedulePlanner() {
                   <span className="font-medium text-foreground">{totalCredits}</span> {t("kredi", "credits")} · <span className="font-medium text-foreground">{totalHours}</span> {t("saat", "hours")} · <span className="font-medium text-foreground">{uniqueCourses}</span> {t("ders", "courses")}
                   {conflicts.size ? <span className="font-medium text-destructive"> · {t(`${conflicts.size} çakışma`, `${conflicts.size} conflicts`)}</span> : null}
                 </p>
-                <div className="flex shrink-0 gap-0.5">
+                <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1">
+                  {alternatives.length > 1 ? (
+                  <div className="flex min-w-0 max-w-full items-center gap-0.5 rounded-md border bg-background px-0.5">
+                    <Button size="icon" variant="ghost" className="size-8" aria-label={t("Önceki alternatif", "Previous option")} onClick={() => showAlternative(alternativeIndex - 1)}><ChevronLeftIcon /></Button>
+                    <span className="min-w-0 truncate px-1 text-xs tabular-nums" aria-live="polite">
+                      {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
+                      {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
+                    </span>
+                    <Button size="icon" variant="ghost" className="size-8" aria-label={t("Sonraki alternatif", "Next option")} onClick={() => showAlternative(alternativeIndex + 1)}><ChevronRightIcon /></Button>
+                  </div>
+                  ) : null}
+                  <Button size="icon-sm" variant="ghost" aria-label={t("CSV olarak indir", "Download as CSV")} onClick={exportCsv}><DownloadIcon /></Button>
+                  <Button size="icon-sm" variant="ghost" aria-label={t("4K duvar kâğıdı olarak indir", "Download as a 4K wallpaper")} onClick={exportWallpaper}><ImageIcon /></Button>
+                  {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={nextFavorite}>{t("Sonraki favori", "Next favorite")}</Button> : null}
                   <Button size="icon-sm" variant="ghost" aria-label={t("Favoriye ekle", "Favorite")} onClick={favorite}><HeartIcon /></Button>
                   <Button size="icon-sm" variant="ghost" aria-label={t("Özeti kopyala", "Copy summary")} onClick={() => void copySummary()}><ClipboardIcon /></Button>
                 </div>
@@ -2127,21 +2140,6 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
               </CardContent>
             </Card>
 
-            <div className="flex flex-wrap gap-2 xl:shrink-0 [&_button]:h-9">
-              {alternatives.length > 1 ? (
-                <div className="flex min-w-0 max-w-full items-center gap-0.5 rounded-md border bg-background px-0.5">
-                  <Button size="icon" variant="ghost" className="size-8" aria-label={t("Önceki alternatif", "Previous option")} onClick={() => showAlternative(alternativeIndex - 1)}><ChevronLeftIcon /></Button>
-                  <span className="min-w-0 truncate px-1 text-xs tabular-nums" aria-live="polite">
-                    {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
-                    {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
-                  </span>
-                  <Button size="icon" variant="ghost" className="size-8" aria-label={t("Sonraki alternatif", "Next option")} onClick={() => showAlternative(alternativeIndex + 1)}><ChevronRightIcon /></Button>
-                </div>
-              ) : null}
-              <Button variant="outline" onClick={exportCsv}><DownloadIcon />{t("CSV olarak indir", "Download as CSV")}</Button>
-              <Button variant="outline" onClick={exportWallpaper}><DownloadIcon />{t("4K duvar kâğıdı", "4K wallpaper")}</Button>
-              {favorites.length ? <Button variant="ghost" onClick={nextFavorite}>{t("Sonraki favori", "Next favorite")}</Button> : null}
-            </div>
             <div data-tour="assistant"><PlannerAssistant /></div>
           </section>
         </div>
