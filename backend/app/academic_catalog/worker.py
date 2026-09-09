@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import random
+import traceback
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -80,6 +81,27 @@ def _safe_error_detail(message: str | None) -> str | None:
     if not value:
         return None
     return value[:512]
+
+
+def _failure_detail(exc: BaseException, step: dict | None) -> str | None:
+    """Something a person can act on, for an exception that carries no message.
+
+    Every catalog import on production has failed with error_code "ValueError"
+    and error_detail null, which is what an exception raised with no arguments
+    leaves behind: the admin panel shows a job that failed and no reason, and
+    the reviewed catalog stays empty with nothing to read about why. A class
+    name and the step being fetched is not a diagnosis, but it is a place to
+    look, and it costs nothing when the message is there.
+    """
+    detail = _safe_error_detail(str(exc))
+    if detail:
+        return detail
+    where = ""
+    if step:
+        values = step.get("values") or {}
+        named = ", ".join(f"{key}={values[key]}" for key in sorted(values) if values[key] is not None)
+        where = f" while fetching {step.get('tool')}" + (f" ({named})" if named else "")
+    return _safe_error_detail(f"{type(exc).__name__} was raised with no message{where}")
 
 
 async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token: UUID | None = None) -> None:
@@ -593,8 +615,9 @@ async def run_once() -> CatalogPassResult:
             attempts = int(job.attempts or 0) + 1
             auth = type(exc).__name__ == "SAISAuthError"
             retry_at = (datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()
+            failed_step = steps[offset] if offset < len(steps) else None
             error_code = "source_authentication_failed" if auth else type(exc).__name__
-            error_detail = None if auth else _safe_error_detail(str(exc))
+            error_detail = None if auth else _failure_detail(exc, failed_step)
             await _save_offset(
                 job.id,
                 job.lease_token,
@@ -606,7 +629,20 @@ async def run_once() -> CatalogPassResult:
                 error_code=error_code,
                 error_detail=error_detail,
             )
-            logger.warning("catalog_import_failed", job_id=str(job.id), error_type=type(exc).__name__)
+            # The traceback, because the class name alone has cost this project
+            # a day: the same ValueError has failed every import and nothing
+            # recorded where it came from. Not written to the job row - that is
+            # read by the admin panel - only to the worker's own log, and the
+            # step values are course and department codes, not the account's.
+            logger.warning(
+                "catalog_import_failed",
+                job_id=str(job.id),
+                error_type=type(exc).__name__,
+                detail=error_detail,
+                step_tool=(failed_step or {}).get("tool"),
+                step_values=(failed_step or {}).get("values"),
+                traceback=None if auth else traceback.format_exc()[-2000:],
+            )
             return CatalogPassResult(
                 fetched,
                 outcome="failed",

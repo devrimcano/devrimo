@@ -296,6 +296,55 @@ async def test_catalog_import_failed_job_stores_value_error_detail(monkeypatch):
         assert updated.error_detail == "Bad response payload from source"
 
 
+async def test_a_failure_with_no_message_still_says_where_it_happened(monkeypatch):
+    """What every catalog import on production actually did.
+
+    Three jobs, all failed, error_code "ValueError" and error_detail null,
+    because the exception carried no arguments. The admin panel showed a job
+    that failed and no reason, while the reviewed catalog stayed empty.
+    """
+    from app.academic_catalog.service import enqueue_import
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    class Source:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, _tool, _values):
+            raise ValueError
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        job = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        job_id = job.id
+
+    result = await worker.run_once()
+
+    assert result.outcome == "failed"
+    assert result.error_code == "ValueError"
+    assert result.error_detail
+    assert "no message" in result.error_detail
+    # The step it died on, which is the part someone can act on.
+    assert "list_program_courses" in result.error_detail
+    assert "department=240" in result.error_detail
+    assert "semester=20261" in result.error_detail
+
+    async with SessionLocal() as db:
+        updated = await db.get(CatalogImportJob, job_id)
+        assert updated.error_detail == result.error_detail
+
+
 def test_serialize_import_job_uses_scalar_cursor_and_compact_checkpoint():
     from app.academic_catalog.service import serialize_import_job
 
