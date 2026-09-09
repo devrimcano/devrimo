@@ -80,12 +80,17 @@ function CampusReadyLine() {
     : names[0];
 
   return (
-    <p className="motion-enter mt-2 flex items-center justify-center gap-1.5 text-xs leading-5 [animation-delay:120ms]">
+    // Bounded on purpose. `truncate` sets white-space: nowrap, and in this
+    // column flex with items-center a nowrap child sizes the whole block to its
+    // own max-content - which pushed the welcome column to 446px inside a 375px
+    // viewport and clipped the headline. w-full keeps the shrink where it
+    // belongs, and the two halves wrap rather than fighting for one line.
+    <p className="motion-enter mt-2 flex w-full max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-1 text-xs leading-5 [animation-delay:120ms]">
       <span className="border-primary/25 bg-primary/10 text-on-primary-tint inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium">
         <PlugIcon className="size-3 shrink-0" aria-hidden />
         {pick({ tr: "ODTÜ bağlantın çalışıyor", en: "Your METU connection works" })}
       </span>
-      <span className="text-muted-foreground min-w-0 truncate">
+      <span className="text-muted-foreground min-w-0 max-w-full truncate">
         {pick({ tr: `${readable} okunabiliyor`, en: `${readable} can be read` })}
       </span>
     </p>
