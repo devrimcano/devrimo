@@ -267,17 +267,12 @@ class Settings(BaseSettings):
     academic_catalog_max_attempts: int = 3
 
     # --- Catalog pre-warming ----------------------------------------------
-    # Configurable application pacing for authenticated source imports.
-    # These defaults are not a verified limit published by METU.
+    # Automatic refresh scheduling; manual catalog imports ignore the window.
     catalog_warm_enabled: bool = True
+    # Pacing/budget apply only to the old raw-cache warmer, not catalog imports.
     catalog_warm_interval_seconds: float = 20.0
     catalog_warm_jitter_seconds: float = 10.0
-    # The new catalog worker counts HTTP attempts, including authentication
-    # and redirects; the legacy warmer counts admitted Course Info calls.
-    # Neither is a course count. At the minimum interval, 200
-    # attempts occupy about 67 minutes inside the six-hour window. The ceiling
-    # bounds a runaway while the interval above supplies the pacing; it does
-    # not claim that one night can enumerate the whole catalog.
+    # Legacy admitted Course Info calls, not courses or internal HTTP requests.
     catalog_warm_daily_limit: int = 200
     # Bound scheduled course refresh jobs per pass across all active terms.
     catalog_warm_courses_per_pass: int = 3
@@ -286,9 +281,9 @@ class Settings(BaseSettings):
     # course allowance is reserved for detail freshness.
     catalog_warm_discoveries_per_pass: int = Field(default=1, ge=0, le=100)
     catalog_warm_batch: int = 15
-    # Local hours, as "start-end". Overnight, when METU is quiet.
+    # Local hours for automatic refreshes, as "start-end".
     catalog_warm_hours: str = "1-7"
-    catalog_warm_poll_seconds: int = 900
+    catalog_warm_poll_seconds: int = 900  # Enabled catalog imports cap polling at 5s.
     # Read the student's academic context from SAIS as part of saving a verified
     # campus connection, so their profile is populated before their first turn.
     # Costs one campus server spawn inside that request; turn it off to keep the

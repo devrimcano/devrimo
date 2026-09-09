@@ -561,6 +561,10 @@ function importProgress(job: CatalogImportJob): { processed: number; total: numb
     ? Math.trunc(totalValue)
     : job.status === "completed" ? processed : 0;
   const current = steps[processed];
+  const waitingReasons: Record<string, string> = {
+    no_eligible_source_account: "Waiting for an active METU account with a connected Course Info integration.",
+    source_account_busy: "Waiting for another import to release the source account.",
+  };
   const phase = typeof checkpoint.phase === "string" ? checkpoint.phase
     : current && typeof current === "object" && typeof (current as Record<string, unknown>).tool === "string"
     ? String((current as Record<string, unknown>).tool)
@@ -570,7 +574,7 @@ function importProgress(job: CatalogImportJob): { processed: number; total: numb
     total,
     phase,
     conflicts: Number(checkpoint.conflicts ?? 0) || 0,
-    error: job.error_detail ?? job.error_code ?? null,
+    error: job.error_detail ?? (job.error_code ? waitingReasons[job.error_code] ?? job.error_code : null),
   };
 }
 
@@ -682,7 +686,7 @@ export function CoursesPanel({
       reason: payload.reason,
     }),
     onSuccess: () => {
-      toast.success(pick({ tr: "Katalog yenileme sıraya alındı.", en: "Catalog refresh queued." }));
+      toast.success(pick({ tr: "Yenileme hazır. İlerlemeyi Yenileme işleri sekmesinden izleyin.", en: "Refresh ready to run. Track progress in Refresh jobs." }));
       setImportOpen(false);
       setView("imports");
       refresh();
@@ -737,7 +741,7 @@ export function CoursesPanel({
   return (
     <>
       <PanelHeader title={title} description={description} actions={actions} />
-      {canWrite ? <p className="text-sm text-muted-foreground">{pick({ tr: `${term} dönemi için tüm bölümlerin derslerini tek tıkla taslak olarak içe aktarın. İlerlemeyi Yenileme işleri sekmesinden izleyin; kaynak sınırlarına göre işlem birkaç gün sürebilir.`, en: `Import every department's courses for ${term} as drafts in one click. Track progress in Refresh jobs; source limits may spread the import over multiple days.` })}</p> : null}
+      {canWrite ? <p className="text-sm text-muted-foreground">{pick({ tr: `${term} dönemi için tüm bölümlerin derslerini tek tıkla taslak olarak içe aktarın. Manuel yenilemeler geceyi beklemez; günlük kota veya yapay bekleme uygulanmaz. İlerlemeyi Yenileme işleri sekmesinden izleyin.`, en: `Import every department's courses for ${term} as drafts in one click. Manual refreshes run without waiting overnight, a daily cap, or deliberate delays. Track progress in Refresh jobs.` })}</p> : null}
       <div className="space-y-5">
         <SectionNav
           value={view}

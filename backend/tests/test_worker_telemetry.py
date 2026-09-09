@@ -54,6 +54,9 @@ async def test_domain_worker_reports_lifecycle_and_safe_pass_failure(captured, m
     from app.observability.runtime import service_name
     from app.workers import runtime
 
+    monkeypatch.setattr(runtime.get_settings(), "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(runtime.get_settings(), "catalog_warm_poll_seconds", 900)
+
     events, exceptions = captured
     stop = asyncio.Event()
     monkeypatch.setattr(runtime, "configure_logging", lambda: None)
@@ -73,6 +76,7 @@ async def test_domain_worker_reports_lifecycle_and_safe_pass_failure(captured, m
     await runtime.run("catalog", stop_event=stop)
 
     lifecycle = _events(events, "background_worker_lifecycle")
+    assert lifecycle[0]["poll_seconds"] == 5
     assert [(item["worker"], item["state"]) for item in lifecycle] == [
         ("catalog", "started"),
         ("catalog", "stopped"),
