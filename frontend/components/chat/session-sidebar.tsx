@@ -107,7 +107,7 @@ export function SessionSidebar({
                   {active ? (
                     <motion.div
                       layoutId={`active-chat-surface-${instanceId}`}
-                      className="absolute inset-0 -z-10 rounded-xl border border-white/70 bg-card/80 shadow-[0_1px_0_rgb(255_255_255/85%)_inset,0_8px_24px_rgb(65_45_36/9%)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.065] dark:shadow-[0_1px_0_rgb(255_255_255/8%)_inset,0_10px_28px_rgb(0_0_0/24%)]"
+                      className="absolute inset-0 -z-10 rounded-xl border border-card/70 bg-card/80 shadow-[0_1px_0_rgb(255_255_255/85%)_inset,0_8px_24px_rgb(65_45_36/9%)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.065] dark:shadow-[0_1px_0_rgb(255_255_255/8%)_inset,0_10px_28px_rgb(0_0_0/24%)]"
                       transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 430, damping: 36, mass: 0.75 }}
                     />
                   ) : null}

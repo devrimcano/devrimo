@@ -76,18 +76,18 @@
 
 :root {
   color-scheme: light;
-  /* METU identity: warm paper, oxblood, graphite - with the paper and the card
-   * pulled apart. They used to be #f6f3ed and #fffefa, a luminance step of
-   * 0.09, so every card floated on a ground almost exactly as bright as itself
-   * and the whole screen read as one dusty beige field. The card is now white
-   * and the paper carries the warmth: 0.14, half again as much separation,
-   * measured. */
-  --background: #f2eee7;
-  --foreground: #191512;
-  --card: #ffffff;
-  --card-foreground: #191512;
-  --popover: #ffffff;
-  --popover-foreground: #191512;
+  /* Warm paper, top to bottom. The card used to be #ffffff, which is the one
+   * value on a screen with no warmth to give: on a beige ground it read as a
+   * hole cut in the page, and a full-height white card is the surface a student
+   * stares at for an hour. Everything is sand and cream now - the same family,
+   * kept a measured 0.143 of luminance apart, so a card still lifts off its
+   * ground exactly as far as it did when it was white. */
+  --background: #ebe3d2;
+  --foreground: #1a1611;
+  --card: #faf5e9;
+  --card-foreground: #1a1611;
+  --popover: #fdf9f0;
+  --popover-foreground: #1a1611;
   /* Indigo, and deliberately not a red. A brand that shares its hue with the
    * one state that means "you cannot register for this section" spends the only
    * colour distinction this product actually needs; red is now danger and
@@ -96,37 +96,42 @@
   --primary: #4a2fbd;
   --on-primary-tint: #4a2fbd;
   --primary-foreground: #ffffff;
-  --secondary: #e9e3da;
-  --secondary-foreground: #26211f;
-  --muted: #efeae2;
-  /* 5.09:1 on the paper, 5.89:1 on a card. */
-  --muted-foreground: #6b635c;
-  --accent: #ece7fb;
+  --secondary: #e4dccb;
+  --secondary-foreground: #26211b;
+  --muted: #f0e9da;
+  /* Darkened with the grounds: 6.12:1 on a card, 5.22:1 on the paper, 4.88:1
+   * on the two darkest surfaces it lands on - the sidebar and a secondary
+   * chip - which is exactly where the old value fell to 4.44 once the paper
+   * warmed. */
+  --muted-foreground: #645b50;
+  --accent: #e7e1fa;
   --accent-foreground: #3a2496;
-  --destructive: #c81e3a;
-  --border: #dcd5ca;
-  --input: #cfc7ba;
+  --destructive: #c01b36;
+  --border: #d8cdb8;
+  --input: #c9bda4;
   --ring: #4a2fbd;
   /* State colours, because a product that reads campus systems has four
    * things to say and only had one colour to say them in. Every one of these
    * was previously an ad-hoc Tailwind palette step written into a component -
    * amber-500, emerald-500, red-200 - so they never moved with the theme and
    * never matched each other. Each is legible as text on its own 10% tint over
-   * a card, which is how they are actually used: info 5.12, success 4.68,
-   * warning 5.13, danger 4.81. */
+   * a card, which is how they are actually used. Re-measured against the cream
+   * card: it is darker than the white one, which took success to 4.31 and
+   * danger to 4.47, so both are deepened until the set reads info 4.71,
+   * success 4.83, warning 4.78, danger 4.75. */
   --info: #1f6a97;
   --info-foreground: #ffffff;
-  --success: #15795e;
+  --success: #137058;
   --success-foreground: #ffffff;
   --warning: #8a5a00;
   --warning-foreground: #ffffff;
-  --danger: #c81e3a;
+  --danger: #c01b36;
   --danger-foreground: #ffffff;
   --chart-1: #4a2fbd;
   --chart-2: #1f6a97;
-  --chart-3: #15795e;
+  --chart-3: #137058;
   --chart-4: #8a5a00;
-  --chart-5: #756d66;
+  --chart-5: #6f6659;
 
   /* Eight course colours for the timetable. Chosen as a set rather than picked
    * one at a time: no red, because red already means "you cannot register for
@@ -143,37 +148,41 @@
   --course-7: #a83262;
   --course-8: #4f5f27;
   --radius: 0.875rem;
-  --sidebar: #ece7df;
-  --sidebar-foreground: #27211f;
+  --sidebar: #e5dcc9;
+  --sidebar-foreground: #26211b;
   --sidebar-primary: #4a2fbd;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #ece7fb;
+  --sidebar-accent: #e7e1fa;
   --sidebar-accent-foreground: #3a2496;
-  --sidebar-border: #dbd4c9;
+  --sidebar-border: #d5c9b3;
   --sidebar-ring: #4a2fbd;
 }
 
 .dark {
   color-scheme: dark;
-  --background: #121110;
-  --foreground: #f3eee8;
-  --card: #1b1918;
-  --card-foreground: #f3eee8;
-  --popover: #211e1c;
-  --popover-foreground: #faf6f1;
+  /* The dark side of the same paper: browner than the near-neutral charcoal it
+   * replaces, so the two themes are one material at two times of day rather
+   * than a warm theme and a grey one. Measured on the new grounds - body text
+   * 14.96 on a card, secondary text 6.40 on the darkest chip. */
+  --background: #15120e;
+  --foreground: #f5efe4;
+  --card: #1f1b16;
+  --card-foreground: #f5efe4;
+  --popover: #26211a;
+  --popover-foreground: #faf5ec;
   /* 6.41:1 on the dark card, 5.56:1 on its own tint. */
   --primary: #a08cff;
   --on-primary-tint: #a08cff;
   --primary-foreground: #14102b;
-  --secondary: #292522;
-  --secondary-foreground: #faf6f1;
-  --muted: #282421;
-  --muted-foreground: #b8afa8;
-  --accent: #2b2450;
+  --secondary: #2e281f;
+  --secondary-foreground: #faf5ec;
+  --muted: #2c261e;
+  --muted-foreground: #b6aa9b;
+  --accent: #2e2752;
   --accent-foreground: #cfc4ff;
   --destructive: #ff617a;
-  --border: #403a36;
-  --input: #4b433e;
+  --border: #443c31;
+  --input: #51473a;
   --ring: #a08cff;
   /* The same four states, tuned for the dark ground: measured on their own
    * 12% tint over a card at info 6.43, success 7.31, warning 7.43, danger 5.13.
@@ -199,14 +208,16 @@
   --chart-3: #5fd0a4;
   --chart-4: #f0b45c;
   --chart-5: #aaa09a;
-  --sidebar: #191716;
-  --sidebar-foreground: #f3eee8;
+  --sidebar: #1c1813;
+  --sidebar-foreground: #f5efe4;
   --sidebar-primary: #a08cff;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #272148;
+  --sidebar-accent: #2e2752;
   --sidebar-accent-foreground: #cfc4ff;
-  --sidebar-border: #38322f;
-  --sidebar-ring: #ff5872;
+  --sidebar-border: #3c342a;
+  /* Was still the retired brand red, so a focused sidebar control drew a red
+   * ring on an indigo product. */
+  --sidebar-ring: #a08cff;
 }
 
 @layer base {
