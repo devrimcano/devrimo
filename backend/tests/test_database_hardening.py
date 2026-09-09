@@ -96,7 +96,7 @@ def test_the_api_login_can_carry_two_generations_of_its_pool():
                 "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
             ))
             conn.execute(text(f"GRANT devrimo_api TO {login}"))
-            migration = runpy.run_path(str(ROOT / "alembic/versions/0035_api_restart_connection_headroom.py"))
+            migration = runpy.run_path(str(ROOT / "alembic/versions/0035_api_connection_headroom.py"))
             with Operations.context(MigrationContext.configure(conn)):
                 migration["upgrade"]()
             granted = conn.scalar(text("SELECT rolconnlimit FROM pg_roles WHERE rolname=:name"), {"name": login})
