@@ -16,6 +16,23 @@ from app.admin.directory import METU_ID, ensure_metu
 from app.db.session import SessionLocal
 
 
+async def test_full_school_import_does_not_reuse_directory_only_job():
+    from app.academic_catalog.service import enqueue_import
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        discovery = await enqueue_import(
+            db, METU_ID, "20261", reason="Scheduled discovery",
+            payload={"scheduled": True, "discovery_only": True},
+        )
+        full = await enqueue_import(db, METU_ID, "20261", reason="Import all departments")
+        repeated = await enqueue_import(db, METU_ID, "20261", reason="Import all departments again")
+        assert full.id != discovery.id
+        assert repeated.id == full.id
+        assert not full.payload.get("discovery_only")
+        assert worker.initial_steps(full) == [{"tool": "get_departments_and_semesters", "values": {}}]
+
+
 async def test_source_gate_counts_redirects_and_refuses_before_network():
     attempts = []
     sent = []
