@@ -913,14 +913,6 @@ export function SchedulePlanner() {
   const totalCredits = entries.filter((entry) => entry.kind === "course").reduce((sum, entry) => sum + entry.credits, 0)
     + selectedUntimedCourses.reduce((sum, course) => sum + course.credits, 0);
   const totalHours = entries.reduce((sum, entry) => sum + entry.duration, 0);
-  const scheduledCourseGroups = useMemo(() => {
-    const groups = new Map<string, Entry[]>();
-    for (const entry of entries) {
-      const key = `${entry.code}::${entry.section}`;
-      groups.set(key, [...(groups.get(key) ?? []), entry]);
-    }
-    return [...groups.values()];
-  }, [entries]);
   const scheduledCodes = new Set(entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
   const selectedPoolCount = catalogCourses.filter((course) =>
     course.selected === true
@@ -1111,11 +1103,6 @@ export function SchedulePlanner() {
       window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
     }
     toast.success(t("Program temizlendi.", "Schedule cleared."));
-  }
-
-  function removeScheduledCourse(courseEntries: Entry[]) {
-    const ids = new Set(courseEntries.map((entry) => entry.id));
-    setEntries((current) => current.filter((entry) => !ids.has(entry.id)));
   }
 
   // --- campus data --------------------------------------------------------
@@ -1982,19 +1969,22 @@ export function SchedulePlanner() {
               <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
             </CardContent></Card>
 
-            {entries.length || selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="max-h-[min(32vh,20rem)] space-y-2 overflow-y-auto">
+            {/* Only the courses the timetable cannot show. The rest of what
+                this card used to list - every scheduled course, with a trash
+                button - was the timetable rendered twice: the week is beside
+                it on a desktop and one tap away on a phone, every session is
+                drawn there because the grid extends its hours to fit, and
+                clicking a session removes it with the same effect this button
+                had. A course with no meeting hours has no session to click,
+                and it is still counted in the credit total above, so without
+                this list those credits belong to nothing visible. */}
+            {selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Takvimde yeri olmayan dersler", "Courses with no calendar slot")}</CardTitle></CardHeader><CardContent className="max-h-[min(32vh,20rem)] space-y-2 overflow-y-auto">
               {selectedUntimedCourses.map((course) => (
                 <div key={`${course.rawCode}-untimed`} className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/35 bg-amber-500/5 px-3 py-2">
                   <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{course.code} · {localizedCourseName(course.name, locale)} <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Saat yok", "Untimed")}</span></p><p className="text-xs text-muted-foreground">{course.credits} {t("kredi", "credits")} · {course.selected_section ? `${t("Şube", "Section")} ${course.selected_section} · ` : ""}{t("Takvim saati yok; kredi planında tutuluyor.", "No calendar time; retained in the credit plan.")}</p></div>
                   <Button size="icon" variant="ghost" aria-label={t("Dersi havuzdan çıkar", "Remove course from pool")} onClick={() => removePoolCourse(course)}><Trash2Icon /></Button>
                 </div>
               ))}
-              {scheduledCourseGroups.map((courseEntries) => { const entry = courseEntries[0]; return (
-                <div key={`${entry.code}-${entry.section}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
-                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)} {entry.tentative ? <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Taslak", "Tentative")}</span> : null}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)}`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
-                  <Button size="icon" variant="ghost" aria-label={t("Dersi kaldır", "Remove course")} onClick={() => removeScheduledCourse(courseEntries)}><Trash2Icon /></Button>
-                </div>
-              ); })}
             </CardContent></Card> : null}
 
             <Card data-tour="manual">
