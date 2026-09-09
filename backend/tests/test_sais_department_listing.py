@@ -121,3 +121,28 @@ def test_a_department_the_course_app_does_not_serve_reads_as_empty(sais):
         "html.parser",
     )
     assert sais._explicit_empty_result(soup, "course") is True
+
+
+def test_a_thesis_page_with_a_blank_identity_is_still_refused(sais):
+    """The other page METU returns for a programme it does not serve.
+
+    The thesis response keeps the table headers and blanks both identity fields
+    - "Department :   Semester   :" - so the parser cannot tell whose answer it
+    is holding and refuses it. That is the right call and it stays: a page that
+    cannot prove itself is never stored. What changed is upstream of here, in
+    the worker, which now records the refusal against that one department and
+    carries on with the other 206 instead of ending the import on the first.
+    """
+    soup = BeautifulSoup(
+        "<html><body><p>Department :   Semester   : </p>"
+        "<table><tr><th>Code</th><th>Name</th><th>ECTS</th>"
+        "<th>Credit</th><th>Level</th><th>Type</th></tr></table></body></html>",
+        "html.parser",
+    )
+    # Nothing in the page names a department or a semester...
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_response_identity(
+            soup, None, "20261", department_code="976", department_label="Actuarial Science/Aktüerya Bilimleri"
+        )
+    # ...and there are no rows either, so nothing is lost by refusing it.
+    assert soup.find_all("tr")[1:] == []

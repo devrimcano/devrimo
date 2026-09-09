@@ -514,7 +514,38 @@ async def run_once() -> CatalogPassResult:
             source = CatalogSource(secret, lambda: admit_request(job.organization_id, job.id, job.lease_token))
             while offset < len(steps) and fetched < settings.catalog_warm_batch:
                 step = steps[offset]
-                payload = await source.read(step["tool"], step["values"])
+                # A department METU lists but its course app will not serve is
+                # one department, not a broken import. The parser is right to
+                # refuse a page it cannot identify; what was wrong is that the
+                # refusal ended the pass, and the offending programme sorts
+                # first, so 206 departments were never fetched. The failure is
+                # recorded against that step and the plan moves on. Anything
+                # that is not a listing, and anything that is not a parse
+                # refusal - a lost lease, an authentication failure, a
+                # deferral - still belongs to the caller below.
+                try:
+                    payload = await source.read(step["tool"], step["values"])
+                except ValueError as exc:
+                    if step["tool"] not in {"list_program_courses", "get_thesis_courses"}:
+                        raise
+                    logger.warning(
+                        "catalog_listing_skipped",
+                        job_id=str(job.id),
+                        step_tool=step["tool"],
+                        step_values=step["values"],
+                        detail=_safe_error_detail(str(exc)),
+                    )
+                    async with SessionLocal() as db:
+                        await _owned_job(db, job.id, job.lease_token)
+                        await catalog_service.ingest_observation(
+                            db, job.organization_id, step["tool"], step["values"], None,
+                            datetime.now(UTC), source_fetched_at=None, job_id=job.id,
+                        )
+                        await db.commit()
+                    offset += 1
+                    fetched += 1
+                    await _save_offset(job.id, job.lease_token, offset)
+                    continue
                 observed = datetime.now(UTC)
                 async with SessionLocal() as db:
                     await _owned_job(db, job.id, job.lease_token)

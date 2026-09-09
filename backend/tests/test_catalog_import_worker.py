@@ -441,3 +441,56 @@ async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monke
 
 async def _empty_demand(_term):
     return {}
+
+
+async def test_a_department_that_cannot_be_listed_does_not_end_the_import(monkeypatch):
+    """One unreadable programme is one programme, not a failed import.
+
+    METU's directory lists Actuarial Science; its course app answers
+    "Information about the department could not be found." The parser refuses a
+    page it cannot identify, which is right - but that refusal used to end the
+    pass, and that programme sorts first, so the other 206 departments were
+    never fetched and the reviewed catalog stayed empty.
+    """
+    from app.academic_catalog.service import enqueue_import
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    seen = []
+
+    class Source:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, tool, values):
+            seen.append((tool, values.get("department")))
+            if tool == "list_program_courses":
+                raise ValueError("SAIS course information page department identity is missing")
+            return []
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        job = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        job_id = job.id
+
+    result = await worker.run_once()
+
+    # The listing was refused and the pass carried on to the next step.
+    assert ("list_program_courses", "240") in seen
+    assert ("get_thesis_courses", "240") in seen
+    assert result.outcome != "failed"
+
+    async with SessionLocal() as db:
+        updated = await db.get(CatalogImportJob, job_id)
+        assert updated.status in {"queued", "completed"}
+        assert updated.checkpoint_offset >= 2
