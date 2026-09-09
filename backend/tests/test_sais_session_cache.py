@@ -81,6 +81,13 @@ def _course_identity(course="5670201", semester="20261", section=None):
     return html
 
 
+def _course_rule_identity(course="5670201", semester="20261"):
+    return (
+        f'<p>Semester: {semester}</p>'
+        f'<input type="radio" name="text_course_code" value="{course}">'
+    )
+
+
 def test_response_term_label_uses_the_official_selector_label(sais):
     page = _soup("<p>Course Code: 5670201 Semester: Official Fall Term Course Name: Fixture</p>")
     sais._verify_course_response_identity(page, "5670201", "20261", semester_label="Official Fall Term")
@@ -467,7 +474,7 @@ async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sai
         return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
 
     client._submit_course_list_page = course_list
-    _post_returning(client, [_course_identity() + "<p>This course does not have any prerequisites.</p>"])
+    _post_returning(client, [_course_rule_identity() + "<p>This course does not have any prerequisites.</p>"])
 
     assert await client.get_course_prerequisites("567", "20261", "5670201") == []
 
@@ -588,11 +595,29 @@ async def test_empty_rules_must_belong_to_the_requested_course(sais, method, bod
         return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
 
     client._submit_course_list_page = course_list
-    _post_returning(client, [_course_identity(course="5670202") + body])
+    _post_returning(client, [_course_rule_identity(course="5670202") + body])
     with pytest.raises(ValueError, match="identity"):
         await getattr(client, method)("567", "20261", "5670201")
-    _post_returning(client, [_course_identity() + body])
+    _post_returning(client, [_course_rule_identity() + body])
     assert await getattr(client, method)("567", "20261", "5670201") == []
+
+
+def test_course_rule_identity_requires_exact_radio_and_semester(sais):
+    sais._verify_course_rule_response_identity(_soup(_course_rule_identity()), "5670201", "20261")
+    labelled = _soup("<p>Semester: 20261 Auto Replace Courses for 5670201</p>")
+    sais._verify_course_rule_response_identity(labelled, "5670201", "20261")
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_rule_response_identity(
+            _soup(_course_rule_identity(course="5670202")), "5670201", "20261"
+        )
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_rule_response_identity(
+            _soup(_course_rule_identity(semester="20252")), "5670201", "20261"
+        )
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_rule_response_identity(
+            _soup("<p>Semester: 20261 Auto Replace Courses for 5670202</p>"), "5670201", "20261"
+        )
 
 def test_curriculum_parser_rejects_missing_board(sais):
     with pytest.raises(ValueError):

@@ -131,6 +131,47 @@ def _verify_course_response_identity(
             raise ValueError(f"SAIS {page} page {key} identity is missing, ambiguous, or mismatched")
 
 
+def _verify_course_rule_response_identity(
+    soup: BeautifulSoup, course_code: str, semester_code: str, *, semester_label: Optional[str] = None
+) -> None:
+    """Verify the identity fields METU actually returns for rule lookups.
+
+    Prerequisite and replacement responses keep the department course-list
+    form and add the requested rule result, but do not mark or label the
+    submitted course. The returned page still carries the exact semester and
+    one radio value for each listed course. Requiring the requested course as
+    an exact radio value avoids treating arbitrary page text as identity while
+    accepting the response shape used by the live service.
+    """
+    _verify_course_response_identity(
+        soup,
+        None,
+        semester_code,
+        semester_label=semester_label,
+    )
+    requested = str(course_code).strip()
+    text = clean_text(soup.get_text(" ", strip=True))
+    labelled = set(
+        re.findall(
+            r"\b(?:Auto\s+Replace|Prerequisite)\s+Courses?\s+for\s+(\d{7})\b",
+            text,
+            re.I,
+        )
+    )
+    if labelled:
+        if labelled != {requested}:
+            raise ValueError("SAIS course rules page course identity is missing, ambiguous, or mismatched")
+        return
+    matches = [
+        control
+        for control in soup.find_all("input", attrs={"name": "text_course_code"})
+        if str(control.get("type", "")).lower() == "radio"
+        and str(control.get("value", "")).strip() == requested
+    ]
+    if len(matches) != 1:
+        raise ValueError("SAIS course rules page course identity is missing, ambiguous, or mismatched")
+
+
 def clean_text(text: Optional[str]) -> str:
     """Cleans up text, normalizes whitespace and repairs windows-1252 / latin-1 mojibake if present."""
     if not text:
@@ -865,7 +906,7 @@ class SAISClient:
 
         if not prerequisite_table_found and not _explicit_empty_result(soup, "prerequisite"):
             raise ValueError("SAIS prerequisite table could not be read")
-        _verify_course_response_identity(soup, course_code, semester_code,
+        _verify_course_rule_response_identity(soup, course_code, semester_code,
             semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
         return prereqs
@@ -916,7 +957,7 @@ class SAISClient:
 
         if not replacement_table_found and not _explicit_empty_result(soup, "replacement"):
             raise ValueError("SAIS replacement table could not be read")
-        _verify_course_response_identity(soup, course_code, semester_code,
+        _verify_course_rule_response_identity(soup, course_code, semester_code,
             semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
         return replacements
 
