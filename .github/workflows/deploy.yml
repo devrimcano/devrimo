@@ -46,6 +46,18 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
 
+      # A second of stdlib in front of five minutes of containers, apt, pip and
+      # pytest. Everything here fails on reading files alone, and everything
+      # here has actually failed: on 2026-09-09 two migrations landed on the
+      # same parent and then one carried a revision id too long for the column
+      # alembic writes it into, and each of those cost a full backend run to
+      # discover, because alembic only says so once it has a database.
+      - name: Check migrations and release tooling
+        run: |
+          python scripts/check_migration_graph.py
+          python -m unittest discover -s scripts/tests
+          bash -n scripts/deploy-vps.sh
+
       - name: Test backend
         working-directory: backend
         env:
@@ -57,11 +69,6 @@ jobs:
           python -m pip install -r requirements-dev.txt
           pytest -q
           TEST_EXTENSION_SCHEMA=extensions pytest -q tests/test_database_hardening.py tests/test_database_ownership.py tests/test_restore_check.py
-
-      - name: Test release tooling
-        run: |
-          python -m unittest discover -s scripts/tests -v
-          bash -n scripts/deploy-vps.sh
 
       - uses: actions/setup-node@v4
         with:

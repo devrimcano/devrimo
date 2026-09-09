@@ -153,13 +153,22 @@ prune_frontend_releases() {
   done
 }
 
+# df is instant and the backup directory holds a handful of files, but du on
+# the frontend releases walks several gigabytes of node_modules: measured at
+# twenty-seven seconds per deploy, spent three times, to print a number that
+# free space already implies. What pruning is actually judged on is how many
+# releases are left, and counting directories is free.
+report_storage() {
+  df -h "$DEPLOY_DIR"
+  du -sh "$BACKUP_DIR" 2>/dev/null || true
+  echo "frontend releases retained: $(find "$frontend_releases" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+}
+
 echo "Deployment storage before frontend pruning:"
-df -h "$DEPLOY_DIR"
-du -sh "$BACKUP_DIR" "$frontend_releases" 2>/dev/null || true
+report_storage
 prune_frontend_releases
 echo "Deployment storage after frontend pruning:"
-df -h "$DEPLOY_DIR"
-du -sh "$BACKUP_DIR" "$frontend_releases" 2>/dev/null || true
+report_storage
 
 # Failed workflows upload a uniquely named archive and cannot reach the normal
 # success cleanup. The current archive is retained; every other file matching
@@ -362,8 +371,7 @@ for attempt in {1..45}; do
     prune_deploy_files "$BACKUP_DIR" 'devrimo-*.dump' 1
     prune_frontend_releases
     rm -f "$RELEASE_ARCHIVE"
-    df -h "$DEPLOY_DIR"
-    du -sh "$BACKUP_DIR" "$frontend_releases" 2>/dev/null || true
+    report_storage
     echo "Devrimo deployment $DEPLOY_SHA is healthy"
     exit 0
   fi
