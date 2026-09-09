@@ -29,6 +29,36 @@ export function getSiteUrl() {
   }
 }
 
+/**
+ * The name Supabase stores this deployment's auth cookie under.
+ *
+ * Cookies are scoped by host, and a port is not part of a host. So two
+ * development stacks on `localhost:3000` and `localhost:3001` share one cookie
+ * jar: signing into the second silently overwrites the first's session, and the
+ * first tab then behaves as the second's user. With one worktree per task and
+ * two synthetic students per worktree, that is not an edge case — it is what
+ * happens the first time somebody opens two stacks.
+ *
+ * `node scripts/dev.mjs setup` sets this per worktree. Empty in production,
+ * where there is one origin and Supabase's default name is correct.
+ */
+export function getSupabaseCookieName() {
+  return process.env.NEXT_PUBLIC_SUPABASE_COOKIE_NAME?.trim() ?? "";
+}
+
+/**
+ * Options every Supabase client in this app must be constructed with.
+ *
+ * Shared rather than repeated because the browser client, the server client and
+ * the middleware client must agree on the cookie name. Two of three agreeing
+ * produces a session that exists on the server and not in the browser, which
+ * presents as an intermittent redirect loop.
+ */
+export function supabaseClientOptions() {
+  const name = getSupabaseCookieName();
+  return name ? { cookieOptions: { name } } : {};
+}
+
 export function isSupabaseConfigured() {
   const url = getSupabaseUrl();
   const key = getSupabaseAnonKey();

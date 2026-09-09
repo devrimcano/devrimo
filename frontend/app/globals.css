@@ -88,22 +88,25 @@
   --card-foreground: #191512;
   --popover: #ffffff;
   --popover-foreground: #191512;
-  --primary: #d81438;
-  /* Text on a primary/10 tint. 5.18:1 - the brand red itself is 4.38 there and
-   * fails, which is why this exists rather than a lighter opacity. */
-  --on-primary-tint: #c2152f;
+  /* Indigo, and deliberately not a red. A brand that shares its hue with the
+   * one state that means "you cannot register for this section" spends the only
+   * colour distinction this product actually needs; red is now danger and
+   * nothing else. 8.63:1 under white text, and legible enough on its own 10%
+   * tint (7.29:1) that the separate tint ink the red required is gone. */
+  --primary: #4a2fbd;
+  --on-primary-tint: #4a2fbd;
   --primary-foreground: #ffffff;
   --secondary: #e9e3da;
   --secondary-foreground: #26211f;
   --muted: #efeae2;
   /* 5.09:1 on the paper, 5.89:1 on a card. */
   --muted-foreground: #6b635c;
-  --accent: #f9e3e7;
-  --accent-foreground: #8f1730;
+  --accent: #ece7fb;
+  --accent-foreground: #3a2496;
   --destructive: #c81e3a;
   --border: #dcd5ca;
   --input: #cfc7ba;
-  --ring: #d81438;
+  --ring: #4a2fbd;
   /* State colours, because a product that reads campus systems has four
    * things to say and only had one colour to say them in. Every one of these
    * was previously an ad-hoc Tailwind palette step written into a component -
@@ -119,7 +122,7 @@
   --warning-foreground: #ffffff;
   --danger: #c81e3a;
   --danger-foreground: #ffffff;
-  --chart-1: #d81438;
+  --chart-1: #4a2fbd;
   --chart-2: #1f6a97;
   --chart-3: #15795e;
   --chart-4: #8a5a00;
@@ -135,19 +138,19 @@
   --course-2: #2563a8;
   --course-3: #15795e;
   --course-4: #8a5a00;
-  --course-5: #6b3fa0;
+  --course-5: #9c2f86;
   --course-6: #0f7b8a;
   --course-7: #a83262;
   --course-8: #4f5f27;
   --radius: 0.875rem;
   --sidebar: #ece7df;
   --sidebar-foreground: #27211f;
-  --sidebar-primary: #d81438;
+  --sidebar-primary: #4a2fbd;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f9e3e7;
-  --sidebar-accent-foreground: #8f1730;
+  --sidebar-accent: #ece7fb;
+  --sidebar-accent-foreground: #3a2496;
   --sidebar-border: #dbd4c9;
-  --sidebar-ring: #d81438;
+  --sidebar-ring: #4a2fbd;
 }
 
 .dark {
@@ -158,20 +161,20 @@
   --card-foreground: #f3eee8;
   --popover: #211e1c;
   --popover-foreground: #faf6f1;
-  --primary: #ee3154;
-  /* Text on a primary/10 tint in dark. 7.46:1. */
-  --on-primary-tint: #ff8fa3;
-  --primary-foreground: #ffffff;
+  /* 6.41:1 on the dark card, 5.56:1 on its own tint. */
+  --primary: #a08cff;
+  --on-primary-tint: #a08cff;
+  --primary-foreground: #14102b;
   --secondary: #292522;
   --secondary-foreground: #faf6f1;
   --muted: #282421;
   --muted-foreground: #b8afa8;
-  --accent: #421d26;
-  --accent-foreground: #ffc2ce;
+  --accent: #2b2450;
+  --accent-foreground: #cfc4ff;
   --destructive: #ff617a;
   --border: #403a36;
   --input: #4b433e;
-  --ring: #ff5872;
+  --ring: #a08cff;
   /* The same four states, tuned for the dark ground: measured on their own
    * 12% tint over a card at info 6.43, success 7.31, warning 7.43, danger 5.13.
    * The foreground is dark here because these hues are the light ones. */
@@ -187,21 +190,21 @@
   --course-2: #79b4e8;
   --course-3: #5fd0a4;
   --course-4: #f0b45c;
-  --course-5: #b79bea;
+  --course-5: #f09ad8;
   --course-6: #5fc9d6;
   --course-7: #f08bb4;
   --course-8: #b5c46e;
-  --chart-1: #ff5872;
+  --chart-1: #a08cff;
   --chart-2: #6fb6e8;
   --chart-3: #5fd0a4;
   --chart-4: #f0b45c;
   --chart-5: #aaa09a;
   --sidebar: #191716;
   --sidebar-foreground: #f3eee8;
-  --sidebar-primary: #ee3154;
+  --sidebar-primary: #a08cff;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #3b2027;
-  --sidebar-accent-foreground: #ffc2ce;
+  --sidebar-accent: #272148;
+  --sidebar-accent-foreground: #cfc4ff;
   --sidebar-border: #38322f;
   --sidebar-ring: #ff5872;
 }
@@ -212,11 +215,11 @@
   }
   body {
     @apply bg-background text-foreground;
-    background-image: radial-gradient(circle at 12% 8%, rgb(215 25 63 / 4.5%), transparent 30%);
+    background-image: radial-gradient(circle at 12% 8%, color-mix(in oklab, var(--primary) 5%, transparent), transparent 30%);
     text-rendering: optimizeLegibility;
   }
   .dark body {
-    background-image: radial-gradient(circle at 12% 8%, rgb(238 49 84 / 10%), transparent 32%);
+    background-image: radial-gradient(circle at 12% 8%, color-mix(in oklab, var(--primary) 12%, transparent), transparent 32%);
   }
   html {
     @apply font-sans;

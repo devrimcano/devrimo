@@ -1637,7 +1637,7 @@ export function SchedulePlanner() {
       const y = 330 + (itemStartMinute(e) - baseMinute) * pixelsPerMinute;
       const height = Math.max(72, itemDurationMinutes(e) * pixelsPerMinute);
       const labelY = y + Math.min(60, Math.max(34, height - 18));
-      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#d81438" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
+      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#4a2fbd" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
     }).join("");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#171312"/><text x="180" y="170" fill="white" font-size="72" font-family="Arial" font-weight="700">Devrimo · ${termLabel(term, t).replace(/[<>&]/g, "")}</text>${DAYS.map((d, i) => `<text x="${500 + i * 650}" y="285" fill="#aaa" font-size="36" font-family="Arial">${dayLabel(d)}</text>`).join("")}${cells}</svg>`;
     downloadFile("devrimo-schedule-4k.svg", new Blob([svg], { type: "image/svg+xml" }));
@@ -1649,7 +1649,7 @@ export function SchedulePlanner() {
   // the week is always fully visible without moving the page.
 
   return (
-    <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,rgb(227_24_55/8%),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden xl:py-3">
+    <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,color-mix(in_oklab,var(--primary)_9%,transparent),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden xl:py-3">
       <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
