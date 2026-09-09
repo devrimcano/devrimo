@@ -90,15 +90,17 @@ replacements, and section restrictions. **Refresh jobs** shows its progress.
 Imported courses remain drafts until reviewed and published. Repeated clicks
 reuse an active full import; directory-only maintenance has a separate scope.
 
-The catalog worker reuses the vendored SAIS parser with a database admission
-gate before every HTTP request, including authentication and redirects.
-`CATALOG_WARM_DAILY_LIMIT` limits admitted attempts, not MCP tool invocations.
-Reservations are conservative: cancellation after reservation does not refund
-the budget. Database failure fails closed before contacting METU.
+The catalog worker reuses the vendored SAIS parser and verifies job lease and
+organization ownership before every HTTP request, including authentication
+and redirects. Catalog import jobs have no artificial request delay or daily
+cap. Database failure still fails closed before contacting METU.
 
-Default import hours are 01:00–07:00 Europe/Istanbul with a 20–30 second gap and
-200 admitted attempts per day. On-demand imports enter the same queue. Jobs
-retain their remaining operations and resume after pacing/budget deferral.
+Admin-triggered jobs are eligible at any hour, including existing queued jobs,
+and the enabled catalog worker polls at most five seconds apart between passes.
+Automatic refresh scheduling retains the configured overnight window.
+The old raw-cache warmer retains its separate pacing and budget policy.
+Imports return HTTP 503 when catalog ingestion is disabled; enable
+`ACADEMIC_CATALOG_INGESTION_ENABLED` on both the API and catalog worker.
 Authentication errors stop the job; transient failures have bounded backoff.
 Publication is not available to the catalog worker identity.
 

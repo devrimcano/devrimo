@@ -163,7 +163,7 @@ async def run(kind: str, stop_event: asyncio.Event | None = None) -> None:
     periods = {
         "directory": settings.admin_directory_sync_seconds,
         "retention": settings.schedule_cache_sweep_seconds,
-        "catalog": settings.catalog_warm_poll_seconds,
+        "catalog": min(settings.catalog_warm_poll_seconds, 5) if settings.academic_catalog_ingestion_enabled else settings.catalog_warm_poll_seconds,
         "researcher": 5,
     }
     worker_id = f"{service}:{os.getpid()}"

@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
@@ -20,6 +21,63 @@ from app.academic_catalog.models import (
 from app.academic_catalog.source import client_type
 from app.admin.directory import METU_ID, ensure_metu
 from app.db.session import SessionLocal
+
+
+async def test_manual_import_completes_outside_hours_without_pacing_or_budget(monkeypatch):
+    from app.academic_catalog.service import enqueue_import
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(settings, "catalog_warm_daily_limit", 0)
+    monkeypatch.setattr(settings, "catalog_warm_interval_seconds", 3600)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: False)
+    schedule = AsyncMock()
+    monkeypatch.setattr(worker, "schedule_due", schedule)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock(side_effect=AssertionError("Artificial delay")))
+
+    class Source:
+        def __init__(self, _secret, admission):
+            self.admission = admission
+
+        async def read(self, _tool, _values):
+            await self.admission()
+            return {"semesters": [{"code": "20261"}], "departments": []}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        scheduled = await enqueue_import(db, METU_ID, "20261", department="240", payload={"scheduled": True})
+        manual = await enqueue_import(db, METU_ID, "20261", requested_by=uuid4())
+        await db.commit()
+        manual_id, scheduled_id = manual.id, scheduled.id
+    result = await worker.run_once()
+    assert result.outcome == "completed"
+    assert result.job_id == str(manual_id)
+    schedule.assert_not_awaited()
+    async with SessionLocal() as db:
+        assert (await db.get(CatalogImportJob, scheduled_id)).status == "queued"
+        assert (await db.get(CatalogImportJob, manual_id)).checkpoint_offset == 1
+        assert await db.scalar(select(CatalogHttpBudget)) is None
+
+
+async def test_manual_request_promotes_existing_scheduled_job():
+    from app.academic_catalog.service import enqueue_import
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        original = await enqueue_import(db, METU_ID, "20261", department="240", payload={"scheduled": True})
+        original.checkpoint_offset = 2
+        requested = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        assert requested.id == original.id
+        assert requested.checkpoint_offset == 2
+    claimed = await worker._claim(manual_only=True)
+    assert claimed.id == original.id
 
 
 async def test_full_school_import_does_not_reuse_directory_only_job():
@@ -115,7 +173,7 @@ async def test_http_budget_cannot_be_overspent_by_concurrent_workers(monkeypatch
     async with SessionLocal() as db:
         await ensure_metu(db)
         await db.commit()
-    results = await asyncio.gather(*(worker.admit_request(METU_ID, uuid4()) for _ in range(4)), return_exceptions=True)
+    results = await asyncio.gather(*(worker.admit_request(METU_ID, None) for _ in range(4)), return_exceptions=True)
     assert sum(value is None for value in results) == 2
     assert sum(isinstance(value, worker.ImportDeferred) for value in results) == 2
     async with SessionLocal() as db:

@@ -10,6 +10,28 @@ from app.db.session import SessionLocal
 from tests.conftest import auth_header, new_user_id
 
 
+async def test_imports_fail_clearly_when_disabled_and_deduplicate_when_enabled(client, monkeypatch):
+    from app.academic_catalog.models import CatalogImportJob
+
+    user = new_user_id()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "admin_bootstrap_user_ids", str(user))
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", False)
+    headers = auth_header(user)
+    await client.get("/api/v1/profile", headers=headers)
+    body = {"term": "20261", "reason": "Import all departments"}
+    response = await client.post("/api/v1/admin/catalog/imports", headers=headers, json=body)
+    assert response.status_code == 503
+    assert "imports are disabled" in response.json()["detail"]
+    async with SessionLocal() as db:
+        assert await db.scalar(select(CatalogImportJob)) is None
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    first = await client.post("/api/v1/admin/catalog/imports", headers=headers, json=body)
+    second = await client.post("/api/v1/admin/catalog/imports", headers=headers, json=body)
+    assert first.status_code == second.status_code == 202
+    assert first.json()["id"] == second.json()["id"]
+
+
 async def test_operator_can_inspect_but_cannot_edit_or_publish(client):
     user = new_user_id()
     headers = auth_header(user)

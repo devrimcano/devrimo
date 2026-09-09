@@ -1931,6 +1931,13 @@ async def enqueue_import(
             "scope": dedup_key,
             "discovery_only": bool((payload or {}).get("discovery_only")),
         })
+    def reuse(job: CatalogImportJob) -> CatalogImportJob:
+        # An explicit admin request may reuse an overnight refresh. Promote
+        # that job without duplicating its source work or resetting progress.
+        if requested_by is not None and not (payload or {}).get("scheduled"):
+            job.requested_by = requested_by
+            job.payload = {**(job.payload or {}), "scheduled": False}
+        return job
     existing = await db.scalar(
         select(CatalogImportJob).where(
             CatalogImportJob.organization_id == organization_id,
@@ -1939,7 +1946,7 @@ async def enqueue_import(
         )
     )
     if existing is not None:
-        return existing
+        return reuse(existing)
     def new_job() -> CatalogImportJob:
         return CatalogImportJob(
             organization_id=organization_id,
@@ -1995,7 +2002,7 @@ async def enqueue_import(
                 )
             )
             if existing is not None:
-                return existing
+                return reuse(existing)
             if attempt == 0:
                 job = new_job()
                 continue

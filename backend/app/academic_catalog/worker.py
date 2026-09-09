@@ -72,8 +72,16 @@ def _aware(value: datetime) -> datetime:
 
 
 async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token: UUID | None = None) -> None:
-    """Serialize and reserve every HTTP attempt, including redirects and sign-in."""
+    """Fence catalog requests; retain budget admission only for the legacy warmer."""
     settings = get_settings()
+    if job_id is not None:
+        async with SessionLocal() as db:
+            job = await _owned_job(db, job_id, lease_token)
+            if job.organization_id != organization_id:
+                raise LeaseLost("import_organization_mismatch")
+            job.lease_until = datetime.now(UTC) + timedelta(seconds=settings.academic_catalog_job_lease_seconds)
+            await db.commit()
+        return
     while True:
         local = datetime.now(ISTANBUL)
         if not _within_hours(local, settings.catalog_warm_hours):
@@ -131,10 +139,14 @@ async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token:
         await asyncio.sleep(min(wait, 30))
 
 
-async def _claim():
+async def _claim(*, manual_only: bool = False):
     now = datetime.now(UTC)
     async with SessionLocal() as db:
-        jobs = (await db.scalars(select(CatalogImportJob).where(or_(
+        eligibility = []
+        if manual_only:
+            eligibility = [CatalogImportJob.requested_by.is_not(None),
+                           CatalogImportJob.payload["scheduled"].as_boolean().is_not(True)]
+        jobs = (await db.scalars(select(CatalogImportJob).where(*eligibility, or_(
             CatalogImportJob.status == "queued",
             (CatalogImportJob.status == "running") & (CatalogImportJob.lease_until < now),
         ), or_(
@@ -372,12 +384,11 @@ async def schedule_due() -> int:
 
 async def run_once() -> CatalogPassResult:
     settings = get_settings()
-    if not settings.academic_catalog_ingestion_enabled or not settings.catalog_warm_enabled:
+    if not settings.academic_catalog_ingestion_enabled:
         return CatalogPassResult(0, outcome="idle", error_code="ingestion_disabled")
-    if not _within_hours(datetime.now(ISTANBUL), settings.catalog_warm_hours):
-        return CatalogPassResult(0, outcome="idle", error_code="outside_import_hours")
-    scheduled_count = await schedule_due()
-    job = await _claim()
+    background_allowed = settings.catalog_warm_enabled and _within_hours(datetime.now(ISTANBUL), settings.catalog_warm_hours)
+    scheduled_count = await schedule_due() if background_allowed else 0
+    job = await _claim(manual_only=not background_allowed)
     if job is None:
         return CatalogPassResult(0, outcome="idle", scheduled_count=scheduled_count)
     selected = await _account(job.organization_id)
@@ -433,7 +444,7 @@ async def run_once() -> CatalogPassResult:
     async with engine.connect() as lock:
         acquired = await lock.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key})
         if not acquired:
-            await _save(job.id, job.lease_token, status="queued", lease_until=None)
+            await _save(job.id, job.lease_token, status="queued", lease_until=None, error_code="source_account_busy")
             return CatalogPassResult(
                 0,
                 outcome="deferred",

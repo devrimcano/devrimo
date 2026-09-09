@@ -29,6 +29,7 @@ from app.academic_catalog.schemas import (
 from app.admin.audit import record_event
 from app.admin.auth import AdminPermission, AdminPrincipal, require
 from app.admin.directory import METU_ID
+from app.config import get_settings
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability.client import capture
@@ -339,6 +340,9 @@ async def create_import(
     principal: AdminPrincipal = Depends(require(AdminPermission.catalog_write)),
     db: AsyncSession = Depends(get_db),
 ) -> CatalogImportJobOut:
+    if not get_settings().academic_catalog_ingestion_enabled:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Catalog imports are disabled. Enable ACADEMIC_CATALOG_INGESTION_ENABLED on the API and catalog worker.")
     try:
         job = await service.enqueue_import(
             db,
@@ -349,6 +353,7 @@ async def create_import(
             reason=body.reason,
             requested_by=principal.user.id,
         )
+        await db.flush()
         await db.refresh(job)
         payload = service.serialize_import_job(job)
         await db.commit()
