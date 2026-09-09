@@ -76,6 +76,37 @@ def test_production_rejects_unencrypted_or_opportunistic_connections(mode):
                  database_url=f"postgresql+asyncpg://knowledge:x@db/app{mode}")
 
 
+def test_the_api_login_can_carry_two_generations_of_its_pool():
+    """A restart overlaps, and the login limit has to survive the overlap.
+
+    The pooler in front of PostgreSQL keeps the outgoing connections of the
+    process that just exited while the replacement is opening its own, so for
+    that window both pools count against one login. When the limit was exactly
+    one pool, the replacement could not obtain a single connection: it failed
+    startup, systemd restarted it into the same refusal every five seconds, and
+    the site stayed down until the old connections aged out.
+    """
+    url = make_url(get_settings().database_url).set(drivername="postgresql+psycopg")
+    engine = create_engine(url, connect_args=postgres_connect_args(url))
+    login = "devrimo_api_restart_probe"
+    try:
+        with engine.connect() as conn, conn.begin() as transaction:
+            conn.execute(text(
+                f"CREATE ROLE {login} LOGIN PASSWORD 'probe' "
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+            ))
+            conn.execute(text(f"GRANT devrimo_api TO {login}"))
+            migration = runpy.run_path(str(ROOT / "alembic/versions/0034_api_restart_connection_headroom.py"))
+            with Operations.context(MigrationContext.configure(conn)):
+                migration["upgrade"]()
+            granted = conn.scalar(text("SELECT rolconnlimit FROM pg_roles WHERE rolname=:name"), {"name": login})
+            pool = database_pool_options(get_settings())
+            assert granted >= 2 * (pool["pool_size"] + pool["max_overflow"])
+            transaction.rollback()
+    finally:
+        engine.dispose()
+
+
 def test_pool_budget_bounds_both_engines():
     settings = Settings(_env_file=None)
     app = database_pool_options(settings)
