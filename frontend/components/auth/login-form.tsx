@@ -168,7 +168,9 @@ export function LoginForm() {
               className="h-11"
               aria-invalid={Boolean(error)}
               aria-describedby={error ? errorId : info ? infoId : undefined}
-              placeholder="isim@metu.edu.tr"
+              // A Devrimo account is not a METU account, and this field said
+              // otherwise to everyone who read it before typing.
+              placeholder={pick({ tr: "ornek@eposta.com", en: "you@example.com" })}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
             />

@@ -212,7 +212,7 @@ function InviteDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenCha
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader><DialogTitle>{pick({ tr: "Kullanıcı davet et", en: "Invite user" })}</DialogTitle><DialogDescription>{pick({ tr: "Güvenli davet akışı kullanılır; parola ayarlanmaz veya gösterilmez.", en: "The secure invitation flow is used; no password is set or shown." })}</DialogDescription></DialogHeader>
-        <div className="space-y-2"><Label htmlFor="invite-email">{pick({ tr: "E-posta", en: "Email" })}</Label><Input id="invite-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@metu.edu.tr" /></div>
+        <div className="space-y-2"><Label htmlFor="invite-email">{pick({ tr: "E-posta", en: "Email" })}</Label><Input id="invite-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder={pick({ tr: "ornek@eposta.com", en: "you@example.com" })} /></div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button onClick={() => mutation.mutate()} disabled={!valid || mutation.isPending}>{mutation.isPending ? pick({ tr: "Gönderiliyor…", en: "Sending…" }) : pick({ tr: "Daveti gönder", en: "Send invite" })}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
