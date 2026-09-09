@@ -5,7 +5,7 @@ import { PlanSaveTracker } from "@/lib/planning-sync";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClipboardIcon, DownloadIcon, HeartIcon,
-  Loader2Icon, PlusIcon, RotateCcwIcon, SearchIcon, Trash2Icon, TriangleAlertIcon,
+  Loader2Icon, PlusIcon, RotateCcwIcon, SearchIcon, Trash2Icon, TriangleAlertIcon, Undo2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocale } from "@/components/locale-provider";
@@ -719,6 +719,11 @@ export function SchedulePlanner() {
   const [mobileDay, setMobileDay] = useState<Day>("Mon");
   const [poolQuery, setPoolQuery] = useState("");
   const [suggestions, setSuggestions] = useState<CatalogCourse[]>([]);
+  // Which suggestion the keyboard is on. Enter used to add `suggestions[0]`,
+  // and suggestions arrive on a 300 ms debounce, so typing a code and pressing
+  // Enter added the first hit of the *previous* query - a different course,
+  // silently, into the pool.
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [suggestBusy, setSuggestBusy] = useState(false);
   const [suggestNote, setSuggestNote] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
@@ -1016,13 +1021,19 @@ export function SchedulePlanner() {
    * credits and no sections, and nothing said why.
    */
   function addPoolCourse(picked?: CatalogCourse) {
-    const chosen = picked ?? suggestions[0];
+    const chosen = picked ?? (activeSuggestion >= 0 ? suggestions[activeSuggestion] : undefined);
     // Without a catalog-verified suggestion the typed text becomes a pool
     // entry with no name, no credits and no sections — which looks like a
     // bug rather than a feature. Refuse it rather than silently creating a
     // broken entry the student has to notice and delete.
     if (!chosen) {
       if (!poolQuery.trim()) return toast.error(t("Ders kodu gerekli.", "Course code is required."));
+      if (suggestions.length) {
+        return toast.error(t(
+          "Listeden bir ders seç: ok tuşlarıyla gez, Enter ile ekle.",
+          "Pick a course from the list: arrow keys to move, Enter to add.",
+        ));
+      }
       return toast.error(t("Önce listeden bir ders seç veya aramayı bekle.", "Pick a course from the list or wait for search results."));
     }
     const rawCode = chosen.rawCode.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -1045,7 +1056,7 @@ export function SchedulePlanner() {
     // this file's lint forbids a synchronous setState in an effect body, and
     // deferring it also stops a half-typed code from firing a request.
     const timer = window.setTimeout(async () => {
-      if (typed.length < 2) { setSuggestions([]); setSuggestNote(""); return; }
+      if (typed.length < 2) { setSuggestions([]); setActiveSuggestion(-1); setSuggestNote(""); return; }
       setSuggestBusy(true);
       try {
         const response = await jsonFetch<{ department: string; courses: { code: string; full_code: string; name: string; credits: number }[] }>(
@@ -1053,10 +1064,12 @@ export function SchedulePlanner() {
         );
         if (cancelled) return;
         setSuggestions(response.courses.map((item) => ({ rawCode: item.full_code, code: item.code, name: item.name, credits: item.credits })));
+        setActiveSuggestion(response.courses.length ? 0 : -1);
         setSuggestNote(response.courses.length ? "" : t(`${response.department} altında eşleşen ders yok.`, `No matching course under ${response.department}.`));
       } catch (error) {
         if (cancelled) return;
         setSuggestions([]);
+        setActiveSuggestion(-1);
         setSuggestNote(error instanceof Error ? error.message : t("Öneriler alınamadı.", "Suggestions unavailable."));
       } finally {
         if (!cancelled) setSuggestBusy(false);
@@ -1678,7 +1691,7 @@ export function SchedulePlanner() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={clearSchedule}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
-            <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><RotateCcwIcon />{t("Geri al", "Undo")}</Button>
+            <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><Undo2Icon />{t("Geri al", "Undo")}</Button>
           </div>
         </div>
 
@@ -1712,55 +1725,61 @@ export function SchedulePlanner() {
 
         <div className="grid gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="min-w-0 space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
-            <Card><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 p-4">
-              <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
-                {/* Five fixed options, so toggles rather than a multi-select:
-                    every choice is visible and one click wide, and a dropdown
-                    would hide the current selection behind a summary line. */}
-                <div id="planner-empty-days" role="group" aria-labelledby="planner-empty-days-label" className="flex gap-1">
-                  {DAYS.map((day) => {
-                    const chosen = emptyDays.includes(day);
-                    return (
-                      <button
-                        key={day}
-                        type="button"
-                        aria-pressed={chosen}
-                        onClick={() => setEmptyDays((current) => chosen ? current.filter((item) => item !== day) : [...current, day])}
-                        className={cn("h-9 flex-1 rounded-md border text-xs font-medium transition", chosen ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent")}
-                      >
-                        {dayLabel(day)}
-                      </button>
-                    );
-                  })}
-                </div>
-                {emptyDays.length === DAYS.length
-                  ? <p className="mt-1 text-[11px] text-destructive">{t("Tüm günler boş seçili; hiçbir ders yerleştirilemez.", "Every day is marked empty, so nothing can be placed.")}</p>
-                  : emptyDays.length ? null
-                  : <p className="mt-1 text-[11px] text-muted-foreground">{t("Seçmezsen fark etmez.", "Leave empty for no preference.")}</p>}
-              </Field>
-              <Toggle label={t("Çakışmaları engelle", "Prevent conflicts")} checked={avoidConflicts} onChange={setAvoidConflicts} />
-              <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
-            </CardContent></Card>
-
             <Card data-tour="pool"><CardHeader className="pb-3"><CardTitle className="text-base">{t("Dönem dersleri", "Semester courses")}</CardTitle></CardHeader><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3">
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
-              {planBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite"><Loader2Icon className="size-3.5 animate-spin" />{t("Müfredatın okunuyor…", "Reading your curriculum…")}</p> : null}
-              {curriculumNotice ? <p className={curriculumFailed ? "rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-xs leading-5 text-destructive" : "rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"} role={curriculumFailed ? "alert" : undefined}>{curriculumNotice}</p> : null}
-              {catalogCourses.length || planningMetadata.blockedCourses.length || needsRevalidation ? <PlanningStatusNotice metadata={planningMetadata} needsRevalidation={needsRevalidation} /> : null}
+              {/* One notice at a time, in the order a student cares about:
+                  what is happening now, then what the last read said, then
+                  what the plan is worth. Four stacked boxes above the search
+                  field were four things nobody read. */}
+              {planBusy ? (
+                <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+                  <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                  {t("Müfredatın okunuyor…", "Reading your curriculum…")}
+                </p>
+              ) : constraintsBusy ? (
+                <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground" role="status" aria-live="polite">
+                  <Loader2Icon className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+                  {t("Şube kısıtları ODTÜ'den okunuyor; kırmızı işaretler geldikçe belirecek.", "Reading section restrictions from METU; red flags appear as they arrive.")}
+                </p>
+              ) : curriculumNotice ? (
+              <p className={curriculumFailed ? "rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-xs leading-5 text-destructive" : "rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"} role={curriculumFailed ? "alert" : undefined}>{curriculumNotice}</p>
+              ) : (
+              catalogCourses.length || planningMetadata.blockedCourses.length || needsRevalidation ? <PlanningStatusNotice metadata={planningMetadata} needsRevalidation={needsRevalidation} /> : null
+              )}
               {catalogCourses.length ? (
                 <div className="flex items-center justify-between gap-3 text-xs" aria-live="polite">
                   <span className="font-medium">{t(`${catalogCourses.length} dersten ${selectedPoolCount} tanesi programa eklendi`, `${selectedPoolCount} of ${catalogCourses.length} courses added to the schedule`)}</span>
                   <span className="shrink-0 tabular-nums text-muted-foreground">{selectedPoolCount}/{catalogCourses.length}</span>
                 </div>
               ) : null}
-              {constraintsBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"><Loader2Icon className="size-3.5 shrink-0 animate-spin" />{t("Şube kısıtları ODTÜ'den okunuyor; kırmızı işaretler geldikçe belirecek.", "Reading section restrictions from METU; red flags will appear as they arrive.")}</p> : null}
               <div className="space-y-2" data-tour="search">
                 <div className="relative">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={poolQuery}
                     onChange={(e) => setPoolQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && suggestions.length) addPoolCourse(); }}
+                    onKeyDown={(event) => {
+                      if (!suggestions.length) return;
+                      if (event.key === "ArrowDown") {
+                        event.preventDefault();
+                        setActiveSuggestion((current) => (current + 1) % suggestions.length);
+                      } else if (event.key === "ArrowUp") {
+                        event.preventDefault();
+                        setActiveSuggestion((current) => (current <= 0 ? suggestions.length : current) - 1);
+                      } else if (event.key === "Enter") {
+                        event.preventDefault();
+                        addPoolCourse();
+                      } else if (event.key === "Escape") {
+                        setSuggestions([]);
+                        setActiveSuggestion(-1);
+                      }
+                    }}
+                    role="combobox"
+                    aria-expanded={suggestions.length > 0}
+                    aria-controls="planner-course-suggestions"
+                    aria-activedescendant={activeSuggestion >= 0 && suggestions[activeSuggestion]
+                      ? `planner-suggestion-${courseIdentity(suggestions[activeSuggestion].rawCode)}`
+                      : undefined}
                     className="h-11 pl-9 pr-12"
                     placeholder={t("Ders kodu veya adı ara… (PHYS213, termodinamik)", "Search by code or name… (PHYS213, thermodynamics)")}
                     aria-label={t("Ders kodu veya adı ara", "Search by course code or name")}
@@ -1769,15 +1788,20 @@ export function SchedulePlanner() {
                     ? <Loader2Icon className="absolute right-3 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
                     : <Button size="icon" variant="ghost" onClick={() => addPoolCourse()} className="absolute right-1 top-1/2 -translate-y-1/2" aria-label={t("Dersi havuza ekle", "Add course to pool")}><PlusIcon /></Button>}
                 </div>
-                {suggestions.length ? <ul className="max-h-64 divide-y overflow-y-auto rounded-xl border bg-background" role="listbox" aria-label={t("Ders önerileri", "Course suggestions")}>
+                {suggestions.length ? <ul id="planner-course-suggestions" className="max-h-64 divide-y overflow-y-auto rounded-xl border bg-background" role="listbox" aria-label={t("Ders önerileri", "Course suggestions")}>
                   {suggestions.map((item) => (
                     <li key={item.rawCode}>
                       <button
                         type="button"
                         role="option"
-                        aria-selected={false}
+                        id={`planner-suggestion-${courseIdentity(item.rawCode)}`}
+                        aria-selected={suggestions[activeSuggestion]?.rawCode === item.rawCode}
+                        onMouseEnter={() => setActiveSuggestion(suggestions.indexOf(item))}
                         onClick={() => addPoolCourse(item)}
-                        className="flex w-full items-start gap-2 p-2 text-left text-sm transition hover:bg-primary/5"
+                        className={cn(
+                          "flex w-full items-start gap-2 p-2 text-left text-sm transition hover:bg-primary/5",
+                          suggestions[activeSuggestion]?.rawCode === item.rawCode && "bg-primary/10",
+                        )}
                       >
                         <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold">{item.code}</span>
                         <span className="min-w-0 flex-1 break-words text-xs leading-snug text-muted-foreground">{localizedCourseName(item.name, locale)}</span>
@@ -1846,6 +1870,48 @@ export function SchedulePlanner() {
                   })}
                 </div>
               </> : null}
+              {/* The primary action, next to the courses it acts on. It used to
+                  live under the timetable, in the other column on a wide screen
+                  and far below the fold on a narrow one, so the button that
+                  turns a pool into a week was nowhere near the pool. */}
+              <div className="grid gap-2 border-t pt-3">
+                <Button data-tour="build" onClick={() => void generateSchedule()} disabled={busy}>{generateProgress ? t(`Program oluşturuluyor… (${generateProgress.done}/${generateProgress.total})`, `Generating… (${generateProgress.done}/${generateProgress.total})`) : t("Programı oluştur", "Generate schedule")}</Button>
+                <p className="text-muted-foreground text-xs leading-5">
+                  {catalogCourses.length
+                    ? t("Havuzdaki derslerden çakışmasız haftalar üretir.", "Builds conflict-free weeks from the courses in your pool.")
+                    : t("Önce yukarıdan dersleri getir ya da arayıp ekle.", "Load or search for courses first.")}
+                </p>
+              </div>
+            </CardContent></Card>
+            <Card><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 p-4">
+              <p className="text-muted-foreground text-xs leading-5">{t("Program oluşturulurken bu tercihler uygulanır.", "These preferences apply when a schedule is generated.")}</p>
+              <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
+                {/* Five fixed options, so toggles rather than a multi-select:
+                    every choice is visible and one click wide, and a dropdown
+                    would hide the current selection behind a summary line. */}
+                <div id="planner-empty-days" role="group" aria-labelledby="planner-empty-days-label" className="flex gap-1">
+                  {DAYS.map((day) => {
+                    const chosen = emptyDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        aria-pressed={chosen}
+                        onClick={() => setEmptyDays((current) => chosen ? current.filter((item) => item !== day) : [...current, day])}
+                        className={cn("h-9 flex-1 rounded-md border text-xs font-medium transition", chosen ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent")}
+                      >
+                        {dayLabel(day)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {emptyDays.length === DAYS.length
+                  ? <p className="mt-1 text-[11px] text-destructive">{t("Tüm günler boş seçili; hiçbir ders yerleştirilemez.", "Every day is marked empty, so nothing can be placed.")}</p>
+                  : emptyDays.length ? null
+                  : <p className="mt-1 text-[11px] text-muted-foreground">{t("Seçmezsen fark etmez.", "Leave empty for no preference.")}</p>}
+              </Field>
+              <Toggle label={t("Çakışmaları engelle", "Prevent conflicts")} checked={avoidConflicts} onChange={setAvoidConflicts} />
+              <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
             </CardContent></Card>
 
             {entries.length || selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
@@ -1883,6 +1949,23 @@ export function SchedulePlanner() {
               column below xl grows to that width and takes the whole page
               sideways with it. */}
           <section aria-label={t("Haftalık program", "Weekly schedule")} className="min-w-0 space-y-3 xl:flex xl:min-h-0 xl:flex-col xl:gap-3 xl:space-y-0">
+            {/* A safety rule the student switched off, said where the result of
+                switching it off is looked at. In the sidebar it is one toggle
+                among three; here it explains why a red section is on the week. */}
+            {ignoreConstraints ? (
+              <div role="status" className="border-destructive/40 bg-destructive/10 text-destructive flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border px-3 py-2 text-xs leading-5">
+                <TriangleAlertIcon className="size-4 shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1">
+                  {t(
+                    "Şube kısıtları yok sayılıyor: bu programda kayıt olamayacağın şubeler bulunabilir.",
+                    "Section restrictions are being ignored: this schedule can contain sections you cannot register for.",
+                  )}
+                </span>
+                <Button size="sm" variant="outline" className="min-h-9 shrink-0" onClick={() => setIgnoreConstraints(false)}>
+                  {t("Kısıtları uygula", "Apply restrictions")}
+                </Button>
+              </div>
+            ) : null}
             <Card className="overflow-hidden xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
               {/* Deliberately not CardHeader: that is a grid with auto rows, so
                   a title, a stat line and two icon buttons became three stacked
@@ -2045,7 +2128,6 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
             </Card>
 
             <div className="flex flex-wrap gap-2 xl:shrink-0 [&_button]:h-9">
-              <Button data-tour="build" onClick={() => void generateSchedule()} disabled={busy}>{generateProgress ? t(`Program oluşturuluyor… (${generateProgress.done}/${generateProgress.total})`, `Generating… (${generateProgress.done}/${generateProgress.total})`) : t("Programı oluştur", "Generate schedule")}</Button>
               {alternatives.length > 1 ? (
                 <div className="flex min-w-0 max-w-full items-center gap-0.5 rounded-md border bg-background px-0.5">
                   <Button size="icon" variant="ghost" className="size-8" aria-label={t("Önceki alternatif", "Previous option")} onClick={() => showAlternative(alternativeIndex - 1)}><ChevronLeftIcon /></Button>
