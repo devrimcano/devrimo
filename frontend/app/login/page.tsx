@@ -15,7 +15,10 @@ export default function LoginPage() {
   return (
     <main id="main-content" tabIndex={-1} className="campus-grid relative min-h-svh overflow-x-hidden px-3 py-3 outline-none sm:px-8 sm:py-8">
       <div className="pointer-events-none absolute -right-28 -top-28 size-96 rounded-full bg-primary/10 blur-3xl" />
-      <div className="absolute right-5 top-5 z-20 flex items-center gap-2 sm:right-12 sm:top-12">
+      {/* Measured live at 375px: this cluster overlapped the wordmark's subtitle
+          by 88x13 CSS px, and a tap on the middle of that subtitle hit the pill.
+          It only floats where there is room for it to float. */}
+      <div className="relative z-20 mb-3 flex items-center justify-end gap-2 sm:absolute sm:right-12 sm:top-12 sm:mb-0">
         <ThemeSwitcher />
         <LocaleSwitcher />
       </div>
@@ -26,7 +29,7 @@ export default function LoginPage() {
             <BrandMark />
             <div>
               <p className="font-bold leading-none tracking-tight">devrimo</p>
-              <p className="mt-1 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground uppercase dark:text-white/55">{pick({ tr: "ODTÜ öğrenci asistanı", en: "AI assistant for METU" })}</p>
+              <p className="mt-1 text-[11px] font-semibold tracking-[0.16em] text-muted-foreground uppercase dark:text-white/55">{pick({ tr: "ODTÜ öğrenci asistanı", en: "AI assistant for METU" })}</p>
             </div>
           </div>
 

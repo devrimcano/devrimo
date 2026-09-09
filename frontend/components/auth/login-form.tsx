@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2Icon } from "lucide-react";
+import { EyeIcon, EyeOffIcon, Loader2Icon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { getSiteUrl } from "@/lib/env";
 import { Button } from "@/components/ui/button";
@@ -27,8 +27,12 @@ export function LoginForm() {
   );
   const [info, setInfo] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Typed on a phone, one-handed, from memory. Being able to look at what you
+  // typed is the difference between a second attempt and giving up.
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const errorId = "auth-form-error";
   const infoId = "auth-form-info";
+  const passwordHintId = "auth-form-password-hint";
 
   function authErrorMessage(caught: unknown) {
     const message = caught instanceof Error ? caught.message : pick({ tr: "Kimlik doğrulama başarısız oldu.", en: "Authentication failed." });
@@ -123,8 +127,12 @@ export function LoginForm() {
             <Input
               id="email"
               type="email"
+              inputMode="email"
               autoComplete="email"
+              autoCapitalize="none"
+              spellCheck={false}
               required
+              className="h-11"
               aria-invalid={Boolean(error)}
               aria-describedby={error ? errorId : info ? infoId : undefined}
               placeholder="isim@metu.edu.tr"
@@ -134,27 +142,48 @@ export function LoginForm() {
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="password">{pick({ tr: "Şifre", en: "Password" })}</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              required
-              minLength={6}
-              aria-invalid={Boolean(error)}
-              aria-describedby={error ? errorId : info ? infoId : undefined}
-              placeholder={pick({ tr: "En az 6 karakter", en: "At least 6 characters" })}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
+            <div className="relative">
+              <Input
+                id="password"
+                type={passwordVisible ? "text" : "password"}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                required
+                minLength={6}
+                className="h-11 pr-12"
+                aria-invalid={Boolean(error)}
+                // The rule is described, not placeheld: a placeholder disappears
+                // the moment the student starts typing, which is exactly when
+                // "at least six characters" becomes relevant.
+                aria-describedby={[error ? errorId : null, info ? infoId : null, mode === "signup" ? passwordHintId : null].filter(Boolean).join(" ") || undefined}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => setPasswordVisible((visible) => !visible)}
+                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring absolute right-1 top-1/2 grid size-11 -translate-y-1/2 place-items-center rounded-full focus-visible:ring-2 focus-visible:outline-none"
+                aria-label={passwordVisible
+                  ? pick({ tr: "Şifreyi gizle", en: "Hide password" })
+                  : pick({ tr: "Şifreyi göster", en: "Show password" })}
+                aria-pressed={passwordVisible}
+              >
+                {passwordVisible ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
+              </button>
+            </div>
+            {mode === "signup" ? (
+              <p id={passwordHintId} className="text-muted-foreground text-xs">
+                {pick({ tr: "En az 6 karakter.", en: "At least 6 characters." })}
+              </p>
+            ) : null}
           </div>
           {error ? <p id={errorId} role="alert" className="break-words rounded-xl border border-destructive/35 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">{error}</p> : null}
           {info ? <p id={infoId} role="status" aria-live="polite" className="break-words rounded-xl bg-accent px-3 py-2.5 text-sm leading-5 text-accent-foreground">{info}</p> : null}
-          <Button type="submit" disabled={pending} className="h-10 w-full shadow-sm">
+          <Button type="submit" disabled={pending} className="h-11 w-full shadow-sm">
             {pending ? <Loader2Icon className="animate-spin" /> : null}
             {mode === "login" ? pick({ tr: "Giriş yap", en: "Sign in" }) : pick({ tr: "Hesap oluştur", en: "Create account" })}
           </Button>
         </form>
-        <p className="mt-4 text-center text-sm text-muted-foreground">
+        <p className="mt-4 text-center text-sm text-muted-foreground [&>button]:min-h-11 [&>button]:px-1 [&>button]:py-2">
           {mode === "login" ? pick({ tr: "Henüz hesabın yok mu?", en: "New to Devrimo?" }) : pick({ tr: "Zaten hesabın var mı?", en: "Already have an account?" })}{" "}
           <button
             type="button"
