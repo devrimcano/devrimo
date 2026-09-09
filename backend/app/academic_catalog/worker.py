@@ -57,18 +57,29 @@ class CatalogPassResult(int):
         outcome: str = "idle",
         job_id: UUID | None = None,
         error_code: str | None = None,
+        error_detail: str | None = None,
         scheduled_count: int = 0,
     ):
         value = super().__new__(cls, count)
         value.outcome = outcome
         value.job_id = str(job_id) if job_id is not None else None
         value.error_code = error_code
+        value.error_detail = error_detail
         value.scheduled_count = scheduled_count
         return value
 
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _safe_error_detail(message: str | None) -> str | None:
+    if not message:
+        return None
+    value = str(message).strip()
+    if not value:
+        return None
+    return value[:512]
 
 
 async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token: UUID | None = None) -> None:
@@ -393,12 +404,20 @@ async def run_once() -> CatalogPassResult:
         return CatalogPassResult(0, outcome="idle", scheduled_count=scheduled_count)
     selected = await _account(job.organization_id)
     if selected is None:
-        await _save(job.id, job.lease_token, status="queued", lease_until=None, error_code="no_eligible_source_account")
+        await _save(
+            job.id,
+            job.lease_token,
+            status="queued",
+            lease_until=None,
+            error_code="no_eligible_source_account",
+            error_detail=None,
+        )
         return CatalogPassResult(
             0,
             outcome="deferred",
             job_id=job.id,
             error_code="no_eligible_source_account",
+            error_detail="No eligible source account was available.",
             scheduled_count=scheduled_count,
         )
     user_id, secret = selected
@@ -408,7 +427,14 @@ async def run_once() -> CatalogPassResult:
         plan_persisted = isinstance(stored_steps, list) and bool(stored_steps)
         steps = stored_steps if plan_persisted else initial_steps(job)
     except ValueError:
-        await _save(job.id, job.lease_token, status="failed", lease_until=None, error_code="invalid_import_scope")
+        await _save(
+            job.id,
+            job.lease_token,
+            status="failed",
+            lease_until=None,
+            error_code="invalid_import_scope",
+            error_detail=None,
+        )
         return CatalogPassResult(
             0,
             outcome="failed",
@@ -436,6 +462,7 @@ async def run_once() -> CatalogPassResult:
             job.lease_token,
             checkpoint={"steps": steps, "offset": offset},
             error_code=None,
+            error_detail=None,
             attempts=0,
         )
         retry_pending = False
@@ -444,12 +471,20 @@ async def run_once() -> CatalogPassResult:
     async with engine.connect() as lock:
         acquired = await lock.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key})
         if not acquired:
-            await _save(job.id, job.lease_token, status="queued", lease_until=None, error_code="source_account_busy")
+            await _save(
+                job.id,
+                job.lease_token,
+                status="queued",
+                lease_until=None,
+                error_code="source_account_busy",
+                error_detail=None,
+            )
             return CatalogPassResult(
                 0,
                 outcome="deferred",
                 job_id=job.id,
                 error_code="source_account_busy",
+                error_detail="Source account lock is busy; retrying later.",
                 scheduled_count=scheduled_count,
             )
         source = None
@@ -483,6 +518,7 @@ async def run_once() -> CatalogPassResult:
                         job.lease_token,
                         checkpoint={"steps": steps, "offset": offset},
                         error_code=None,
+                        error_detail=None,
                         attempts=0,
                     )
                     retry_pending = False
@@ -493,6 +529,7 @@ async def run_once() -> CatalogPassResult:
                         offset,
                         clear_retry_at=retry_pending,
                         error_code=None,
+                        error_detail=None,
                         attempts=0,
                     )
                     retry_pending = False
@@ -502,6 +539,7 @@ async def run_once() -> CatalogPassResult:
                 job.lease_token,
                 offset,
                 clear_retry_at=retry_pending,
+                error_detail=None,
                 status="completed" if done else "queued",
                 lease_until=None,
                 completed_at=datetime.now(UTC) if done else None,
@@ -529,12 +567,14 @@ async def run_once() -> CatalogPassResult:
                 status="queued",
                 lease_until=None,
                 error_code=str(exc),
+                error_detail=_safe_error_detail(str(exc)),
             )
             return CatalogPassResult(
                 fetched,
                 outcome="deferred",
                 job_id=job.id,
                 error_code=str(exc),
+                error_detail=_safe_error_detail(str(exc)),
                 scheduled_count=scheduled_count,
             )
         except Exception as exc:
@@ -554,6 +594,7 @@ async def run_once() -> CatalogPassResult:
             auth = type(exc).__name__ == "SAISAuthError"
             retry_at = (datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()
             error_code = "source_authentication_failed" if auth else type(exc).__name__
+            error_detail = None if auth else _safe_error_detail(str(exc))
             await _save_offset(
                 job.id,
                 job.lease_token,
@@ -563,6 +604,7 @@ async def run_once() -> CatalogPassResult:
                 attempts=attempts,
                 lease_until=None,
                 error_code=error_code,
+                error_detail=error_detail,
             )
             logger.warning("catalog_import_failed", job_id=str(job.id), error_type=type(exc).__name__)
             return CatalogPassResult(
@@ -570,6 +612,7 @@ async def run_once() -> CatalogPassResult:
                 outcome="failed",
                 job_id=job.id,
                 error_code=error_code,
+                error_detail=error_detail,
                 scheduled_count=scheduled_count,
             )
         finally:

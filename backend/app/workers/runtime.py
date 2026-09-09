@@ -131,6 +131,9 @@ async def _run_pass(kind: str, *, attempt: int, stop_event: asyncio.Event | None
             error_code = getattr(result, "error_code", None)
             if error_code:
                 details["error_code"] = str(error_code)[:128]
+            error_detail = getattr(result, "error_detail", None)
+            if error_detail:
+                details["error_detail"] = str(error_detail)[:1024]
             if pass_outcome in {"deferred", "lease_lost"}:
                 observation.expected_failure(str(error_code or pass_outcome)[:128], **details)
             elif pass_outcome == "failed":

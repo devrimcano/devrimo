@@ -257,6 +257,45 @@ def test_catalog_pass_result_keeps_the_legacy_integer_contract():
     assert result.error_code == "daily_http_budget_exhausted"
 
 
+async def test_catalog_import_failed_job_stores_value_error_detail(monkeypatch):
+    from app.academic_catalog.service import enqueue_import
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    class Source:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, _tool, _values):
+            raise ValueError("Bad response payload from source")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        job = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        job_id = job.id
+
+    result = await worker.run_once()
+
+    assert result.outcome == "failed"
+    assert result.error_code == "ValueError"
+    assert result.error_detail == "Bad response payload from source"
+
+    async with SessionLocal() as db:
+        updated = await db.get(CatalogImportJob, job_id)
+        assert updated.error_code == "ValueError"
+        assert updated.error_detail == "Bad response payload from source"
+
+
 def test_serialize_import_job_uses_scalar_cursor_and_compact_checkpoint():
     from app.academic_catalog.service import serialize_import_job
 

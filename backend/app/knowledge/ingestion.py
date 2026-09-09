@@ -251,8 +251,11 @@ async def _load_records(source: CampusSource, revision: CampusSourceRevision) ->
     # rows, before chunking so differing copies cannot leave mixed chunk sets.
     unique_records = {record.external_id: record for record in parsed}
     records = chunk_records(list(unique_records.values()), config)
+    # No records from a successful parse means "nothing to ingest".
+    # Preserve existing source rows and keep the job in a completed state unless
+    # the source explicitly opts into empty replacement.
     if not records and not revision.config.get("allow_empty", False):
-        raise ValueError("Adapter returned no records; existing records were preserved")
+        return None, headers
     return records, headers
 
 

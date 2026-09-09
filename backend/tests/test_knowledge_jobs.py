@@ -240,6 +240,39 @@ async def test_current_owner_failure_schedules_retry_and_clears_lease(monkeypatc
             await renew_lease(db, lease)
 
 
+async def test_empty_parsed_records_do_not_overwrite_existing_records(monkeypatch):
+    async def load(_source, _revision):
+        return [], {"etag": "empty-feed"}
+
+    monkeypatch.setattr("app.knowledge.ingestion._load_records", load)
+    async with SessionLocal() as db:
+        source, revision, job = await _source_and_job(
+            db, kind="curated", config={"records": [{"external_id": "menu"}]}
+        )
+        row = CampusKnowledgeRecord(
+            source_id=source.id,
+            source_revision_id=revision.id,
+            external_id="menu",
+            record_type="announcement",
+            title="Existing",
+            content="Still active",
+            content_hash="a" * 64,
+            is_current=True,
+            authority=source.authority,
+            last_seen_at=datetime.now(UTC),
+        )
+        db.add(row)
+        await db.commit()
+        await process_job(db, job)
+        await db.refresh(row)
+        await db.refresh(source)
+        await db.refresh(job)
+        assert job.status == "completed"
+        assert row.is_current
+        assert row.removed_at is None
+        assert source.last_error is None
+
+
 @pytest.mark.parametrize("kind", ["ingest", "not_modified"])
 async def test_revision_change_during_io_cannot_save_or_overwrite_source(monkeypatch, kind):
     async with SessionLocal() as db:
