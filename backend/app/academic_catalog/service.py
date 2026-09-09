@@ -1931,6 +1931,13 @@ async def enqueue_import(
     if any(not _SEVEN_DIGIT.fullmatch(code) for code in codes):
         raise ValueError("Import course codes require full seven-digit METU codes")
     dedup_key = import_dedup_key(organization_id, term, department, codes)
+    if not department and not codes:
+        # Directory-only maintenance and a full university import have
+        # different work to do and must never reuse each other's job.
+        dedup_key = _digest({
+            "scope": dedup_key,
+            "discovery_only": bool((payload or {}).get("discovery_only")),
+        })
     existing = await db.scalar(
         select(CatalogImportJob).where(
             CatalogImportJob.organization_id == organization_id,

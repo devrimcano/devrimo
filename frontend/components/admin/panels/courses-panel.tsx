@@ -663,8 +663,8 @@ export function CoursesPanel({
       data: payload.data,
       reason: payload.reason,
     }),
-    onSuccess: (draft) => {
-      toast.success(pick({ tr: `${draft.course_code} için taslak oluşturuldu.`, en: `Draft created for ${draft.course_code}.` }));
+    onSuccess: (_draft, payload) => {
+      toast.success(pick({ tr: `${payload.course_code} için taslak oluşturuldu.`, en: `Draft created for ${payload.course_code}.` }));
       setCreateOpen(false);
       refresh();
     },
@@ -725,6 +725,7 @@ export function CoursesPanel({
         {pick({ tr: "Yenile", en: "Refresh" })}
       </Button>
       {canWrite ? <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}><UploadCloudIcon />{pick({ tr: "Yenileme iste", en: "Request refresh" })}</Button> : null}
+      {canWrite ? <Button size="sm" disabled={importJob.isPending || !term.trim()} onClick={() => importJob.mutate({ department: "", course_codes: [], reason: `Import all departments for term ${term}` })}>{importJob.isPending ? <Loader2Icon className="animate-spin" /> : <UploadCloudIcon />}{pick({ tr: "Tüm bölümleri içe aktar", en: "Import all departments" })}</Button> : null}
       {canWrite ? <Button size="sm" onClick={() => setCreateOpen(true)}><BookOpenIcon />{pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button> : null}
     </div>
   );
@@ -732,6 +733,7 @@ export function CoursesPanel({
   return (
     <>
       <PanelHeader title={title} description={description} actions={actions} />
+      {canWrite ? <p className="text-sm text-muted-foreground">{pick({ tr: `${term} dönemi için tüm bölümlerin derslerini tek tıkla taslak olarak içe aktarın. İlerlemeyi Yenileme işleri sekmesinden izleyin; kaynak sınırlarına göre işlem birkaç gün sürebilir.`, en: `Import every department's courses for ${term} as drafts in one click. Track progress in Refresh jobs; source limits may spread the import over multiple days.` })}</p> : null}
       <div className="space-y-5">
         <SectionNav
           value={view}

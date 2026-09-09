@@ -82,6 +82,13 @@ term summaries in memory.
 
 ## Source traffic
 
+In **Admin → Courses**, choose the term and click **Import all departments**
+to queue a full university import without entering department or course codes.
+The job discovers departments, then course listings, details, prerequisites,
+replacements, and section restrictions. **Refresh jobs** shows its progress.
+Imported courses remain drafts until reviewed and published. Repeated clicks
+reuse an active full import; directory-only maintenance has a separate scope.
+
 The catalog worker reuses the vendored SAIS parser with a database admission
 gate before every HTTP request, including authentication and redirects.
 `CATALOG_WARM_DAILY_LIMIT` limits admitted attempts, not MCP tool invocations.
