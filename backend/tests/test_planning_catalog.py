@@ -35,3 +35,18 @@ def test_catalog_json_text_is_normalized_without_browser_parsing():
     assert sections[0]["meetings"] == [
         {"day": "Tue", "start_minute": 580, "duration_minutes": 110, "room": ""}
     ]
+
+
+def test_published_section_code_is_kept_as_the_section_identity():
+    sections = normalize_sections({
+        "sections": [{
+            "section_code": "31",
+            "meetings": [{"weekday": 0, "start_minute": 540, "end_minute": 590}],
+        }],
+    })
+    assert sections == [{
+        "section": "31",
+        "instructor": "",
+        "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 50, "room": ""}],
+        "constraint": "",
+    }]

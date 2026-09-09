@@ -34,12 +34,16 @@ class AdminPermission(StrEnum):
     knowledge_read = "knowledge:read"
     knowledge_write = "knowledge:write"
     planning_write = "planning:write"
+    catalog_read = "catalog:read"
+    catalog_write = "catalog:write"
+    catalog_publish = "catalog:publish"
     groups_write = "groups:write"
 
 
 ROLE_PERMISSIONS = {
     AdminRole.super_admin: set(AdminPermission),
     AdminRole.operator: {
+        AdminPermission.catalog_read,
         AdminPermission.researchers_read,
         AdminPermission.overview_read,
         AdminPermission.users_read,
@@ -56,6 +60,9 @@ ROLE_PERMISSIONS = {
         AdminPermission.knowledge_read,
     },
     AdminRole.campus_admin: {
+        AdminPermission.catalog_read,
+        AdminPermission.catalog_write,
+        AdminPermission.catalog_publish,
         AdminPermission.researchers_read,
         AdminPermission.overview_read,
         AdminPermission.users_read,

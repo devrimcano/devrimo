@@ -5,7 +5,10 @@ WRITE_TABLES = {
     "embedding": {"knowledge_index_vectors", "knowledge_index_jobs"},
     "researcher": {"researchers", "researcher_sections", "researcher_import_runs", "researcher_import_items"},
     "directory": {"account_directory", "organizations"},
-    "catalog": {"schedule_data_cache"},
+    "catalog": {
+        "schedule_data_cache", "catalog_courses", "catalog_terms", "catalog_drafts",
+        "catalog_source_observations", "catalog_import_jobs", "catalog_http_budgets",
+    },
     "assistant": {"assistant_run_events", "workspace_memory_mutations", "agents", "chat_sessions", "agent_tool_audit"},
     "planning": {"student_timetables", "timetable_revisions"},
     "student": {

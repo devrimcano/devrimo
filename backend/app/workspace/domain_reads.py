@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 from app.admin.directory import active_account
 from app.campus import departments as department_directory
-from app.campus.course_info import call_course_info, catalog_session
+from app.campus.course_info import call_course_info, catalog_session, department_options
 from app.db.session import SessionLocal
 from app.knowledge.retrieval import SearchFilters, search_knowledge
 from app.knowledge.retrieval import read_campus_page as read_indexed_page
@@ -16,6 +16,7 @@ from app.planning.catalog_service import (
     course_grade,
     expand_course_code,
     load_student_profile,
+    published_catalog_reads_enabled,
     section_verdict,
 )
 from app.planning.groups import get_course_group as resolve_course_group
@@ -75,6 +76,32 @@ def build_domain_reads(user_id: UUID) -> dict:
 
     async def lookup_department(value: str) -> dict:
         """Resolve a METU department code, abbreviation, name or course code to one department."""
+        if published_catalog_reads_enabled():
+            async with SessionLocal() as db:
+                payload = await call_course_info(db, user_id, "search_departments", {"query": value})
+            options = department_options(payload)
+            wanted = str(value or "").strip().casefold()
+            exact = [
+                option
+                for option in options
+                if str(option.get("code") or "").casefold() == wanted
+                or str(option.get("name") or "").strip().casefold() == wanted
+            ]
+            selected = exact[0] if len(exact) == 1 else options[0] if len(options) == 1 else None
+            if selected is None:
+                return {
+                    "status": "ambiguous" if options else "not_found",
+                    "query": value,
+                    "options": options,
+                }
+            found = department_directory.by_code(str(selected.get("code") or ""))
+            return {
+                "code": str(selected.get("code") or ""),
+                "abbreviation": found.abbreviation if found else str(selected.get("abbreviation") or ""),
+                "name_en": found.name_en if found else str(selected.get("name") or ""),
+                "name_tr": found.name_tr if found else str(selected.get("name") or ""),
+                "status": "verified",
+            }
         found = department_directory.resolve(value)
         if found is None:
             return {"status": "not_found", "query": value}
@@ -160,6 +187,9 @@ def build_domain_reads(user_id: UUID) -> dict:
             "reason": reason,
             "constraints": rows,
             "constraints_verified": eligible is not None,
+            "eligibility_status": (
+                "eligible" if eligible is True else "ineligible" if eligible is False else "unknown"
+            ),
         }
 
     return {

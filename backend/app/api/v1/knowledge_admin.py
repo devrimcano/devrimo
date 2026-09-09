@@ -175,6 +175,7 @@ class RuleIn(BaseModel):
 
 
 class AcademicCatalogIn(BaseModel):
+    term: str | None = Field(default=None, min_length=3, max_length=32)
     offerings: list[OfferingIn] = Field(default_factory=list, max_length=5000)
     rules: list[RuleIn] = Field(default_factory=list, max_length=5000)
     reason: str = Field(min_length=3, max_length=1000)
@@ -906,6 +907,10 @@ async def replace_academic_catalog(
     principal: AdminPrincipal = Depends(require(AdminPermission.planning_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    from app.config import get_settings
+
+    if get_settings().academic_catalog_reads_enabled or get_settings().academic_catalog_ingestion_enabled:
+        return await _import_reviewed_catalog(body, principal, db)
     offerings_written = 0
     for item in body.offerings:
         code = "".join(item.course_code.upper().split())
@@ -954,6 +959,56 @@ async def replace_academic_catalog(
         after={"offerings": offerings_written, "rules": len(body.rules)},
     )
     return {"offerings": offerings_written, "rules": len(body.rules)}
+
+
+async def _import_reviewed_catalog(body: AcademicCatalogIn, principal: AdminPrincipal, db: AsyncSession) -> dict:
+    """Compatibility import: explicit term-scoped drafts, never planner-only writes."""
+    from app.academic_catalog import service as catalog_service
+    from app.planning.catalog import normalize_sections
+
+    grouped: dict[tuple[str, str], dict] = {}
+    days = {day: index for index, day in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))}
+    for offering in body.offerings:
+        code = "".join(offering.course_code.upper().split())
+        row = grouped.setdefault((offering.term, code), {
+            "title": offering.title, "local_credits": offering.credits,
+            "department": offering.department or code[:3], "sections": [],
+        })
+        normalized = normalize_sections({"sections": [{"section": offering.section, "schedule": offering.schedule}]})
+        meetings = normalized[0]["meetings"] if normalized else []
+        row["sections"].append({
+            "section_code": offering.section,
+            "meetings_status": "unknown",  # Imported source evidence still needs review.
+            "meetings": [{"weekday": days[meeting["day"]], "start_minute": meeting["start_minute"],
+                          "end_minute": meeting["start_minute"] + meeting["duration_minutes"],
+                          "room": meeting["room"], "status": "scheduled"} for meeting in meetings],
+        })
+    for rule in body.rules:
+        code = "".join(rule.course_code.upper().split())
+        keys = [key for key in grouped if key[1] == code]
+        if not keys:
+            if not body.term:
+                raise HTTPException(422, "A term is required for rules without accompanying offerings")
+            keys = [(body.term, code)]
+        for key in keys:
+            data = grouped.setdefault(key, {})
+            # The legacy arbitrary boolean expression is retained for review.
+            # It cannot be silently flattened into different prerequisite logic.
+            data["legacy_prerequisites"] = rule.prerequisites
+            data["replacements"] = [{"relationship_type": "exclusion", "related_course_code": excluded,
+                                      "verified": False} for excluded in rule.exclusions]
+            data["component_status"] = {"prerequisites": {"verified": False, "fresh": False,
+                                                          "source_status": "legacy_import_needs_review"}}
+    drafts = []
+    for (term, code), data in grouped.items():
+        try:
+            draft = await catalog_service.create_draft(db, _org(principal), term, code, data=data,
+                                                       reason=body.reason, created_by=principal.user.id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        drafts.append(str(draft.id))
+    await db.commit()
+    return {"offerings": len(body.offerings), "rules": len(body.rules), "draft_ids": drafts, "published": False}
 
 
 @router.get("/course-groups")

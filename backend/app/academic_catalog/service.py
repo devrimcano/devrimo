@@ -1,0 +1,4201 @@
+"""Application services for the reviewed academic catalog.
+
+The module owns three boundaries:
+
+* source observations are retained as evidence and may only update drafts;
+* administrators publish immutable revisions through an active release pointer;
+* student and agent reads resolve one published release and never call METU.
+
+The functions intentionally accept an ``AsyncSession`` rather than hiding one
+inside the service.  Import workers, API requests and tests can therefore
+choose their transaction boundary and a caller can pin a release for a whole
+planning request.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Any, Iterable
+from uuid import UUID, uuid4
+
+from fastapi import HTTPException, status
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
+
+from app.academic_catalog.models import (
+    CatalogAdminOverride,
+    CatalogCourse,
+    CatalogCourseReplacement,
+    CatalogCourseRevision,
+    CatalogDraft,
+    CatalogImportJob,
+    CatalogInstructor,
+    CatalogMeeting,
+    CatalogPrerequisiteGroup,
+    CatalogPrerequisiteRequirement,
+    CatalogPublicationOperation,
+    CatalogRelease,
+    CatalogReleaseItem,
+    CatalogRestriction,
+    CatalogSection,
+    CatalogSectionInstructor,
+    CatalogSourceObservation,
+    CatalogTerm,
+    CatalogTermActiveRelease,
+)
+from app.academic_catalog.schemas import normalize_course_code, normalize_term
+
+
+CATALOG_TOOLS = frozenset(
+    {
+        "get_departments_and_semesters",
+        "search_departments",
+        "list_program_courses",
+        "get_course_info",
+        "get_section_constraints",
+        "get_course_prerequisites",
+        "get_course_replacements",
+        "get_thesis_courses",
+    }
+)
+
+COMPONENTS = (
+    "directory",
+    "listing",
+    "details",
+    "sections",
+    "constraints",
+    "prerequisites",
+    "replacements",
+)
+
+# Registrar data changes at different rates.  These limits are read-time
+# policy, so an immutable release retains its evidence while consumers stop
+# calling an old observation fresh after its component window expires.
+_COMPONENT_MAX_AGE_SECONDS = {
+    "directory": 30 * 24 * 60 * 60,
+    "listing": 30 * 24 * 60 * 60,
+    "details": 7 * 24 * 60 * 60,
+    "sections": 7 * 24 * 60 * 60,
+    "constraints": 7 * 24 * 60 * 60,
+    "prerequisites": 30 * 24 * 60 * 60,
+    "replacements": 30 * 24 * 60 * 60,
+}
+
+_SEVEN_DIGIT = re.compile(r"^\d{7}$")
+_ERROR_PREFIXES = ("Error from MCP tool ", "MCP tool ", "Error: ")
+_DAY_ALIASES = {
+    "mon": 0,
+    "monday": 0,
+    "pazartesi": 0,
+    "tue": 1,
+    "tuesday": 1,
+    "sali": 1,
+    "salı": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "carsamba": 2,
+    "çarşamba": 2,
+    "thu": 3,
+    "thursday": 3,
+    "persembe": 3,
+    "perşembe": 3,
+    "fri": 4,
+    "friday": 4,
+    "cuma": 4,
+    "pzt": 0, "sal": 1, "çar": 2, "car": 2, "per": 3, "cum": 4,
+    "sat": 5, "saturday": 5, "cumartesi": 5, "cmt": 5,
+    "sun": 6, "sunday": 6, "pazar": 6, "paz": 6,
+}
+
+
+class CatalogUnavailable(HTTPException):
+    """Raised when no published release can satisfy a catalog read."""
+
+    def __init__(self, term: str | None = None):
+        detail = {
+            "code": "catalog_unavailable",
+            "message": "No published academic catalog is available for this term.",
+            "term": term,
+        }
+        super().__init__(status.HTTP_503_SERVICE_UNAVAILABLE, detail)
+
+
+class CatalogConflict(HTTPException):
+    """Raised when an optimistic release or draft check fails."""
+
+    def __init__(self, message: str, **extra: Any):
+        detail: dict[str, Any] = {"code": "catalog_conflict", "message": message}
+        detail.update(extra)
+        super().__init__(status.HTTP_409_CONFLICT, detail)
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _iso(value: datetime | None) -> str | None:
+    value = _utc(value)
+    return value.isoformat() if value else None
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _utc(value)
+    if value in (None, ""):
+        return None
+    try:
+        return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert source/Pydantic values into JSONB-safe plain data."""
+
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _digest(value: Any) -> str:
+    encoded = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).casefold().translate(str.maketrans({"ı": "i", "ş": "s", "ğ": "g", "ü": "u", "ö": "o", "ç": "c"})))
+
+
+def _field(record: dict[str, Any], *names: str) -> Any:
+    wanted = {_key(name) for name in names}
+    for name, value in record.items():
+        if _key(name) in wanted:
+            return value
+    return None
+
+
+def _decode_payload(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return _decode_payload(json.loads(stripped))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return value
+        return value
+    if isinstance(value, list):
+        return [_decode_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _decode_payload(item) for key, item in value.items()}
+    return value
+
+
+def _scope(values: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+    term = _field(values, "term", "semester", "semester_code", "academic_term")
+    department = _field(values, "department", "department_code", "dept", "program")
+    course = _field(values, "course", "course_code", "course_id")
+    section = _field(values, "section", "section_code", "section_number")
+    normalized_course: str | None = None
+    if course not in (None, ""):
+        normalized_course = normalize_course_code(str(course))
+    return (
+        normalize_term(str(term)) if term not in (None, "") else None,
+        str(department).strip() if department not in (None, "") else None,
+        normalized_course,
+        str(section).strip() if section not in (None, "") else None,
+    )
+
+
+def _rows(value: Any, names: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """Find labelled rows without treating arbitrary dictionaries as tables."""
+
+    value = _decode_payload(value)
+    wanted = {_key(name) for name in names}
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    for name, child in value.items():
+        if _key(name) in wanted and isinstance(child, list):
+            return [item for item in child if isinstance(item, dict)]
+    for name in ("result", "value", "data", "items", "courses", "sections", "constraints", "prerequisites", "replacements"):
+        child = _field(value, name)
+        if isinstance(child, list):
+            return [item for item in child if isinstance(item, dict)]
+    if any(_field(value, name) is not None for name in ("course_code", "code", "section", "title")):
+        return [value]
+    return []
+
+
+def _course_code(record: dict[str, Any], fallback: str | None = None) -> str | None:
+    candidate = _field(record, "course_code", "prerequisite_course_code", "replaced_course_code", "related_course_code", "course", "code", "id")
+    if candidate in (None, ""):
+        candidate = fallback
+    if candidate in (None, ""):
+        return None
+    value = normalize_course_code(str(candidate))
+    return value if _SEVEN_DIGIT.fullmatch(value) else None
+
+
+def _title(record: dict[str, Any]) -> str | None:
+    value = _field(record, "title", "course_title", "name", "course_name")
+    return str(value).strip() if value not in (None, "") else None
+
+
+def _number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).replace(",", ".").strip())
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value: Any) -> int | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _boolish(value: Any) -> bool | None:
+    """Parse source booleans while preserving unknown values as ``None``."""
+
+    if isinstance(value, bool):
+        return value
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return None
+    folded = _key(value)
+    if folded in {"true", "yes", "y", "1", "available", "mevcut", "var"}:
+        return True
+    if folded in {"false", "no", "n", "0", "unavailable", "yok", "none"}:
+        return False
+    return None
+
+
+def _minutes(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = int(value)
+        if 0 <= number <= 24:
+            return number * 60
+        return number if 0 <= number <= 1440 else None
+    match = re.search(r"(\d{1,2})\s*[:.]\s*(\d{2})", str(value))
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    return hour * 60 + minute if 0 <= hour <= 23 and 0 <= minute <= 59 else None
+
+
+def _weekday(value: Any) -> int | None:
+    if isinstance(value, int) and 0 <= value <= 6:
+        return value
+    if isinstance(value, str) and value.strip() in {str(day) for day in range(7)}:
+        return int(value.strip())
+    folded = _key(value)
+    if folded in {_key(alias) for alias in _DAY_ALIASES}:
+        return next(day for alias, day in _DAY_ALIASES.items() if _key(alias) == folded)
+    for alias, day in _DAY_ALIASES.items():
+        if _key(alias) == folded or _key(alias) in folded:
+            return day
+    return None
+
+
+def _meeting(record: dict[str, Any]) -> dict[str, Any]:
+    day_value = _field(record, "weekday", "day", "week_day", "gun")
+    start_value = _field(record, "start_minute", "start", "start_time", "begin", "baslangic")
+    end_value = _field(record, "end_minute", "end", "end_time", "finish", "bitis")
+    schedule = _field(record, "time", "hours", "schedule", "meeting", "saat")
+    if (start_value is None or end_value is None) and schedule not in (None, ""):
+        match = re.search(r"(\d{1,2}[:.]\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}[:.]\d{2})", str(schedule))
+        if match:
+            start_value, end_value = match.groups()
+    weekday = _weekday(day_value)
+    start = _minutes(start_value)
+    end = _minutes(end_value)
+    raw_label = str(_field(record, "raw_label", "label", "schedule", "time") or "").strip() or None
+    room = _field(record, "room", "classroom", "location", "derslik")
+    status_value = str(_field(record, "status", "meeting_status") or "").strip().lower()
+    if status_value not in {"scheduled", "untimed", "unpublished", "invalid", "unknown"}:
+        status_value = "scheduled" if weekday is not None and start is not None and end is not None and end > start else "invalid"
+    if status_value == "scheduled" and (weekday is None or start is None or end is None or end <= start):
+        status_value = "invalid"
+    return {
+        "weekday": weekday,
+        "start_minute": start,
+        "end_minute": end,
+        "room": str(room).strip() if room not in (None, "") else None,
+        "status": status_value,
+        "raw_label": raw_label,
+    }
+
+
+def _meeting_rows(record: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    marker = object()
+    raw = marker
+    for name in ("meetings", "meeting", "schedule", "hours", "times"):
+        value = _field(record, name)
+        if value is not None:
+            raw = value
+            break
+    if raw is marker:
+        return [], False
+    raw = _decode_payload(raw)
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return [], False
+    return [_meeting(item) for item in raw if isinstance(item, dict)], True
+
+
+def _explicit_untimed(record: dict[str, Any]) -> bool:
+    """Return whether a source row explicitly asserts that it has no time.
+
+    An empty meetings array is not enough to make that assertion: many source
+    responses omit schedule data when the request failed or when a section was
+    not included in the response.  Only the dedicated status fields can make
+    an empty schedule usable as an explicitly untimed section.
+    """
+
+    marker = _field(
+        record,
+        "meetings_status",
+        "meeting_status",
+        "timing_status",
+        "schedule_status",
+    )
+    return _key(marker) in {"untimed", "explicitlyuntimed"}
+
+
+def _section_meetings_status(
+    record: dict[str, Any], meetings: list[dict[str, Any]], meeting_field_present: bool
+) -> str:
+    """Normalize section timing evidence without inferring it from absence.
+
+    ``untimed`` is an explicit positive assertion.  If it appears alongside
+    any meeting row, the source is contradictory and therefore invalid; this
+    keeps malformed times from becoming planner-usable through a status flag.
+    """
+
+    if _explicit_untimed(record):
+        return "invalid" if meetings else "untimed"
+    if meeting_field_present and meetings:
+        return "verified" if all(row["status"] == "scheduled" for row in meetings) else "invalid"
+    return "unknown"
+
+
+def _instructor_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    value = _field(record, "instructors", "instructor", "lecturer", "teacher")
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        names = [item.strip() for item in re.split(r"[,;/|]", value) if item.strip()]
+        return [{"source_name": name} for name in names]
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, str):
+                rows.append({"source_name": item.strip()})
+            elif isinstance(item, dict):
+                name = _field(item, "source_name", "name", "instructor", "lecturer", "teacher")
+                if name not in (None, ""):
+                    rows.append(
+                        {
+                            "source_name": str(name).strip(),
+                            "position": _field(item, "position", "title", "academic_title"),
+                            "researcher_id": _int(_field(item, "researcher_id", "researcher")),
+                        }
+                    )
+        return rows
+    return []
+
+
+def _restriction_rows(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    value = _decode_payload(value)
+    marker = object()
+    raw: Any = marker
+    if isinstance(value, dict):
+        for name in ("constraints", "restrictions", "eligibility", "rows", "items"):
+            candidate = _field(value, name)
+            if candidate is not None:
+                raw = candidate
+                break
+    elif isinstance(value, list):
+        raw = value
+    if raw is marker:
+        return [], False
+    if not isinstance(raw, list):
+        return [], False
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return [], False
+        if not any(_field(item, key) is not None for key in (
+            "given_dept", "given_department", "department", "kind", "type", "min_cgpa", "start_char",
+        )):
+            return [], False
+        for keys in (("min_cgpa", "gpa_min", "minimum_gpa", "min_gpa"),
+                     ("max_cgpa", "gpa_max", "maximum_gpa", "max_gpa"),
+                     ("min_year", "year_min", "minimum_year"), ("max_year", "year_max", "maximum_year")):
+            value = _field(item, *keys)
+            if value not in (None, "") and _number(value) is None:
+                return [], False
+        row = {
+            "restriction_group": str(_field(item, "restriction_group", "group", "group_no", "set_no") or "1"),
+            "row_index": _int(_field(item, "row_index", "index", "row_no")) or index,
+            "kind": str(_field(item, "kind", "type", "constraint_type") or "eligibility"),
+            "value_text": _field(item, "value_text", "value", "description"),
+            "value_numeric": _number(_field(item, "value_numeric", "value_number")),
+            "operator": _field(item, "operator", "op"),
+            "minimum_grade": _field(item, "minimum_grade", "prior_grade", "grade_min"),
+            "given_department": _field(item, "given_dept", "given_department", "department", "department_code", "dept"),
+            "start_char": _field(item, "start_char", "surname_start", "surname_from", "start_surname"),
+            "end_char": _field(item, "end_char", "surname_end", "surname_to", "end_surname"),
+            "min_cgpa": _number(_field(item, "min_cgpa", "gpa_min", "minimum_gpa", "min_gpa")),
+            "max_cgpa": _number(_field(item, "max_cgpa", "gpa_max", "maximum_gpa", "max_gpa")),
+            "min_year": _int(_field(item, "min_year", "year_min", "minimum_year")),
+            "max_year": _int(_field(item, "max_year", "year_max", "maximum_year")),
+            "start_grade": _field(item, "start_grade", "grade_from"),
+            "end_grade": _field(item, "end_grade", "grade_to"),
+            "prior_course_code": _course_code(item, None),
+            "program_code": _field(item, "program_code", "program"),
+            "curriculum_version": _field(item, "curriculum_version", "dept_version", "curriculum", "version"),
+            "raw_text": _field(item, "raw_text", "text", "description", "constraint"),
+            "verified": _field(item, "verified", "is_verified") is not False,
+            "status": str(_field(item, "status", "state") or ("unknown" if _field(item, "verified", "is_verified") is False else "verified")),
+        }
+        row["value_text"] = str(row["value_text"]).strip() if row["value_text"] not in (None, "") else None
+        rows.append(row)
+    return rows, True
+
+
+def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    value = _decode_payload(value)
+    raw: Any = None
+    if isinstance(value, dict):
+        raw = _field(value, "groups", "prerequisite_groups", "prerequisites", "requirements", "rows")
+    elif isinstance(value, list):
+        raw = value
+    if raw is None:
+        return [], False
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return [], False
+    groups: dict[tuple[int, str | None, str | None], dict[str, Any]] = {}
+    malformed = False
+
+    def has_course_identity(item: dict[str, Any]) -> bool:
+        return any(
+            _field(item, name) not in (None, "")
+            for name in (
+                "course_code",
+                "prerequisite_course_code",
+                "replaced_course_code",
+                "related_course_code",
+                "course",
+                "code",
+                "id",
+            )
+        )
+
+    def has_position(item: dict[str, Any]) -> bool:
+        return _field(item, "position", "order", "index") not in (None, "")
+
+    def valid_position(item: dict[str, Any]) -> bool:
+        value = _field(item, "position", "order", "index")
+        return value in (None, "") or _int(value) is not None
+
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            malformed = True
+            continue
+        group_value = _field(item, "group_no", "set_no", "set", "group")
+        group_no = _int(group_value) if group_value not in (None, "") else 1
+        if group_no is None or group_no < 1:
+            malformed = True
+            group_no = 1
+        program = _field(item, "program_code", "program")
+        curriculum = _field(item, "curriculum_version", "dept_version", "curriculum", "version")
+        key = (group_no, str(program) if program not in (None, "") else None, str(curriculum) if curriculum not in (None, "") else None)
+        logic_value = _field(item, "logic", "operator")
+        logic = str(logic_value or "AND").upper()
+        if logic not in {"AND", "OR"}:
+            malformed = True
+            logic = "AND"
+        applicability = _field(item, "applicability", "applies_to")
+        if applicability not in (None, "") and not isinstance(applicability, dict):
+            malformed = True
+            applicability = {}
+        group = groups.setdefault(
+            key,
+            {
+                "group_no": group_no,
+                "logic": logic,
+                "program_code": key[1],
+                "curriculum_version": key[2],
+                "applicability": applicability or {},
+                "verified": bool(_field(item, "verified", "is_verified") if _field(item, "verified", "is_verified") is not None else True),
+                "raw_text": _field(item, "raw_text", "text", "description"),
+                "requirements": [],
+            },
+        )
+        code = _course_code(item, None)
+        if has_course_identity(item) and code is None:
+            malformed = True
+        if not valid_position(item):
+            malformed = True
+        if code:
+            group["requirements"].append(
+                {
+                    "course_code": code,
+                    "minimum_grade": _field(item, "minimum_grade", "grade_min", "min_grade", "required_grade"),
+                    "requirement_type": str(_field(item, "requirement_type", "type") or "course"),
+                    "position": _int(_field(item, "position", "order", "index")) or index,
+                    "raw_text": _field(item, "raw_text", "text", "description"),
+                }
+            )
+        nested = _field(item, "requirements", "courses", "items")
+        if nested is not None and not isinstance(nested, list):
+            malformed = True
+        elif isinstance(nested, list):
+            if not nested and code is None:
+                malformed = True
+            for position, requirement in enumerate(nested):
+                if not isinstance(requirement, dict):
+                    malformed = True
+                    continue
+                if not has_course_identity(requirement):
+                    malformed = True
+                nested_code = _course_code(requirement, None)
+                if nested_code is None:
+                    malformed = True
+                if not valid_position(requirement):
+                    malformed = True
+                if nested_code:
+                    group["requirements"].append(
+                        {
+                            "course_code": nested_code,
+                            "minimum_grade": _field(requirement, "minimum_grade", "grade_min", "min_grade", "required_grade"),
+                            "requirement_type": str(_field(requirement, "requirement_type", "type") or "course"),
+                            "position": _int(_field(requirement, "position", "order")) or position,
+                            "raw_text": _field(requirement, "raw_text", "text", "description"),
+                        }
+                    )
+    parsed = list(groups.values())
+    if raw and (malformed or not parsed or any(not group["requirements"] for group in parsed)):
+        return parsed, False
+    return parsed, True
+
+
+def _replacement_rows(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    value = _decode_payload(value)
+    raw: Any = _field(value, "replacements", "exclusions", "relationships") if isinstance(value, dict) else value
+    if raw is None:
+        return [], False
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return [], False
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str):
+            code = _course_code({"course_code": item})
+            if code:
+                rows.append({"relationship_type": "replacement", "related_course_code": code, "verified": True})
+            continue
+        if not isinstance(item, dict):
+            continue
+        code = _course_code(item, None)
+        if not code:
+            continue
+        rows.append(
+            {
+                "relationship_type": str(_field(item, "relationship_type", "type", "kind") or "replacement"),
+                "related_course_code": code,
+                "program_code": _field(item, "program_code", "program"),
+                "curriculum_version": _field(item, "curriculum_version", "dept_version", "curriculum", "version"),
+                "verified": bool(_field(item, "verified", "is_verified") if _field(item, "verified", "is_verified") is not None else True),
+                "raw_text": _field(item, "raw_text", "text", "description"),
+            }
+        )
+    return rows, not raw or len(rows) == len(raw)
+
+
+def _section_rows(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    payload = _decode_payload(value)
+    rows = _rows(payload, ("sections", "offerings", "sections_list"))
+    if not rows and isinstance(payload, dict) and _field(payload, "section", "section_code", "section_number") is not None:
+        rows = [payload]
+    found: list[dict[str, Any]] = []
+    for index, item in enumerate(rows):
+        code = _field(item, "section_code", "section_number", "section", "section_no", "sec")
+        section_code = str(code).strip() if code not in (None, "") else str(index + 1)
+        meetings, meeting_field_present = _meeting_rows(item)
+        instructors = _instructor_rows(item)
+        restrictions, restriction_field_present = _restriction_rows(item)
+        found.append(
+            {
+                "section_code": section_code,
+                "status": str(_field(item, "status", "state") or "listed"),
+                "notes": _field(item, "notes", "critical_info", "critical", "constraint", "comment"),
+                "syllabus_url": _field(item, "syllabus_url", "syllabus", "url"),
+                "syllabus_available": _boolish(
+                    _field(item, "syllabus_available", "syllabusAvailable", "has_syllabus", "syllabus_exists")
+                ),
+                "meetings_status": _section_meetings_status(item, meetings, meeting_field_present),
+                "meetings": meetings,
+                "instructors": instructors,
+                "restrictions": restrictions,
+                "restrictions_present": restriction_field_present,
+            }
+        )
+    field_present = isinstance(payload, dict) and any(isinstance(_field(payload, key), list) for key in ("sections", "offerings", "sections_list"))
+    return found, bool(rows) or field_present
+
+
+def _course_row_data(record: dict[str, Any], fallback_code: str | None, *, include_sections: bool = True) -> tuple[str | None, dict[str, Any]]:
+    code = _course_code(record, fallback_code)
+    data: dict[str, Any] = {}
+    title = _title(record)
+    if title is not None:
+        data["title"] = title
+    department = _field(record, "department", "department_code", "dept", "program")
+    if department not in (None, ""):
+        department_text = str(department).strip()
+        if re.fullmatch(r"\d{3}", department_text):
+            data["department"] = department_text
+        else:
+            data["department_name"] = department_text
+            if code:
+                data["department"] = code[:3]
+    credits = _number(_field(record, "local_credits", "credits", "credit", "local_credit", "hours"))
+    if credits is None and (credit_info := _field(record, "credit_info")):
+        match = re.match(r"^\s*(\d+(?:[.,]\d+)?)\s*(?:\(|$)", str(credit_info))
+        credits = _number(match.group(1)) if match else None
+    if credits is not None:
+        data["local_credits"] = credits
+    ects = _number(_field(record, "ects", "ects_credit", "european_credits", "akts"))
+    if ects is not None:
+        data["ects"] = ects
+    level = _field(record, "level", "course_level")
+    if level not in (None, ""):
+        data["level"] = str(level).strip()
+    availability = _field(record, "availability", "offered", "type", "semester_availability")
+    if availability not in (None, ""):
+        data["availability"] = str(availability).strip()
+    campus = _field(record, "campus", "location", "campus_name")
+    if campus not in (None, ""):
+        data["campus"] = str(campus).strip()
+    if include_sections:
+        sections, present = _section_rows(record)
+        if present:
+            data["sections"] = sections
+    return code, data
+
+
+def _tool_component(tool: str) -> str:
+    return {
+        "get_departments_and_semesters": "directory",
+        "search_departments": "directory",
+        "list_program_courses": "listing",
+        "get_course_info": "details",
+        "get_section_constraints": "constraints",
+        "get_course_prerequisites": "prerequisites",
+        "get_course_replacements": "replacements",
+        "get_thesis_courses": "listing",
+    }.get(tool, "details")
+
+
+def _error_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value.startswith(_ERROR_PREFIXES):
+        return value
+    return None
+
+
+def _parse_observation(tool: str, values: dict[str, Any], payload: Any) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+    """Normalize one source response into draft fields and explicit issues."""
+
+    payload = _decode_payload(payload)
+    component = _tool_component(tool)
+    issues: list[dict[str, Any]] = []
+    error = _error_text(payload)
+    if error:
+        return {}, [{"component": component, "code": "source_failed", "message": error, "severity": "error"}], "failed"
+    if payload is None:
+        return {}, [{"component": component, "code": "source_failed", "message": "Source returned no payload", "severity": "error"}], "failed"
+    if isinstance(payload, str):
+        return {}, [{"component": component, "code": "malformed_payload", "message": "Source payload was not JSON", "severity": "error"}], "malformed"
+
+    term, department, requested_code, requested_section = _scope(values)
+    if isinstance(payload, dict):
+        identities = (
+            ("course", requested_code, _field(payload, "course_code", "course")),
+            ("term", term, _field(payload, "semester", "semester_code", "term")),
+            ("section", requested_section, _field(payload, "section_code", "section")),
+        )
+        for identity, expected, actual in identities:
+            if expected is not None and actual not in (None, "") and str(actual).strip() != str(expected):
+                return {}, [{"component": component, "code": "source_identity_mismatch",
+                             "message": f"Source {identity} does not match the requested {identity}",
+                             "severity": "error"}], "malformed"
+    if tool in {"get_departments_and_semesters", "search_departments"}:
+        departments = _rows(payload, ("departments", "department", "results"))
+        semesters = _rows(payload, ("semesters", "terms", "academic_terms"))
+        result: dict[str, Any] = {
+            "departments": [
+                {
+                    "code": str(_field(row, "code", "department_code", "id") or "").strip(),
+                    "name": str(_field(row, "name", "department_name", "title") or "").strip(),
+                }
+                for row in departments
+                if _field(row, "code", "department_code", "id") not in (None, "")
+            ],
+            "semesters": [
+                {
+                    "code": str(_field(row, "code", "term", "semester", "id") or "").strip(),
+                    "name": str(_field(row, "name", "label", "title") or "").strip(),
+                }
+                for row in semesters
+                if _field(row, "code", "term", "semester", "id") not in (None, "")
+            ],
+        }
+        if not result["departments"] and not result["semesters"] and isinstance(payload, dict):
+            issues.append({"component": component, "code": "unlabelled_payload", "message": "No labelled directory rows", "severity": "error"})
+            return result, issues, "malformed"
+        return result, issues, "empty" if not result["departments"] and not result["semesters"] else "success"
+
+    if tool in {"list_program_courses", "get_thesis_courses"}:
+        rows = _rows(payload, ("courses", "course_list", "results", "items"))
+        if not rows and isinstance(payload, dict):
+            rows = [payload] if _course_code(payload, requested_code) else []
+        courses: list[dict[str, Any]] = []
+        for row in rows:
+            code, data = _course_row_data(row, requested_code, include_sections=False)
+            if code:
+                if tool == "get_thesis_courses":
+                    data["thesis"] = True
+                courses.append({"course_code": code, "data": data})
+        result = {"courses": courses}
+        if not courses and rows:
+            issues.append({"component": component, "code": "course_identity_unresolved", "message": "Course rows did not contain full seven-digit codes", "severity": "error"})
+            return result, issues, "malformed"
+        return result, issues, "empty" if not courses else "success"
+
+    if tool == "get_course_info":
+        code, data = _course_row_data(payload if isinstance(payload, dict) else {}, requested_code, include_sections=True)
+        if code is None:
+            code = requested_code
+        sections = data.get("sections", [])
+        if requested_code is None and code is None:
+            issues.append({"component": component, "code": "course_identity_unresolved", "message": "Course detail did not identify a full seven-digit code", "severity": "error"})
+            return data, issues, "malformed"
+        if not data:
+            issues.append({"component": component, "code": "empty_detail", "message": "Course detail contained no typed fields", "severity": "error"})
+            return {"course_code": code, "sections": sections}, issues, "empty"
+        data["course_code"] = code
+        return data, issues, "success"
+
+    if tool == "get_section_constraints":
+        rows, present = _restriction_rows(payload)
+        if not present:
+            issues.append({"component": component, "code": "missing_constraints_table", "message": "Restriction table was unavailable or malformed", "severity": "error"})
+            return {}, issues, "malformed"
+        return {"restrictions": rows, "section_code": _scope(values)[3]}, issues, "empty" if not rows else "success"
+
+    if tool == "get_course_prerequisites":
+        groups, present = _prerequisite_groups(payload)
+        if not present:
+            issues.append({"component": component, "code": "missing_prerequisites_table", "message": "Prerequisite groups were unavailable or malformed", "severity": "error"})
+            return {}, issues, "malformed"
+        return {"prerequisite_groups": groups}, issues, "empty" if not groups else "success"
+
+    if tool == "get_course_replacements":
+        rows, present = _replacement_rows(payload)
+        if not present:
+            issues.append({"component": component, "code": "missing_replacements_table", "message": "Replacement table was unavailable or malformed", "severity": "error"})
+            return {}, issues, "malformed"
+        return {"replacements": rows}, issues, "empty" if not rows else "success"
+
+    issues.append({"component": component, "code": "unsupported_tool", "message": f"Unsupported source tool: {tool}", "severity": "error"})
+    return {}, issues, "failed"
+
+
+def _component_meta(
+    component: str,
+    *,
+    status_value: str,
+    observed_at: datetime,
+    source_fetched_at: datetime | None,
+    verified: bool,
+) -> dict[str, Any]:
+    fetched = _utc(source_fetched_at)
+    observed = _utc(observed_at)
+    return {
+        "component": component,
+        "source_status": status_value,
+        "verified": verified,
+        # An imported cache snapshot has an observed timestamp but no actual
+        # source fetch timestamp, so it remains browsable yet stale.
+        "fresh": fetched is not None,
+        "observed_at": _iso(observed),
+        "source_fetched_at": _iso(fetched),
+    }
+
+
+def _merge_dicts(existing: dict[str, Any], incoming: dict[str, Any], overrides: dict[str, Any], *, replace_sections: bool = False) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if key.startswith("_"):
+            continue
+        if key not in overrides:
+            if key == "sections" and isinstance(value, list) and isinstance(merged.get(key), list):
+                # Detail and restriction tools arrive independently.  Merge
+                # by section identity so a later details response cannot erase
+                # a restriction response that was already reviewed.
+                old = {
+                    str(item.get("section_code") or item.get("section") or ""): dict(item)
+                    for item in merged[key]
+                    if isinstance(item, dict)
+                }
+                combined: list[dict[str, Any]] = []
+                seen: set[str] = set()
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    code = str(item.get("section_code") or item.get("section") or len(combined) + 1)
+                    previous = old.get(code, {})
+                    merged_item = dict(previous)
+                    for child_key, child_value in item.items():
+                        if child_key == "restrictions" and item.get("restrictions_present") is False:
+                            continue
+                        merged_item[child_key] = _jsonable(child_value)
+                    combined.append(merged_item)
+                    seen.add(code)
+                if not replace_sections:
+                    combined.extend(item for code, item in old.items() if code not in seen)
+                merged[key] = combined
+            else:
+                merged[key] = _jsonable(value)
+    return merged
+
+
+async def _ensure_term(db: AsyncSession, organization_id: UUID, term_code: str, *, label: str | None = None) -> CatalogTerm:
+    term_code = normalize_term(term_code)
+    row = await db.scalar(
+        select(CatalogTerm).where(CatalogTerm.organization_id == organization_id, CatalogTerm.term_code == term_code)
+    )
+    if row is None:
+        row = CatalogTerm(organization_id=organization_id, term_code=term_code, label=label)
+        db.add(row)
+        await db.flush()
+    elif label and not row.label:
+        row.label = label
+    return row
+
+
+async def _ensure_course(
+    db: AsyncSession,
+    organization_id: UUID,
+    course_code: str,
+    *,
+    department: str | None = None,
+) -> CatalogCourse:
+    normalized = normalize_course_code(course_code)
+    if not _SEVEN_DIGIT.fullmatch(normalized):
+        raise ValueError("Catalog course identities require a full seven-digit METU code")
+    row = await db.scalar(
+        select(CatalogCourse).where(
+            CatalogCourse.organization_id == organization_id,
+            CatalogCourse.course_code == normalized,
+        )
+    )
+    department_value = str(department or normalized[:3]).strip()
+    if row is None:
+        row = CatalogCourse(organization_id=organization_id, course_code=normalized, department=department_value)
+        db.add(row)
+        await db.flush()
+    elif department and row.department != department_value:
+        # Source identity is stable.  A changed owner is retained as a source
+        # conflict for an administrator instead of moving the course silently.
+        aliases = list(row.aliases or [])
+        marker = {"source_department": department_value}
+        if marker not in aliases:
+            aliases.append(marker)
+            row.aliases = aliases
+    return row
+
+
+async def _active_revision_for_course(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_id: UUID,
+    course_id: UUID,
+) -> CatalogCourseRevision | None:
+    """Return the revision selected by the term's current release pointer."""
+
+    pointer = await db.scalar(
+        select(CatalogTermActiveRelease).where(
+            CatalogTermActiveRelease.organization_id == organization_id,
+            CatalogTermActiveRelease.term_id == term_id,
+        )
+    )
+    if pointer is None:
+        return None
+    return await db.scalar(
+        select(CatalogCourseRevision)
+        .join(CatalogReleaseItem, CatalogReleaseItem.course_revision_id == CatalogCourseRevision.id)
+        .where(
+            CatalogReleaseItem.release_id == pointer.release_id,
+            CatalogReleaseItem.course_id == course_id,
+            CatalogCourseRevision.organization_id == organization_id,
+            CatalogCourseRevision.term_id == term_id,
+            CatalogCourseRevision.state == "published",
+        )
+    )
+
+
+async def _overrides_for_revision(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_id: UUID,
+    course_id: UUID,
+    revision_id: UUID,
+) -> dict[str, Any]:
+    """Load the override snapshot that belongs to one published revision.
+
+    A global active-override query is incorrect after rollback: it can apply
+    a correction from a newer release to the older revision being restored.
+    Published drafts already carry the complete inherited snapshot, so use it
+    as the canonical source and only fall back to individual override rows
+    for legacy revisions that have no draft record.
+    """
+
+    published_draft = await db.scalar(
+        select(CatalogDraft)
+        .where(
+            CatalogDraft.organization_id == organization_id,
+            CatalogDraft.term_id == term_id,
+            CatalogDraft.course_id == course_id,
+            CatalogDraft.published_revision_id == revision_id,
+        )
+        .order_by(CatalogDraft.updated_at.desc())
+        .limit(1)
+    )
+    if published_draft is not None:
+        return _jsonable(dict(published_draft.field_overrides or {}))
+    rows = (
+        await db.scalars(
+            select(CatalogAdminOverride)
+            .join(CatalogDraft, CatalogDraft.id == CatalogAdminOverride.draft_id)
+            .where(
+                CatalogAdminOverride.organization_id == organization_id,
+                CatalogAdminOverride.term_id == term_id,
+                CatalogAdminOverride.course_id == course_id,
+                CatalogAdminOverride.active.is_(True),
+                CatalogDraft.published_revision_id == revision_id,
+            )
+        )
+    ).all()
+    return {
+        row.field_name: {
+            "value": _jsonable(row.value),
+            "reason": row.reason,
+            "updated_by": str(row.created_by) if row.created_by else None,
+            "updated_at": _iso(row.created_at),
+        }
+        for row in rows
+    }
+
+
+async def _draft_for_course(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    course: CatalogCourse,
+    *,
+    base_revision_id: UUID | None = None,
+    created_by: UUID | None = None,
+    initial_data: dict[str, Any] | None = None,
+) -> CatalogDraft:
+    # Course identity is the serialization point for source observations and
+    # the first draft creation.  Without this lock two workers can both miss
+    # the partial unique index and then race while incrementing JSON draft
+    # revisions (or lose one source component entirely).
+    locked_course = await db.scalar(
+        select(CatalogCourse)
+        .where(CatalogCourse.id == course.id, CatalogCourse.organization_id == organization_id)
+        .with_for_update()
+    )
+    if locked_course is not None:
+        course = locked_course
+    draft = await db.scalar(
+        select(CatalogDraft).where(
+            CatalogDraft.organization_id == organization_id,
+            CatalogDraft.term_id == term.id,
+            CatalogDraft.course_id == course.id,
+            CatalogDraft.state == "draft",
+        ).with_for_update()
+    )
+    if draft is not None:
+        return draft
+    base: dict[str, Any] = {}
+    inherited_overrides: dict[str, Any] = {}
+    if base_revision_id is not None:
+        revision = await db.scalar(
+            select(CatalogCourseRevision).where(
+                CatalogCourseRevision.id == base_revision_id,
+                CatalogCourseRevision.organization_id == organization_id,
+                CatalogCourseRevision.course_id == course.id,
+                CatalogCourseRevision.term_id == term.id,
+            )
+        )
+        if revision is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Base course revision not found")
+        base = await _revision_data(db, revision)
+        inherited_overrides = await _overrides_for_revision(
+            db, organization_id, term.id, course.id, revision.id
+        )
+    elif initial_data is not None:
+        base = _jsonable(initial_data)
+        active_revision = await _active_revision_for_course(db, organization_id, term.id, course.id)
+        if active_revision is not None:
+            base_revision_id = active_revision.id
+    else:
+        # A new source observation after publication starts from the last
+        # published value.  Rehydrate the active overrides too, otherwise a
+        # refresh would silently discard a correction made in the Courses tab.
+        # Rebase a refresh on the revision in the active release.  The highest
+        # historical revision may belong to a release that was rolled back;
+        # using it here would silently resurrect content an administrator had
+        # deliberately removed from the live pointer.
+        revision = await _active_revision_for_course(db, organization_id, term.id, course.id)
+        if revision is None:
+            revision = await db.scalar(
+                select(CatalogCourseRevision)
+                .where(
+                    CatalogCourseRevision.organization_id == organization_id,
+                    CatalogCourseRevision.course_id == course.id,
+                    CatalogCourseRevision.term_id == term.id,
+                    CatalogCourseRevision.state == "published",
+                )
+                .order_by(CatalogCourseRevision.revision.desc())
+                .limit(1)
+            )
+        if revision is not None:
+            base = await _revision_data(db, revision)
+            # Keep the optimistic base pointer alongside the inherited JSON.
+            # Publication checks it against the active release before creating
+            # a new immutable revision.
+            base_revision_id = revision.id
+            inherited_overrides = await _overrides_for_revision(
+                db, organization_id, term.id, course.id, revision.id
+            )
+    draft = CatalogDraft(
+        organization_id=organization_id,
+        term_id=term.id,
+        course_id=course.id,
+        base_revision_id=base_revision_id,
+        revision=1,
+        state="draft",
+        data=base,
+        issues=[],
+        field_overrides=inherited_overrides,
+        created_by=created_by,
+        updated_by=created_by,
+    )
+    db.add(draft)
+    await db.flush()
+    return draft
+
+
+async def _merge_observation_into_draft(
+    draft: CatalogDraft,
+    candidate: dict[str, Any],
+    issues: list[dict[str, Any]],
+    *,
+    component: str,
+    status_value: str,
+    observed_at: datetime,
+    source_fetched_at: datetime | None,
+) -> None:
+    current = dict(draft.data or {})
+    overrides = dict(draft.field_overrides or {})
+    incoming = dict(candidate.get("data") or candidate)
+    successful = status_value in {"success", "empty"}
+    if component == "constraints" and "sections" not in incoming:
+        section_code = incoming.pop("section_code", None)
+        restrictions = incoming.pop("restrictions", None)
+        if section_code is not None and restrictions is not None:
+            incoming["sections"] = [
+                {
+                    "section_code": str(section_code),
+                    "restrictions": _jsonable(restrictions),
+                    "restrictions_status": "verified" if successful else "unknown",
+                    "restrictions_observed_at": _iso(observed_at),
+                    "restrictions_source_fetched_at": _iso(source_fetched_at),
+                }
+            ]
+    elif component == "constraints" and isinstance(incoming.get("sections"), list):
+        # Keep evidence attached to each section. A successful response for
+        # section 1 must never certify an unobserved section 2.
+        for section in incoming["sections"]:
+            if not isinstance(section, dict):
+                continue
+            section.setdefault(
+                "restrictions_status",
+                "verified" if successful else "unknown",
+            )
+            section.setdefault("restrictions_observed_at", _iso(observed_at))
+            section.setdefault("restrictions_source_fetched_at", _iso(source_fetched_at))
+    elif component == "details" and isinstance(incoming.get("sections"), list):
+        # Course Info includes the section roster and meeting rows.  Record
+        # that section data was actually observed, while leaving restrictions
+        # unknown unless this same response explicitly contained a
+        # restriction table for that section.
+        for section in incoming["sections"]:
+            if not isinstance(section, dict):
+                continue
+            if section.get("restrictions_present"):
+                section.setdefault("restrictions_status", "verified" if successful else "unknown")
+                section.setdefault("restrictions_observed_at", _iso(observed_at))
+                section.setdefault("restrictions_source_fetched_at", _iso(source_fetched_at))
+    current = _merge_dicts(current, incoming, overrides, replace_sections=component == "details" and successful)
+    conflict_issues = list(issues)
+    for field, source_value in incoming.items():
+        override = overrides.get(field)
+        if not override or override.get("value") == _jsonable(source_value):
+            continue
+        conflict_issues.append(
+            {
+                "component": component,
+                "code": "source_conflict",
+                "field": field,
+                "source_value": _jsonable(source_value),
+                "override_value": _jsonable(override.get("value")),
+                "message": f"Source value for {field} differs from the active administrator override",
+                "severity": "warning",
+            }
+        )
+    component_status = dict(current.get("component_status") or {})
+    # A failed/empty response records its status and issues while leaving the
+    # last known fields intact.  A successful empty restrictions table is a
+    # legitimate verified empty table and is therefore written explicitly.
+    component_status[component] = _component_meta(
+        component,
+        status_value=status_value,
+        observed_at=observed_at,
+        source_fetched_at=source_fetched_at,
+        verified=successful and not any(key in overrides for key in incoming),
+    )
+    if component == "details" and "sections" in incoming:
+        component_status["sections"] = _component_meta(
+            "sections",
+            status_value=status_value,
+            observed_at=observed_at,
+            source_fetched_at=source_fetched_at,
+            verified=successful and "sections" not in overrides,
+        )
+        if any(isinstance(item, dict) and item.get("restrictions_present") for item in incoming["sections"]):
+            component_status["constraints"] = _component_meta(
+                "constraints",
+                status_value=status_value,
+                observed_at=observed_at,
+                source_fetched_at=source_fetched_at,
+                verified=successful and "sections" not in overrides,
+            )
+    current["component_status"] = component_status
+    current["_source_observation_ids"] = list(current.get("_source_observation_ids") or [])
+    draft.data = _jsonable(current)
+    existing_issues = [item for item in (draft.issues or []) if isinstance(item, dict)]
+    # Keep source failures for review.  Identical repeated observations are
+    # deduplicated to keep a repeatedly retried job from growing JSONB forever.
+    for issue in conflict_issues:
+        if issue not in existing_issues:
+            existing_issues.append(issue)
+    draft.issues = existing_issues[-200:]
+    draft.revision = int(draft.revision or 1) + 1
+
+
+async def ingest_observation(
+    db: AsyncSession,
+    organization_id: UUID,
+    tool: str,
+    values: dict[str, Any],
+    payload: Any,
+    observed_at: datetime,
+    source_fetched_at: datetime | None = None,
+    job_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Persist one source observation and update only draft candidates.
+
+    ``source_fetched_at`` is deliberately explicit.  Backfilled cache data
+    passes ``None`` and therefore cannot renew freshness or make a planner
+    believe that a network read happened now.
+    """
+
+    if tool not in CATALOG_TOOLS:
+        raise ValueError(f"Unsupported catalog source tool: {tool}")
+    observed_at = _utc(observed_at) or datetime.now(UTC)
+    source_fetched_at = _utc(source_fetched_at)
+    values = _jsonable(values or {})
+    payload = _jsonable(payload)
+    term_code, department, requested_course, section_code = _scope(values)
+    candidate, issues, status_value = _parse_observation(tool, values, payload)
+    component = _tool_component(tool)
+    observation = CatalogSourceObservation(
+        organization_id=organization_id,
+        job_id=job_id,
+        tool=tool,
+        arguments=values,
+        term=term_code,
+        department=department,
+        course_code=requested_course,
+        section_code=section_code,
+        payload=payload,
+        payload_hash=_digest(payload),
+        observed_at=observed_at,
+        source_fetched_at=source_fetched_at,
+        status=status_value,
+        issues=issues,
+        candidate_data=candidate,
+    )
+    db.add(observation)
+    await db.flush()
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    raw_courses = candidate.get("courses") if isinstance(candidate, dict) else None
+    if isinstance(raw_courses, list):
+        for item in raw_courses:
+            if isinstance(item, dict):
+                code = _course_code(item, requested_course)
+                if code:
+                    data = dict(item.get("data") or {})
+                    candidates.append((code, data))
+    if not candidates and requested_course is not None:
+        data = dict(candidate)
+        # The list of course candidates is an index for this observation, not a
+        # field to copy into one course's detail row.
+        data.pop("courses", None)
+        candidates.append((requested_course, data))
+
+    draft_ids: list[str] = []
+    for code, data in candidates:
+        if isinstance(data.get("sections"), list):
+            from app.academic_catalog.instructors import enrich_instructors
+
+            data["sections"] = await enrich_instructors(db, organization_id, data["sections"])
+        course = await _ensure_course(db, organization_id, code, department=department or str(code[:3]))
+        if term_code is None:
+            continue
+        term = await _ensure_term(db, organization_id, term_code)
+        draft = await _draft_for_course(db, organization_id, term, course)
+        await _merge_observation_into_draft(
+            draft,
+            {"data": data},
+            issues,
+            component=component,
+            status_value=status_value,
+            observed_at=observed_at,
+            source_fetched_at=source_fetched_at,
+        )
+        source_ids = list(draft.data.get("_source_observation_ids") or [])
+        if str(observation.id) not in source_ids:
+            source_ids.append(str(observation.id))
+        data_copy = dict(draft.data)
+        data_copy["_source_observation_ids"] = source_ids[-100:]
+        draft.data = data_copy
+        draft_ids.append(str(draft.id))
+
+    # A detail/constraint observation can arrive before its listing.  The
+    # requested code path above creates the course and term regardless, so a
+    # later listing can merge into the same draft without inventing a section.
+    await db.flush()
+    return {
+        "observation_id": str(observation.id),
+        "draft_ids": draft_ids,
+        "draft_id": draft_ids[0] if len(draft_ids) == 1 else None,
+        "candidate_data": candidate,
+        "issues": issues,
+        "status": status_value,
+        "course_codes": [code for code, _ in candidates],
+    }
+
+
+async def _revision_data(db: AsyncSession, revision: CatalogCourseRevision) -> dict[str, Any]:
+    course = await db.get(CatalogCourse, revision.course_id)
+    data: dict[str, Any] = {
+        "course_code": course.course_code if course else None,
+        "department": course.department if course else None,
+        "title": revision.title,
+        "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
+        "ects": float(revision.ects) if revision.ects is not None else None,
+        "level": revision.level,
+        "availability": revision.availability,
+        "campus": revision.campus,
+        "is_thesis": bool(revision.is_thesis),
+        "completeness": _jsonable(revision.completeness or {}),
+        "component_status": _jsonable(revision.component_status or {}),
+        "sections": [],
+        "prerequisite_groups": [],
+        "replacements": [],
+    }
+    sections = (
+        await db.scalars(
+            select(CatalogSection)
+            .where(
+                CatalogSection.organization_id == revision.organization_id,
+                CatalogSection.course_revision_id == revision.id,
+            )
+            .order_by(CatalogSection.section_code)
+        )
+    ).all()
+    for section in sections:
+        meeting_rows = (
+            await db.scalars(
+                select(CatalogMeeting)
+                .where(
+                    CatalogMeeting.organization_id == revision.organization_id,
+                    CatalogMeeting.section_id == section.id,
+                )
+                .order_by(CatalogMeeting.weekday, CatalogMeeting.start_minute, CatalogMeeting.id)
+            )
+        ).all()
+        instructors = (
+            await db.execute(
+                select(CatalogSectionInstructor, CatalogInstructor)
+                .join(CatalogInstructor, CatalogInstructor.id == CatalogSectionInstructor.instructor_id)
+                .where(
+                    CatalogSectionInstructor.organization_id == revision.organization_id,
+                    CatalogSectionInstructor.section_id == section.id,
+                )
+                .order_by(CatalogSectionInstructor.id)
+            )
+        ).all()
+        restrictions = (
+            await db.scalars(
+                select(CatalogRestriction)
+                .where(
+                    CatalogRestriction.organization_id == revision.organization_id,
+                    CatalogRestriction.course_revision_id == revision.id,
+                    CatalogRestriction.section_id == section.id,
+                )
+                .order_by(CatalogRestriction.restriction_group, CatalogRestriction.row_index, CatalogRestriction.id)
+            )
+        ).all()
+        section_payload = {
+                "section_code": section.section_code,
+                "section": section.section_code,
+                "status": section.status,
+                "notes": section.notes,
+                "syllabus_url": section.syllabus_url,
+                "syllabus_available": section.syllabus_available,
+                "meetings_status": section.meetings_status,
+                "restrictions_status": section.restrictions_status,
+                "restrictions_observed_at": _iso(section.restrictions_observed_at),
+                "restrictions_source_fetched_at": _iso(section.restrictions_source_fetched_at),
+                "meetings": [
+                    {
+                        "weekday": meeting.weekday,
+                        "start_minute": meeting.start_minute,
+                        "end_minute": meeting.end_minute,
+                        "room": meeting.room,
+                        "status": meeting.status,
+                        "raw_label": meeting.raw_label,
+                    }
+                    for meeting in meeting_rows
+                ],
+                "instructors": [
+                    {
+                        "source_name": link.source_name,
+                        "position": instructor.position,
+                        # Read the immutable section snapshot rather than the
+                        # mutable organization-level instructor directory.
+                        "researcher_id": link.researcher_id,
+                        "match_method": link.match_method,
+                        "resolution_status": link.resolution_status,
+                    }
+                    for link, instructor in instructors
+                ],
+                "restrictions": [_restriction_dict(row) for row in restrictions],
+            }
+        # Keep the canonical field while exposing the aliases consumed by the
+        # existing Course Info and planner adapters.
+        section_payload["schedule"] = list(section_payload["meetings"])
+        section_payload["meeting_status"] = section.meetings_status
+        data["sections"].append(section_payload)
+    groups = (
+        await db.scalars(
+            select(CatalogPrerequisiteGroup)
+            .where(
+                CatalogPrerequisiteGroup.organization_id == revision.organization_id,
+                CatalogPrerequisiteGroup.course_revision_id == revision.id,
+            )
+            .order_by(CatalogPrerequisiteGroup.group_no, CatalogPrerequisiteGroup.id)
+        )
+    ).all()
+    for group in groups:
+        requirements = (
+            await db.scalars(
+                select(CatalogPrerequisiteRequirement)
+                .where(
+                    CatalogPrerequisiteRequirement.organization_id == revision.organization_id,
+                    CatalogPrerequisiteRequirement.group_id == group.id,
+                )
+                .order_by(CatalogPrerequisiteRequirement.position, CatalogPrerequisiteRequirement.id)
+            )
+        ).all()
+        data["prerequisite_groups"].append(
+            {
+                "group_no": group.group_no,
+                "logic": group.logic,
+                "program_code": group.program_code,
+                "curriculum_version": group.curriculum_version,
+                "applicability": _jsonable(group.applicability or {}),
+                "verified": group.verified,
+                "raw_text": group.raw_text,
+                "requirements": [
+                    {
+                        "course_code": item.course_code,
+                        "minimum_grade": item.minimum_grade,
+                        "requirement_type": item.requirement_type,
+                        "position": item.position,
+                        "raw_text": item.raw_text,
+                    }
+                    for item in requirements
+                ],
+            }
+        )
+    replacements = (
+        await db.scalars(
+            select(CatalogCourseReplacement)
+            .where(
+                CatalogCourseReplacement.organization_id == revision.organization_id,
+                CatalogCourseReplacement.course_revision_id == revision.id,
+            )
+            .order_by(CatalogCourseReplacement.related_course_code, CatalogCourseReplacement.id)
+        )
+    ).all()
+    data["replacements"] = [
+        {
+            "relationship_type": row.relationship_type,
+            "related_course_code": row.related_course_code,
+            "program_code": row.program_code,
+            "curriculum_version": row.curriculum_version,
+            "verified": row.verified,
+            "raw_text": row.raw_text,
+        }
+        for row in replacements
+    ]
+    return _jsonable(data)
+
+
+def _restriction_dict(row: CatalogRestriction) -> dict[str, Any]:
+    return {
+        "restriction_group": row.restriction_group,
+        "row_index": row.row_index,
+        "kind": row.kind,
+        "value_text": row.value_text,
+        "value_numeric": float(row.value_numeric) if row.value_numeric is not None else None,
+        "operator": row.operator,
+        "minimum_grade": row.minimum_grade,
+        "given_department": row.given_department,
+        "start_char": row.start_char,
+        "end_char": row.end_char,
+        "min_cgpa": float(row.min_cgpa) if row.min_cgpa is not None else None,
+        "max_cgpa": float(row.max_cgpa) if row.max_cgpa is not None else None,
+        "min_year": row.min_year,
+        "max_year": row.max_year,
+        "start_grade": row.start_grade,
+        "end_grade": row.end_grade,
+        "prior_course_code": row.prior_course_code,
+        "program_code": row.program_code,
+        "curriculum_version": row.curriculum_version,
+        "raw_text": row.raw_text,
+        "verified": row.verified,
+        "status": row.status,
+    }
+
+
+def _component_status(data: dict[str, Any]) -> dict[str, Any]:
+    value = data.get("component_status")
+    if not isinstance(value, dict):
+        value = {}
+    result = {str(key): _jsonable(item) for key, item in value.items() if isinstance(item, dict)}
+    # A manually supplied field in a draft is explicit data, but remains
+    # unknown until an administrator verifies it through the UI patch path.
+    for component, fields in {
+        "details": ("title", "local_credits", "ects", "level", "availability", "campus"),
+        "sections": ("sections",),
+        "constraints": ("sections",),
+        "prerequisites": ("prerequisite_groups",),
+        "replacements": ("replacements",),
+        "listing": ("course_code",),
+    }.items():
+        if component not in result and any(field in data and data.get(field) not in (None, [], {}) for field in fields):
+            result[component] = {
+                "component": component,
+                "source_status": "admin",
+                "verified": False,
+                "fresh": False,
+                "observed_at": None,
+                "source_fetched_at": None,
+            }
+    return result
+
+
+async def _latest_source_observation(
+    db: AsyncSession, organization_id: UUID, data: dict[str, Any]
+) -> CatalogSourceObservation | None:
+    ids = data.get("_source_observation_ids")
+    if not isinstance(ids, list):
+        return None
+    valid: list[UUID] = []
+    for value in reversed(ids):
+        try:
+            valid.append(UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    if not valid:
+        return None
+    return await db.scalar(
+        select(CatalogSourceObservation)
+        .where(
+            CatalogSourceObservation.organization_id == organization_id,
+            CatalogSourceObservation.id.in_(valid),
+        )
+        .order_by(CatalogSourceObservation.created_at.desc())
+        .limit(1)
+    )
+
+
+def _valid_researcher_id(value: Any) -> int | None:
+    parsed = _int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+async def _instructor_for(
+    db: AsyncSession,
+    organization_id: UUID,
+    source_name: str,
+    position: str | None,
+    researcher_id: int | None,
+    resolution_status: str | None = None,
+) -> CatalogInstructor:
+    if researcher_id is not None:
+        from app.admin.directory import METU_ID
+        from app.researchers.models import Researcher
+
+        if organization_id != METU_ID or await db.get(Researcher, researcher_id) is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Researcher link is unavailable for this organization")
+    normalized = _key(source_name)
+    stmt = select(CatalogInstructor).where(
+        CatalogInstructor.organization_id == organization_id,
+        CatalogInstructor.normalized_name == normalized,
+    )
+    if position is None:
+        stmt = stmt.where(CatalogInstructor.position.is_(None))
+    else:
+        stmt = stmt.where(CatalogInstructor.position == position)
+    row = await db.scalar(stmt)
+    if row is None:
+        row = CatalogInstructor(
+            organization_id=organization_id,
+            source_name=source_name,
+            normalized_name=normalized,
+            position=position,
+            researcher_id=researcher_id,
+            resolution_status=resolution_status or ("unassigned" if _key(source_name) == "staff" else "unresolved"),
+        )
+        db.add(row)
+        await db.flush()
+    elif researcher_id is not None and row.researcher_id is None:
+        row.researcher_id = researcher_id
+        row.resolution_status = resolution_status or "matched"
+    return row
+
+
+def _course_data_value(data: dict[str, Any], key: str) -> Any:
+    value = data.get(key)
+    return None if value in (None, "") else value
+
+
+async def _materialize_revision(
+    db: AsyncSession,
+    draft: CatalogDraft,
+    *,
+    created_by: UUID | None,
+) -> CatalogCourseRevision:
+    """Turn a validated draft payload into an immutable published revision."""
+
+    data = _jsonable(dict(draft.data or {}))
+    course = await db.get(CatalogCourse, draft.course_id)
+    if course is None or course.organization_id != draft.organization_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Draft course not found")
+    observation = await _latest_source_observation(db, draft.organization_id, data)
+    latest = await db.scalar(
+        select(func.coalesce(func.max(CatalogCourseRevision.revision), 0)).where(
+            CatalogCourseRevision.organization_id == draft.organization_id,
+            CatalogCourseRevision.course_id == draft.course_id,
+            CatalogCourseRevision.term_id == draft.term_id,
+        )
+    )
+    component_status = _component_status(data)
+    completeness = dict(data.get("completeness") or {})
+    def verified_component(name: str) -> bool:
+        value = component_status.get(name)
+        return bool(isinstance(value, dict) and value.get("verified") is True)
+
+    # Completeness describes observed, typed source components.  Course code
+    # identity alone must not make an unlisted detail-only draft look complete
+    # (and an empty restrictions/prerequisites table is complete only when its
+    # corresponding source call explicitly verified it).
+    completeness.setdefault("listing", verified_component("listing"))
+    completeness.setdefault("details", bool(data.get("title")) and verified_component("details"))
+    completeness.setdefault("sections", "sections" in data and verified_component("sections"))
+    completeness.setdefault(
+        "constraints",
+        "sections" in data
+        and verified_component("constraints")
+        and all("restrictions" in section for section in data.get("sections", []) if isinstance(section, dict)),
+    )
+    completeness.setdefault("prerequisites", "prerequisite_groups" in data and verified_component("prerequisites"))
+    completeness.setdefault("replacements", "replacements" in data and verified_component("replacements"))
+    revision = CatalogCourseRevision(
+        organization_id=draft.organization_id,
+        course_id=draft.course_id,
+        term_id=draft.term_id,
+        revision=int(latest or 0) + 1,
+        # A database trigger allows the one-way draft -> published transition
+        # after all child rows have been attached.
+        state="draft",
+        title=_course_data_value(data, "title"),
+        local_credits=_number(data.get("local_credits")),
+        ects=_number(data.get("ects")),
+        level=_course_data_value(data, "level"),
+        availability=_course_data_value(data, "availability"),
+        campus=_course_data_value(data, "campus"),
+        is_thesis=bool(data.get("is_thesis") or data.get("thesis")),
+        completeness=_jsonable(completeness),
+        component_status=_jsonable(component_status),
+        issues=_jsonable(draft.issues or []),
+        source_observation_id=observation.id if observation else None,
+        observed_at=observation.observed_at if observation else None,
+        source_fetched_at=observation.source_fetched_at if observation else None,
+        created_by=created_by,
+    )
+    db.add(revision)
+    await db.flush()
+
+    sections = data.get("sections")
+    if not isinstance(sections, list):
+        sections = []
+    for index, raw_section in enumerate(sections):
+        if not isinstance(raw_section, dict):
+            continue
+        section_code = str(raw_section.get("section_code") or raw_section.get("section") or index + 1).strip()
+        parsed_meetings, meeting_field_present = _meeting_rows(raw_section)
+        section = CatalogSection(
+            organization_id=draft.organization_id,
+            course_revision_id=revision.id,
+            section_code=section_code,
+            status=str(raw_section.get("status") or "listed"),
+            notes=raw_section.get("notes"),
+            syllabus_url=raw_section.get("syllabus_url"),
+            syllabus_available=_boolish(raw_section.get("syllabus_available")),
+            meetings_status=_section_meetings_status(raw_section, parsed_meetings, meeting_field_present),
+            restrictions_status=str(raw_section.get("restrictions_status") or "unknown"),
+            restrictions_observed_at=_parse_datetime_value(raw_section.get("restrictions_observed_at")),
+            restrictions_source_fetched_at=_parse_datetime_value(
+                raw_section.get("restrictions_source_fetched_at")
+            ),
+            source_observation_id=observation.id if observation else None,
+        )
+        db.add(section)
+        await db.flush()
+        if meeting_field_present:
+            for raw_meeting in parsed_meetings:
+                meeting_status = str(raw_meeting.get("status") or "unknown")
+                weekday = _int(raw_meeting.get("weekday"))
+                start = _int(raw_meeting.get("start_minute"))
+                end = _int(raw_meeting.get("end_minute"))
+                if meeting_status == "scheduled" and (weekday is None or start is None or end is None or end <= start):
+                    meeting_status = "invalid"
+                db.add(
+                    CatalogMeeting(
+                        organization_id=draft.organization_id,
+                        section_id=section.id,
+                        weekday=weekday,
+                        start_minute=start,
+                        end_minute=end,
+                        room=raw_meeting.get("room"),
+                        status=meeting_status,
+                        raw_label=raw_meeting.get("raw_label"),
+                    )
+                )
+        instructors = raw_section.get("instructors")
+        if isinstance(instructors, list):
+            for raw_instructor in instructors:
+                if isinstance(raw_instructor, str):
+                    raw_instructor = {"source_name": raw_instructor}
+                if not isinstance(raw_instructor, dict):
+                    continue
+                source_name = str(raw_instructor.get("source_name") or raw_instructor.get("name") or "").strip()
+                if not source_name:
+                    continue
+                instructor = await _instructor_for(
+                    db,
+                    draft.organization_id,
+                    source_name,
+                    str(raw_instructor.get("position")).strip() if raw_instructor.get("position") else None,
+                    _valid_researcher_id(raw_instructor.get("researcher_id")),
+                    str(raw_instructor.get("resolution_status") or "").strip() or None,
+                )
+                db.add(
+                    CatalogSectionInstructor(
+                        organization_id=draft.organization_id,
+                        section_id=section.id,
+                        instructor_id=instructor.id,
+                        researcher_id=instructor.researcher_id,
+                        source_name=source_name,
+                        match_method=str(raw_instructor.get("match_method") or "unmatched"),
+                        resolution_status=str(raw_instructor.get("resolution_status") or instructor.resolution_status),
+                    )
+                )
+        restrictions = raw_section.get("restrictions")
+        if isinstance(restrictions, list):
+            for row_index, raw_restriction in enumerate(restrictions):
+                if not isinstance(raw_restriction, dict):
+                    continue
+                db.add(
+                    CatalogRestriction(
+                        organization_id=draft.organization_id,
+                        course_revision_id=revision.id,
+                        section_id=section.id,
+                        restriction_group=raw_restriction.get("restriction_group") or raw_restriction.get("group"),
+                        row_index=_int(raw_restriction.get("row_index")) or row_index,
+                        kind=str(raw_restriction.get("kind") or "eligibility"),
+                        value_text=raw_restriction.get("value_text"),
+                        value_numeric=_number(raw_restriction.get("value_numeric")),
+                        operator=raw_restriction.get("operator"),
+                        minimum_grade=raw_restriction.get("minimum_grade"),
+                        given_department=raw_restriction.get("given_department") or raw_restriction.get("given_dept"),
+                        start_char=raw_restriction.get("start_char"),
+                        end_char=raw_restriction.get("end_char"),
+                        min_cgpa=_number(raw_restriction.get("min_cgpa")),
+                        max_cgpa=_number(raw_restriction.get("max_cgpa")),
+                        min_year=_int(raw_restriction.get("min_year")),
+                        max_year=_int(raw_restriction.get("max_year")),
+                        start_grade=raw_restriction.get("start_grade"),
+                        end_grade=raw_restriction.get("end_grade"),
+                        prior_course_code=raw_restriction.get("prior_course_code"),
+                        program_code=raw_restriction.get("program_code"),
+                        curriculum_version=raw_restriction.get("curriculum_version"),
+                        raw_text=raw_restriction.get("raw_text"),
+                        verified=bool(raw_restriction.get("verified", False)),
+                        status=str(raw_restriction.get("status") or "unknown"),
+                        source_observation_id=observation.id if observation else None,
+                    )
+                )
+    groups = data.get("prerequisite_groups")
+    if isinstance(groups, list):
+        for raw_group in groups:
+            if not isinstance(raw_group, dict):
+                continue
+            group = CatalogPrerequisiteGroup(
+                organization_id=draft.organization_id,
+                course_revision_id=revision.id,
+                group_no=_int(raw_group.get("group_no")) or 1,
+                logic=str(raw_group.get("logic") or "AND").upper(),
+                program_code=raw_group.get("program_code"),
+                curriculum_version=raw_group.get("curriculum_version"),
+                applicability=raw_group.get("applicability") or {},
+                verified=bool(raw_group.get("verified", False)),
+                raw_text=raw_group.get("raw_text"),
+                source_observation_id=observation.id if observation else None,
+            )
+            db.add(group)
+            await db.flush()
+            requirements = raw_group.get("requirements")
+            if isinstance(requirements, list):
+                for position, raw_requirement in enumerate(requirements):
+                    if not isinstance(raw_requirement, dict):
+                        continue
+                    code = _course_code(raw_requirement, None)
+                    if code is None:
+                        continue
+                    db.add(
+                        CatalogPrerequisiteRequirement(
+                            organization_id=draft.organization_id,
+                            group_id=group.id,
+                            course_code=code,
+                            minimum_grade=raw_requirement.get("minimum_grade"),
+                            requirement_type=str(raw_requirement.get("requirement_type") or "course"),
+                            position=_int(raw_requirement.get("position")) or position,
+                            raw_text=raw_requirement.get("raw_text"),
+                        )
+                    )
+    replacements = data.get("replacements")
+    if isinstance(replacements, list):
+        for raw_replacement in replacements:
+            if not isinstance(raw_replacement, dict):
+                continue
+            code = _course_code(raw_replacement, None) or _course_code({"course_code": raw_replacement.get("related_course_code")}, None)
+            if code is None:
+                continue
+            db.add(
+                CatalogCourseReplacement(
+                    organization_id=draft.organization_id,
+                    course_revision_id=revision.id,
+                    relationship_type=str(raw_replacement.get("relationship_type") or "replacement"),
+                    related_course_code=code,
+                    program_code=raw_replacement.get("program_code"),
+                    curriculum_version=raw_replacement.get("curriculum_version"),
+                    verified=bool(raw_replacement.get("verified", False)),
+                    raw_text=raw_replacement.get("raw_text"),
+                    source_observation_id=observation.id if observation else None,
+                )
+            )
+    await db.flush()
+    revision.state = "published"
+    await db.flush()
+    return revision
+
+
+def import_dedup_key(
+    organization_id: UUID,
+    term: str,
+    department: str | None = None,
+    course_codes: Iterable[str] | None = None,
+) -> str:
+    codes = sorted({normalize_course_code(code) for code in (course_codes or [])})
+    return _digest(
+        {
+            "organization_id": str(organization_id),
+            "term": normalize_term(term),
+            "department": str(department or "").strip().upper() or None,
+            "course_codes": codes,
+        }
+    )
+
+
+async def enqueue_import(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: str,
+    department: str | None = None,
+    course_codes: list[str] | None = None,
+    reason: str | None = None,
+    requested_by: UUID | None = None,
+    payload: dict[str, Any] | None = None,
+    priority: int = 50,
+) -> CatalogImportJob:
+    """Create or reuse one active import request for a scope."""
+
+    term = normalize_term(term)
+    department = str(department).strip() if department else None
+    codes = [normalize_course_code(code) for code in (course_codes or [])]
+    if any(not _SEVEN_DIGIT.fullmatch(code) for code in codes):
+        raise ValueError("Import course codes require full seven-digit METU codes")
+    dedup_key = import_dedup_key(organization_id, term, department, codes)
+    existing = await db.scalar(
+        select(CatalogImportJob).where(
+            CatalogImportJob.organization_id == organization_id,
+            CatalogImportJob.dedup_key == dedup_key,
+            CatalogImportJob.status.in_(("queued", "running")),
+        )
+    )
+    if existing is not None:
+        return existing
+    job = CatalogImportJob(
+        organization_id=organization_id,
+        term=term,
+        department=department,
+        course_codes=codes or None,
+        payload=_jsonable(payload or {}),
+        status="queued",
+        checkpoint={},
+        attempts=0,
+        lease_until=None,
+        dedup_key=dedup_key,
+        reason=reason,
+        requested_by=requested_by,
+        priority=priority,
+    )
+    db.add(job)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # A competing request won the partial unique active-dedup index.  The
+        # current transaction must be rolled back before reading its row.
+        await db.rollback()
+        existing = await db.scalar(
+            select(CatalogImportJob).where(
+                CatalogImportJob.organization_id == organization_id,
+                CatalogImportJob.dedup_key == dedup_key,
+                CatalogImportJob.status.in_(("queued", "running")),
+            )
+        )
+        if existing is None:
+            raise
+        return existing
+    return job
+
+
+async def get_draft(
+    db: AsyncSession,
+    organization_id: UUID,
+    draft_id: UUID,
+    *,
+    for_update: bool = False,
+) -> CatalogDraft | None:
+    stmt = select(CatalogDraft).where(
+        CatalogDraft.id == draft_id,
+        CatalogDraft.organization_id == organization_id,
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    return await db.scalar(stmt)
+
+
+async def create_draft(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    course_code: str,
+    *,
+    base_revision_id: UUID | None = None,
+    data: dict[str, Any] | None = None,
+    reason: str | None = None,
+    created_by: UUID | None = None,
+) -> CatalogDraft:
+    """Create a mutable candidate.
+
+    An existing draft is returned only for an idempotent empty create.  A
+    non-empty create has no expected revision and therefore cannot safely
+    merge into a concurrently edited draft; callers must use PATCH instead.
+    """
+
+    term = await _ensure_term(db, organization_id, term_code)
+    course = await _ensure_course(db, organization_id, course_code)
+    # Match the source path's course lock before deciding whether a create is
+    # idempotent.  Otherwise a concurrent source observation could create a
+    # draft between this check and ``_draft_for_course``.
+    course = (
+        await db.scalar(
+            select(CatalogCourse)
+            .where(CatalogCourse.id == course.id, CatalogCourse.organization_id == organization_id)
+            .with_for_update()
+        )
+    ) or course
+    existing = await _active_draft_for(db, organization_id, term.id, course.id)
+    if existing is not None and data:
+        raise CatalogConflict(
+            "An active draft already exists; use PATCH with its expected_revision",
+            draft_id=str(existing.id),
+            current_revision=int(existing.revision),
+        )
+    draft = await _draft_for_course(
+        db,
+        organization_id,
+        term,
+        course,
+        base_revision_id=base_revision_id,
+        created_by=created_by,
+        initial_data=data if data else None,
+    )
+    if data and existing is None:
+        current = dict(draft.data or {})
+        current = _merge_dicts(current, _jsonable(data), dict(draft.field_overrides or {}))
+        draft.data = current
+    if reason:
+        draft.reason = reason
+    if created_by is not None:
+        draft.updated_by = created_by
+    await db.flush()
+    return draft
+
+
+def _validate_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    forbidden = {"course_code", "term", "organization_id", "id", "state", "revision"}
+    if forbidden.intersection(patch):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Draft identity and revision fields cannot be changed")
+    normalized = _jsonable(patch)
+    if not isinstance(normalized, dict):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Draft patch must be an object")
+    if "local_credits" in normalized and normalized["local_credits"] is not None and _number(normalized["local_credits"]) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "local_credits must be numeric")
+    if "ects" in normalized and normalized["ects"] is not None and _number(normalized["ects"]) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "ects must be numeric")
+    sections = normalized.get("sections")
+    if sections is not None:
+        if not isinstance(sections, list):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "sections must be a list")
+        for section in sections:
+            if not isinstance(section, dict) or not str(section.get("section_code") or section.get("section") or "").strip():
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Every section needs a section_code")
+            for meeting in section.get("meetings") or []:
+                if not isinstance(meeting, dict):
+                    raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Meeting rows must be objects")
+                meeting_status = str(meeting.get("status") or "unknown")
+                if meeting_status == "scheduled":
+                    start, end, weekday = _int(meeting.get("start_minute")), _int(meeting.get("end_minute")), _int(meeting.get("weekday"))
+                    if weekday is None or start is None or end is None or end <= start:
+                        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Scheduled meetings need valid weekday and time range")
+    return normalized
+
+
+async def patch_draft(
+    db: AsyncSession,
+    organization_id: UUID,
+    draft_id: UUID,
+    *,
+    expected_revision: int,
+    patch: dict[str, Any],
+    reason: str,
+    updated_by: UUID | None = None,
+    verify: bool = False,
+    verification_evidence: str | None = None,
+) -> CatalogDraft:
+    if verify and not str(verification_evidence or "").strip():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Explicit verification requires source or review evidence",
+        )
+    draft = await get_draft(db, organization_id, draft_id, for_update=True)
+    if draft is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Draft not found")
+    if draft.state != "draft":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only an active draft can be edited")
+    if int(draft.revision) != expected_revision:
+        raise CatalogConflict(
+            "Draft changed since it was read",
+            draft_id=str(draft.id),
+            expected_revision=expected_revision,
+            current_revision=int(draft.revision),
+        )
+    patch = _validate_patch(patch)
+    current = dict(draft.data or {})
+    overrides = dict(draft.field_overrides or {})
+    current = _merge_dicts(current, patch, overrides={}, replace_sections=True)
+    current["component_status"] = dict(current.get("component_status") or {})
+    now = datetime.now(UTC)
+    if "sections" in patch and isinstance(current.get("sections"), list):
+        incoming_by_code = {
+            str(item.get("section_code") or item.get("section") or ""): item
+            for item in patch["sections"]
+            if isinstance(item, dict)
+        }
+        for section in current["sections"]:
+            if not isinstance(section, dict):
+                continue
+            section_code = str(section.get("section_code") or section.get("section") or "")
+            if section_code not in incoming_by_code:
+                continue
+            section["restrictions_status"] = "verified" if verify else "unknown"
+            section["restrictions_observed_at"] = _iso(now) if verify else None
+            section["restrictions_source_fetched_at"] = None
+    field_components = {
+        "title": "details",
+        "department": "listing",
+        "local_credits": "details",
+        "ects": "details",
+        "level": "details",
+        "availability": "details",
+        "campus": "details",
+        "sections": "sections",
+        "prerequisite_groups": "prerequisites",
+        "replacements": "replacements",
+        "completeness": "details",
+    }
+    for key in patch:
+        # Every admin edit is retained as a per-field source override.  An
+        # ordinary edit remains pending verification: a reason documents why
+        # it was changed, but it cannot manufacture source freshness.  The UI
+        # must send ``verify=true`` with evidence after checking the source or
+        # an approved record.
+        overrides[key] = {
+            "value": _jsonable(patch[key]),
+            "reason": reason,
+            "updated_by": str(updated_by) if updated_by else None,
+            "updated_at": _iso(now),
+        }
+        component = field_components.get(key, key)
+        meta = dict(current["component_status"].get(component, {}))
+        meta.update(
+            {
+                "component": component,
+                "source_status": "admin_verified" if verify else "admin_pending",
+                "verified": bool(verify),
+                "fresh": bool(verify),
+                "observed_at": _iso(now),
+                "source_fetched_at": None,
+            }
+        )
+        if verify:
+            meta["verification_evidence"] = str(verification_evidence).strip()
+            meta["verified_at"] = _iso(now)
+        current["component_status"][component] = meta
+        old_override = await db.scalar(
+            select(CatalogAdminOverride).where(
+                CatalogAdminOverride.organization_id == organization_id,
+                CatalogAdminOverride.draft_id == draft.id,
+                CatalogAdminOverride.field_name == key,
+                CatalogAdminOverride.active.is_(True),
+            )
+        )
+        if old_override is not None:
+            old_override.active = False
+            old_override.removed_at = now
+        db.add(
+            CatalogAdminOverride(
+                organization_id=organization_id,
+                term_id=draft.term_id,
+                course_id=draft.course_id,
+                draft_id=draft.id,
+                field_name=key,
+                value=_jsonable(patch[key]),
+                reason=reason,
+                active=True,
+                created_by=updated_by,
+            )
+        )
+    draft.data = current
+    draft.field_overrides = overrides
+    draft.reason = reason
+    draft.updated_by = updated_by
+    draft.revision = int(draft.revision) + 1
+    if not verify:
+        pending = {
+            "code": "manual_verification_required",
+            "message": "Administrator edit requires explicit verification before publication is considered fresh",
+            "severity": "warning",
+        }
+        existing_issues = [item for item in (draft.issues or []) if isinstance(item, dict)]
+        if pending not in existing_issues:
+            draft.issues = (existing_issues + [pending])[-200:]
+    await db.flush()
+    return draft
+
+
+async def _term_for_read(db: AsyncSession, organization_id: UUID, term_code: str) -> CatalogTerm | None:
+    return await db.scalar(
+        select(CatalogTerm).where(CatalogTerm.organization_id == organization_id, CatalogTerm.term_code == normalize_term(term_code))
+    )
+
+
+async def _release_for_term(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    *,
+    release_id: UUID | None = None,
+    required: bool = True,
+) -> CatalogRelease | None:
+    selected = release_id
+    explicit_release = release_id is not None
+    if selected is None:
+        pinned_by_term = db.info.get("academic_catalog_release_ids")
+        if isinstance(pinned_by_term, dict):
+            value = pinned_by_term.get(str(term.id)) or pinned_by_term.get(term.term_code)
+            if value:
+                try:
+                    selected = UUID(str(value))
+                except (TypeError, ValueError):
+                    selected = None
+        if selected is None:
+            pinned = db.info.get("academic_catalog_release_id")
+            if pinned:
+                try:
+                    candidate = UUID(str(pinned))
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None:
+                    selected = candidate
+    if selected is not None:
+        release = await db.scalar(
+            select(CatalogRelease).where(
+                CatalogRelease.id == selected,
+                CatalogRelease.organization_id == organization_id,
+                CatalogRelease.term_id == term.id,
+            )
+        )
+        if release is None and not explicit_release:
+            selected = None
+            pointer = await db.scalar(
+                select(CatalogTermActiveRelease).where(
+                    CatalogTermActiveRelease.organization_id == organization_id,
+                    CatalogTermActiveRelease.term_id == term.id,
+                )
+            )
+            release = await db.scalar(
+                select(CatalogRelease).where(
+                    CatalogRelease.id == pointer.release_id,
+                    CatalogRelease.organization_id == organization_id,
+                    CatalogRelease.term_id == term.id,
+                )
+            ) if pointer else None
+    else:
+        pointer = await db.scalar(
+            select(CatalogTermActiveRelease).where(
+                CatalogTermActiveRelease.organization_id == organization_id,
+                CatalogTermActiveRelease.term_id == term.id,
+            )
+        )
+        release = await db.scalar(
+            select(CatalogRelease).where(
+                CatalogRelease.id == pointer.release_id,
+                CatalogRelease.organization_id == organization_id,
+                CatalogRelease.term_id == term.id,
+            )
+        ) if pointer else None
+    if release is not None:
+        db.info["academic_catalog_release_id"] = str(release.id)
+        mapping = db.info.setdefault("academic_catalog_release_ids", {})
+        if isinstance(mapping, dict):
+            mapping[str(term.id)] = str(release.id)
+    if release is None and required:
+        raise CatalogUnavailable(term.term_code)
+    return release
+
+
+async def _release_revisions(
+    db: AsyncSession,
+    organization_id: UUID,
+    release: CatalogRelease,
+    *,
+    course_code: str | None = None,
+) -> list[tuple[CatalogCourse, CatalogCourseRevision]]:
+    stmt = (
+        select(CatalogCourse, CatalogCourseRevision)
+        .join(CatalogReleaseItem, CatalogReleaseItem.course_id == CatalogCourse.id)
+        .join(CatalogCourseRevision, CatalogCourseRevision.id == CatalogReleaseItem.course_revision_id)
+        .where(
+            CatalogReleaseItem.release_id == release.id,
+            CatalogReleaseItem.organization_id == organization_id,
+            CatalogCourse.organization_id == organization_id,
+            CatalogCourseRevision.organization_id == organization_id,
+        )
+        .order_by(CatalogCourse.course_code)
+    )
+    if course_code is not None:
+        stmt = stmt.where(CatalogCourse.course_code == normalize_course_code(course_code))
+    return list((await db.execute(stmt)).all())
+
+
+def _component_is_verified(revision: CatalogCourseRevision, component: str) -> bool:
+    value = (revision.component_status or {}).get(component)
+    return bool(isinstance(value, dict) and value.get("verified") is True)
+
+
+def _registration_boundary(value: Any) -> datetime | None:
+    """Parse the optional registration freshness boundary from settings."""
+
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        try:
+            parsed = datetime.combine(date.fromisoformat(text_value), datetime.min.time())
+        except (TypeError, ValueError):
+            return None
+    return _utc(parsed)
+
+
+def _registration_window(now: datetime | None = None) -> dict[str, Any]:
+    """Return configured registration bounds and whether the window is open."""
+
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+        raw_start = getattr(settings, "academic_catalog_registration_start", "")
+        raw_end = getattr(settings, "academic_catalog_registration_end", "")
+    except Exception:
+        raw_start = raw_end = ""
+    start = _registration_boundary(raw_start)
+    end = _registration_boundary(raw_end)
+    current = _utc(now or datetime.now(UTC)) or datetime.now(UTC)
+    active = bool(start and current >= start and (end is None or current <= end))
+    return {
+        "start": str(raw_start).strip() or None,
+        "end": str(raw_end).strip() or None,
+        "active": active,
+        "valid": not raw_start or start is not None,
+        "end_valid": not raw_end or end is not None,
+    }
+
+
+def _effective_component_status(
+    status_value: dict[str, Any],
+    *,
+    component: str | None = None,
+    registration: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Evaluate freshness at read time instead of trusting a stale JSON flag."""
+
+    status = dict(status_value) if isinstance(status_value, dict) else {}
+    fetched = _registration_boundary(status.get("source_fetched_at"))
+    verified = bool(status.get("verified") is True)
+    source_status = str(status.get("source_status") or "unknown")
+    verification_evidence = bool(status.get("verification_evidence"))
+    # A manual review has no source fetch timestamp, but it still needs a
+    # bounded evidence age. ``verified_at`` is written by PATCH; the observed
+    # timestamp is accepted for older rows created before that key existed.
+    verification_at = _registration_boundary(status.get("verified_at") or status.get("observed_at"))
+    freshness_at = fetched
+    freshness_kind = "source_fetch"
+    if freshness_at is None and source_status == "admin_verified" and verification_evidence:
+        freshness_at = verification_at
+        freshness_kind = "verification"
+    # Backfills deliberately have no source_fetched_at. Explicit human
+    # verification carries evidence and is the only non-source exception.
+    fresh = bool(status.get("fresh")) and verified and (
+        fetched is not None
+        or (source_status == "admin_verified" and verification_evidence and verification_at is not None)
+    )
+    stale_reason = None
+    current = _utc(now or datetime.now(UTC)) or datetime.now(UTC)
+    if freshness_at is not None and freshness_at > current:
+        fresh = False
+        stale_reason = "source_fetched_at_in_future" if freshness_kind == "source_fetch" else "verification_at_in_future"
+    max_age = _COMPONENT_MAX_AGE_SECONDS.get(component or "")
+    if freshness_at is not None and max_age is not None and (current - freshness_at).total_seconds() > max_age:
+        fresh = False
+        stale_reason = f"{freshness_kind}_expired"
+    if registration and registration.get("active") and freshness_at is not None:
+        start = _registration_boundary(registration.get("start"))
+        if start is not None and freshness_at < start:
+            fresh = False
+            stale_reason = (
+                "fetched_before_registration_window"
+                if freshness_kind == "source_fetch"
+                else "verification_before_registration_window"
+            )
+    if not verified:
+        fresh = False
+        stale_reason = stale_reason or "unverified"
+    if status.get("fresh") and not fresh and stale_reason is None:
+        stale_reason = "source_fetch_missing_or_expired"
+    status["fresh"] = fresh
+    status["verified"] = verified
+    if stale_reason:
+        status["stale_reason"] = stale_reason
+    return status
+
+
+def _catalog_metadata(revision: CatalogCourseRevision, release: CatalogRelease | None) -> dict[str, Any]:
+    registration = _registration_window()
+    statuses = dict(revision.component_status or {})
+    for component in COMPONENTS:
+        statuses.setdefault(
+            component,
+            {
+                "component": component,
+                "source_status": "unknown",
+                "verified": False,
+                "fresh": False,
+                "observed_at": _iso(revision.observed_at),
+                "source_fetched_at": _iso(revision.source_fetched_at),
+            },
+        )
+        statuses[component] = _effective_component_status(
+            statuses[component], component=component, registration=registration
+        )
+    return {
+        "release_id": str(release.id) if release else None,
+        "course_revision_id": str(revision.id),
+        "components": _jsonable(statuses),
+        "registration_window": registration,
+    }
+
+
+def serialize_draft(draft: CatalogDraft) -> dict[str, Any]:
+    return {
+        "id": str(draft.id),
+        "revision": int(draft.revision),
+        "state": draft.state,
+        "term_id": str(draft.term_id),
+        "course_id": str(draft.course_id),
+        "base_revision_id": str(draft.base_revision_id) if draft.base_revision_id else None,
+        "published_revision_id": str(draft.published_revision_id) if draft.published_revision_id else None,
+        "data": _jsonable(draft.data or {}),
+        "issues": _jsonable(draft.issues or []),
+        "field_overrides": _jsonable(draft.field_overrides or {}),
+        "reason": draft.reason,
+        "created_by": str(draft.created_by) if draft.created_by else None,
+        "updated_by": str(draft.updated_by) if draft.updated_by else None,
+        "created_at": _iso(draft.created_at),
+        "updated_at": _iso(draft.updated_at),
+    }
+
+
+def serialize_import_job(job: CatalogImportJob) -> dict[str, Any]:
+    return {
+        "id": str(job.id),
+        "organization_id": str(job.organization_id),
+        "term": job.term,
+        "department": job.department,
+        "course_codes": _jsonable(job.course_codes or []),
+        "payload": _jsonable(job.payload or {}),
+        "status": job.status,
+        "checkpoint": _jsonable(job.checkpoint or {}),
+        "attempts": job.attempts,
+        "lease_until": _iso(job.lease_until),
+        "error_code": job.error_code,
+        "error_detail": job.error_detail,
+        "dedup_key": job.dedup_key,
+        "reason": job.reason,
+        "priority": job.priority,
+        "created_at": _iso(job.created_at),
+        "updated_at": _iso(job.updated_at),
+        "started_at": _iso(job.started_at),
+        "completed_at": _iso(job.completed_at),
+    }
+
+
+def _freshness(revision: CatalogCourseRevision) -> str:
+    statuses = revision.component_status or {}
+    registration = _registration_window()
+    decision = ("listing", "details", "sections", "constraints", "prerequisites")
+    effective = {
+        component: _effective_component_status(
+            statuses.get(component, {}), component=component, registration=registration
+        )
+        for component in decision
+    }
+    if all(bool(effective[component].get("verified")) for component in decision):
+        return "fresh" if all(bool(effective[component].get("fresh")) for component in decision) else "stale"
+    return "unknown"
+
+
+def _has_conflicts(issues: Any) -> bool:
+    return any(isinstance(item, dict) and item.get("code") == "source_conflict" for item in (issues or []))
+
+
+async def _active_draft_for(
+    db: AsyncSession, organization_id: UUID, term_id: UUID, course_id: UUID
+) -> CatalogDraft | None:
+    return await db.scalar(
+        select(CatalogDraft).where(
+            CatalogDraft.organization_id == organization_id,
+            CatalogDraft.term_id == term_id,
+            CatalogDraft.course_id == course_id,
+            CatalogDraft.state == "draft",
+        )
+    )
+
+
+async def _latest_revision_for(
+    db: AsyncSession, organization_id: UUID, term_id: UUID, course_id: UUID
+) -> CatalogCourseRevision | None:
+    return await db.scalar(
+        select(CatalogCourseRevision)
+        .where(
+            CatalogCourseRevision.organization_id == organization_id,
+            CatalogCourseRevision.term_id == term_id,
+            CatalogCourseRevision.course_id == course_id,
+        )
+        .order_by(CatalogCourseRevision.revision.desc())
+        .limit(1)
+    )
+
+
+async def _admin_course_pairs(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    release: CatalogRelease | None,
+) -> list[tuple[CatalogCourse, CatalogCourseRevision]]:
+    if release is not None:
+        return await _release_revisions(db, organization_id, release)
+    return list((await db.execute(
+        select(CatalogCourse, CatalogCourseRevision)
+        .join(CatalogCourseRevision, CatalogCourseRevision.course_id == CatalogCourse.id)
+        .where(CatalogCourse.organization_id == organization_id,
+               CatalogCourseRevision.organization_id == organization_id,
+               CatalogCourseRevision.term_id == term.id)
+        .distinct(CatalogCourseRevision.course_id)
+        .order_by(CatalogCourseRevision.course_id, CatalogCourseRevision.revision.desc())
+    )).all())
+
+
+def _course_summary(
+    course: CatalogCourse,
+    revision: CatalogCourseRevision,
+    release: CatalogRelease | None,
+    *,
+    draft: CatalogDraft | None,
+    section_count: int,
+) -> dict[str, Any]:
+    return {
+        "course_code": course.course_code,
+        "department": course.department,
+        "title": revision.title,
+        "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
+        "ects": float(revision.ects) if revision.ects is not None else None,
+        "level": revision.level,
+        "availability": revision.availability,
+        "campus": revision.campus,
+        "state": "draft" if draft else revision.state,
+        "completeness": _jsonable(revision.completeness or {}),
+        "freshness": _freshness(revision),
+        "source_conflicts": _has_conflicts(draft.issues if draft else revision.issues),
+        "draft_id": str(draft.id) if draft else None,
+        "course_revision_id": str(revision.id),
+        "section_count": section_count,
+        "_catalog": _catalog_metadata(revision, release),
+    }
+
+
+async def list_course_rows(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    *,
+    department: str | None = None,
+    query: str | None = None,
+    state: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        return {"courses": [], "total": 0, "release_id": None, "counts": {"total": 0}}
+    release = await _release_for_term(db, organization_id, term, required=False)
+    pairs = await _admin_course_pairs(db, organization_id, term, release)
+    draft_pairs = list((await db.execute(
+        select(CatalogCourse, CatalogDraft)
+        .join(CatalogDraft, CatalogDraft.course_id == CatalogCourse.id)
+        .where(CatalogCourse.organization_id == organization_id,
+               CatalogDraft.organization_id == organization_id,
+               CatalogDraft.term_id == term.id, CatalogDraft.state == "draft")
+        .order_by(CatalogCourse.course_code)
+    )).all())
+    drafts_by_course = {course.id: draft for course, draft in draft_pairs}
+    revision_ids = [revision.id for _, revision in pairs]
+    section_counts = dict((await db.execute(
+        select(CatalogSection.course_revision_id, func.count(CatalogSection.id))
+        .where(CatalogSection.organization_id == organization_id,
+               CatalogSection.course_revision_id.in_(revision_ids))
+        .group_by(CatalogSection.course_revision_id)
+    )).all()) if revision_ids else {}
+    department_query = str(department or "").strip().casefold()
+    text_query = str(query or "").strip().casefold()
+    rows: list[dict[str, Any]] = []
+    for course, revision in pairs:
+        summary = _course_summary(course, revision, release, draft=drafts_by_course.get(course.id),
+                                  section_count=section_counts.get(revision.id, 0))
+        if department_query and department_query not in course.department.casefold():
+            continue
+        if state and summary["state"] != state:
+            continue
+        if text_query and text_query not in " ".join(str(summary.get(key) or "") for key in ("course_code", "title", "department")).casefold():
+            continue
+        rows.append(summary)
+    published_or_revised = {course.id for course, _ in pairs}
+    for course, draft in draft_pairs:
+        if course.id in published_or_revised:
+            continue
+        data = dict(draft.data or {})
+        candidate = {
+            "course_code": course.course_code,
+            "department": course.department,
+            "title": data.get("title"),
+            "local_credits": _number(data.get("local_credits")),
+            "ects": _number(data.get("ects")),
+            "level": data.get("level"),
+            "availability": data.get("availability"),
+            "campus": data.get("campus"),
+            "state": "draft",
+            "completeness": _jsonable(data.get("completeness") or {}),
+            "freshness": "unknown",
+            "source_conflicts": _has_conflicts(draft.issues),
+            "draft_id": str(draft.id),
+            "course_revision_id": None,
+            "section_count": len(data.get("sections") or []) if isinstance(data.get("sections"), list) else 0,
+            "_catalog": {
+                "release_id": None,
+                "course_revision_id": None,
+                "components": _jsonable(data.get("component_status") or {}),
+            },
+        }
+        if department_query and department_query not in course.department.casefold():
+            continue
+        if state and state != "draft":
+            continue
+        if text_query and text_query not in " ".join(
+            str(candidate.get(key) or "")
+            for key in ("course_code", "title", "department")
+        ).casefold():
+            continue
+        rows.append(candidate)
+    rows.sort(key=lambda row: row["course_code"])
+    counts = {
+        "total": len(rows),
+        "listed": sum(bool(row["completeness"].get("listing")) for row in rows),
+        "detailed": sum(bool(row["completeness"].get("details")) for row in rows),
+        "schedulable": sum(bool(row["completeness"].get("sections")) and row["section_count"] > 0 for row in rows),
+        "restrictions_verified": sum(bool(row["completeness"].get("constraints")) for row in rows),
+        "prerequisites_verified": sum(bool(row["completeness"].get("prerequisites")) for row in rows),
+        "source_conflicts": sum(bool(row["source_conflicts"]) for row in rows),
+    }
+    return {
+        "courses": rows[offset : offset + limit],
+        "total": len(rows),
+        "release_id": str(release.id) if release else None,
+        "counts": counts,
+    }
+
+
+async def _draft_detail(
+    db: AsyncSession,
+    draft: CatalogDraft,
+    course: CatalogCourse,
+    term: CatalogTerm,
+    release: CatalogRelease | None,
+) -> dict[str, Any]:
+    data = _jsonable(dict(draft.data or {}))
+    data.setdefault("course_code", course.course_code)
+    data.setdefault("department", course.department)
+    data.setdefault("term", term.term_code)
+    data.setdefault("sections", [])
+    data.setdefault("prerequisite_groups", [])
+    data.setdefault("replacements", [])
+    data.setdefault("completeness", {})
+    data["draft_id"] = str(draft.id)
+    data["state"] = draft.state
+    data["issues"] = _jsonable(draft.issues or [])
+    data["field_overrides"] = _jsonable(draft.field_overrides or {})
+    source_ids = []
+    for value in (draft.data or {}).get("_source_observation_ids", []):
+        try:
+            source_ids.append(UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    observations = (
+        await db.scalars(
+            select(CatalogSourceObservation)
+            .where(
+                CatalogSourceObservation.organization_id == draft.organization_id,
+                CatalogSourceObservation.id.in_(source_ids),
+            )
+            .order_by(CatalogSourceObservation.observed_at.desc(), CatalogSourceObservation.id)
+        )
+    ).all() if source_ids else []
+    data["source_observations"] = [
+        {
+            "id": str(row.id),
+            "tool": row.tool,
+            "term": row.term,
+            "department": row.department,
+            "course_code": row.course_code,
+            "section_code": row.section_code,
+            "status": row.status,
+            "issues": _jsonable(row.issues or []),
+            "observed_at": _iso(row.observed_at),
+            "source_fetched_at": _iso(row.source_fetched_at),
+        }
+        for row in observations
+    ]
+    data["_catalog"] = {
+        "release_id": str(release.id) if release else None,
+        "course_revision_id": None,
+        "components": _jsonable(data.get("component_status") or {}),
+    }
+    data["draft_revision"] = int(draft.revision)
+    data["draft"] = serialize_draft(draft)
+    return data
+
+
+async def course_detail(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    course_code: str,
+) -> dict[str, Any]:
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+    course = await db.scalar(
+        select(CatalogCourse).where(
+            CatalogCourse.organization_id == organization_id,
+            CatalogCourse.course_code == normalize_course_code(course_code),
+        )
+    )
+    if course is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Course not found")
+    release = await _release_for_term(db, organization_id, term, required=False)
+    pair = (await _release_revisions(db, organization_id, release, course_code=course.course_code)) if release else []
+    if pair:
+        _, revision = pair[0]
+        data = await _revision_data(db, revision)
+        data["term"] = term.term_code
+        data["state"] = revision.state
+        data["course_revision_id"] = str(revision.id)
+        data["release_id"] = str(release.id) if release else None
+        data["_catalog"] = _catalog_metadata(revision, release)
+    else:
+        draft = await _active_draft_for(db, organization_id, term.id, course.id)
+        revision = await _latest_revision_for(db, organization_id, term.id, course.id)
+        if draft is not None:
+            data = await _draft_detail(db, draft, course, term, release)
+        elif revision is not None:
+            data = await _revision_data(db, revision)
+            data["term"] = term.term_code
+            data["state"] = revision.state
+            data["course_revision_id"] = str(revision.id)
+            data["_catalog"] = _catalog_metadata(revision, release)
+        else:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Course is not available for this term")
+    history_rows = (
+        await db.scalars(
+            select(CatalogCourseRevision)
+            .where(
+                CatalogCourseRevision.organization_id == organization_id,
+                CatalogCourseRevision.course_id == course.id,
+                CatalogCourseRevision.term_id == term.id,
+            )
+            .order_by(CatalogCourseRevision.revision.desc())
+        )
+    ).all()
+    data["history"] = [
+        {
+            "id": str(item.id),
+            "revision": item.revision,
+            "state": item.state,
+            "created_at": _iso(item.created_at),
+            "source_fetched_at": _iso(item.source_fetched_at),
+        }
+        for item in history_rows
+    ]
+    observations = (
+        await db.scalars(
+            select(CatalogSourceObservation)
+            .where(
+                CatalogSourceObservation.organization_id == organization_id,
+                CatalogSourceObservation.term == term.term_code,
+                or_(
+                    CatalogSourceObservation.course_code == course.course_code,
+                    CatalogSourceObservation.candidate_data["courses"].contains(
+                        [{"course_code": course.course_code}]
+                    ),
+                ),
+            )
+            .order_by(CatalogSourceObservation.observed_at.desc(), CatalogSourceObservation.id)
+            .limit(100)
+        )
+    ).all()
+    data["source_observations"] = [
+        {
+            "id": str(row.id),
+            "tool": row.tool,
+            "term": row.term,
+            "department": row.department,
+            "course_code": row.course_code,
+            "section_code": row.section_code,
+            "status": row.status,
+            "issues": _jsonable(row.issues or []),
+            "observed_at": _iso(row.observed_at),
+            "source_fetched_at": _iso(row.source_fetched_at),
+        }
+        for row in observations
+    ]
+    return _jsonable(data)
+
+
+_OPERATION_RESULT_KEY = "_result"
+
+
+def _operation_request_payload(value: Any) -> dict[str, Any]:
+    """Return the request portion of an operation's durable JSON envelope.
+
+    Publication operations predate a dedicated response column in the frozen
+    schema.  New rows therefore retain the exact response beside the request
+    under a private key.  Keeping the two portions separate here means
+    retries still compare the caller's request only.
+    """
+
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if key != _OPERATION_RESULT_KEY}
+
+
+def _operation_stored_result(operation: CatalogPublicationOperation) -> dict[str, Any] | None:
+    value = (operation.request_payload or {}).get(_OPERATION_RESULT_KEY)
+    return _jsonable(value) if isinstance(value, dict) else None
+
+
+def _operation_response(
+    operation: CatalogPublicationOperation,
+    *,
+    term: CatalogTerm,
+    stored_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if stored_result is not None:
+        return stored_result
+    return {
+        "operation_id": str(operation.id),
+        "operation": operation.operation,
+        "status": operation.status,
+        "term": term.term_code,
+        "release_id": str(operation.result_release_id) if operation.result_release_id else None,
+        "target_release_id": str(operation.target_release_id) if operation.target_release_id else None,
+        "idempotency_key": operation.idempotency_key,
+    }
+
+
+async def _active_pointer_for_update(
+    db: AsyncSession, organization_id: UUID, term_id: UUID
+) -> CatalogTermActiveRelease | None:
+    return await db.scalar(
+        select(CatalogTermActiveRelease)
+        .where(
+            CatalogTermActiveRelease.organization_id == organization_id,
+            CatalogTermActiveRelease.term_id == term_id,
+        )
+        .with_for_update()
+    )
+
+
+async def _release_by_id(
+    db: AsyncSession, organization_id: UUID, term_id: UUID, release_id: UUID | None
+) -> CatalogRelease | None:
+    if release_id is None:
+        return None
+    return await db.scalar(
+        select(CatalogRelease).where(
+            CatalogRelease.id == release_id,
+            CatalogRelease.organization_id == organization_id,
+            CatalogRelease.term_id == term_id,
+        )
+    )
+
+
+def _blocking_draft_issues(draft: CatalogDraft) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (draft.issues or [])
+        if isinstance(item, dict) and item.get("severity", "error") == "error"
+    ]
+
+
+async def publish_drafts(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    draft_ids: list[UUID],
+    *,
+    expected_release_id: UUID | None,
+    idempotency_key: str,
+    reason: str,
+    created_by: UUID | None = None,
+    acknowledge_conflicts: bool = False,
+) -> dict[str, Any]:
+    """Atomically publish selected drafts and advance the term pointer."""
+
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+    # Lock the term row before looking up/creating the pointer.  A
+    # ``FOR UPDATE`` on a missing pointer does not lock anything, so two first
+    # publications could otherwise both choose release number 1 and race the
+    # active pointer insert.
+    term = await db.scalar(
+        select(CatalogTerm)
+        .where(CatalogTerm.id == term.id, CatalogTerm.organization_id == organization_id)
+        .with_for_update()
+    ) or term
+    request_payload = {
+        "term": term.term_code,
+        "draft_ids": [str(item) for item in draft_ids],
+        "expected_release_id": str(expected_release_id) if expected_release_id else None,
+        "acknowledge_conflicts": bool(acknowledge_conflicts),
+        "reason": reason,
+    }
+    existing_operation = await db.scalar(
+        select(CatalogPublicationOperation).where(
+            CatalogPublicationOperation.organization_id == organization_id,
+            CatalogPublicationOperation.term_id == term.id,
+            CatalogPublicationOperation.operation == "publish",
+            CatalogPublicationOperation.idempotency_key == idempotency_key,
+        )
+    )
+    if existing_operation is not None:
+        if _digest(_operation_request_payload(existing_operation.request_payload)) != _digest(request_payload):
+            raise CatalogConflict("Idempotency key was already used for a different publication request")
+        return _operation_response(
+            existing_operation,
+            term=term,
+            stored_result=_operation_stored_result(existing_operation),
+        )
+    pointer = await _active_pointer_for_update(db, organization_id, term.id)
+    current = await _release_by_id(db, organization_id, term.id, pointer.release_id if pointer else None)
+    current_id = current.id if current else None
+    if current_id != expected_release_id:
+        raise CatalogConflict(
+            "The active release changed since it was read",
+            expected_release_id=str(expected_release_id) if expected_release_id else None,
+            current_release_id=str(current_id) if current_id else None,
+        )
+    drafts = (
+        await db.scalars(
+            select(CatalogDraft).where(
+                CatalogDraft.organization_id == organization_id,
+                CatalogDraft.term_id == term.id,
+                CatalogDraft.id.in_(draft_ids),
+            ).order_by(CatalogDraft.id).with_for_update()
+        )
+    ).all()
+    if len(drafts) != len(set(draft_ids)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "One or more drafts were not found for this term")
+    if any(draft.state != "draft" for draft in drafts):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only active drafts can be published")
+    if len({draft.course_id for draft in drafts}) != len(drafts):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A publication request may contain one draft per course")
+    # A draft may have been built from a previous release.  Check its base
+    # against the exact revision currently selected for that course, rather
+    # than the highest historical revision (which may have been rolled back).
+    current_items = (
+        await db.scalars(select(CatalogReleaseItem).where(CatalogReleaseItem.release_id == current.id))
+    ).all() if current is not None else []
+    active_course_revisions = {item.course_id: item.course_revision_id for item in current_items}
+    stale_bases = []
+    for draft in drafts:
+        current_revision_id = active_course_revisions.get(draft.course_id)
+        if current_revision_id is not None and draft.base_revision_id != current_revision_id:
+            stale_bases.append(
+                {
+                    "draft_id": str(draft.id),
+                    "base_revision_id": str(draft.base_revision_id) if draft.base_revision_id else None,
+                    "current_revision_id": str(current_revision_id),
+                }
+            )
+        elif current_revision_id is None and draft.base_revision_id is not None and current is not None:
+            stale_bases.append(
+                {
+                    "draft_id": str(draft.id),
+                    "base_revision_id": str(draft.base_revision_id),
+                    "current_revision_id": None,
+                }
+            )
+    if stale_bases:
+        raise CatalogConflict("One or more drafts are based on a stale release revision", stale_bases=stale_bases)
+    conflicts = [issue for draft in drafts for issue in (draft.issues or []) if isinstance(issue, dict) and issue.get("code") == "source_conflict"]
+    if conflicts and not acknowledge_conflicts:
+        raise CatalogConflict(
+            "Source conflicts require explicit acknowledgement before publication",
+            source_conflicts=conflicts,
+        )
+    blocking = [issue for draft in drafts for issue in _blocking_draft_issues(draft)]
+    if blocking:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            {"code": "draft_invalid", "message": "Draft contains blocking validation issues", "issues": blocking},
+        )
+
+    revisions: list[CatalogCourseRevision] = []
+    for draft in drafts:
+        revisions.append(await _materialize_revision(db, draft, created_by=created_by))
+    latest_number = int(
+        await db.scalar(
+            select(func.coalesce(func.max(CatalogRelease.release_number), 0)).where(
+                CatalogRelease.organization_id == organization_id,
+                CatalogRelease.term_id == term.id,
+            )
+        )
+        or 0
+    )
+    release = CatalogRelease(
+        id=uuid4(),
+        organization_id=organization_id,
+        term_id=term.id,
+        release_number=latest_number + 1,
+        operation="publish",
+        reason=reason,
+        created_by=created_by,
+        idempotency_key=idempotency_key,
+        expected_release_id=expected_release_id,
+        metadata_json={"acknowledge_conflicts": acknowledge_conflicts},
+    )
+    db.add(release)
+    await db.flush()
+    items: dict[UUID, UUID] = {}
+    if current is not None:
+        existing_items = (
+            await db.scalars(select(CatalogReleaseItem).where(CatalogReleaseItem.release_id == current.id))
+        ).all()
+        items.update({item.course_id: item.course_revision_id for item in existing_items})
+    for draft, revision in zip(drafts, revisions, strict=True):
+        items[draft.course_id] = revision.id
+        draft.state = "published"
+        draft.published_revision_id = revision.id
+    courses = {
+        course.id: course
+        for course in (
+            await db.scalars(select(CatalogCourse).where(CatalogCourse.organization_id == organization_id, CatalogCourse.id.in_(items.keys())))
+        ).all()
+    }
+    for course_id, revision_id in items.items():
+        course = courses.get(course_id)
+        if course is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Release contains a course outside this organization")
+        db.add(
+            CatalogReleaseItem(
+                release_id=release.id,
+                organization_id=organization_id,
+                course_id=course_id,
+                course_revision_id=revision_id,
+                course_code=course.course_code,
+            )
+        )
+    operation = CatalogPublicationOperation(
+        id=uuid4(),
+        organization_id=organization_id,
+        term_id=term.id,
+        operation="publish",
+        idempotency_key=idempotency_key,
+        expected_release_id=expected_release_id,
+        result_release_id=release.id,
+        status="completed",
+        reason=reason,
+        request_payload=request_payload,
+        created_by=created_by,
+        completed_at=datetime.now(UTC),
+    )
+    result = {
+        **_operation_response(operation, term=term),
+        "release_number": release.release_number,
+        "published_draft_ids": [str(item.id) for item in drafts],
+        "course_revision_ids": [str(item.id) for item in revisions],
+    }
+    # Store the exact response in the same immutable operation row.  The
+    # operation and release UUIDs are assigned explicitly above so this is
+    # complete before the row's INSERT (publication history is immutable once
+    # persisted).
+    operation.request_payload = {**request_payload, _OPERATION_RESULT_KEY: result}
+    db.add(operation)
+    if pointer is None:
+        db.add(CatalogTermActiveRelease(organization_id=organization_id, term_id=term.id, release_id=release.id))
+    else:
+        pointer.release_id = release.id
+    await db.flush()
+    return result
+
+
+async def rollback_release(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    target_release_id: UUID,
+    *,
+    expected_release_id: UUID | None,
+    idempotency_key: str,
+    reason: str,
+    created_by: UUID | None = None,
+) -> dict[str, Any]:
+    """Create a new release pointing at a prior immutable release."""
+
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+    term = await db.scalar(
+        select(CatalogTerm)
+        .where(CatalogTerm.id == term.id, CatalogTerm.organization_id == organization_id)
+        .with_for_update()
+    ) or term
+    request_payload = {
+        "term": term.term_code,
+        "target_release_id": str(target_release_id),
+        "expected_release_id": str(expected_release_id) if expected_release_id else None,
+        "reason": reason,
+    }
+    existing_operation = await db.scalar(
+        select(CatalogPublicationOperation).where(
+            CatalogPublicationOperation.organization_id == organization_id,
+            CatalogPublicationOperation.term_id == term.id,
+            CatalogPublicationOperation.operation == "rollback",
+            CatalogPublicationOperation.idempotency_key == idempotency_key,
+        )
+    )
+    if existing_operation is not None:
+        if _digest(_operation_request_payload(existing_operation.request_payload)) != _digest(request_payload):
+            raise CatalogConflict("Idempotency key was already used for a different rollback request")
+        return _operation_response(
+            existing_operation,
+            term=term,
+            stored_result=_operation_stored_result(existing_operation),
+        )
+    pointer = await _active_pointer_for_update(db, organization_id, term.id)
+    current = await _release_by_id(db, organization_id, term.id, pointer.release_id if pointer else None)
+    current_id = current.id if current else None
+    if current_id != expected_release_id:
+        raise CatalogConflict(
+            "The active release changed since it was read",
+            expected_release_id=str(expected_release_id) if expected_release_id else None,
+            current_release_id=str(current_id) if current_id else None,
+        )
+    target = await _release_by_id(db, organization_id, term.id, target_release_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Target release not found")
+    latest_number = int(
+        await db.scalar(
+            select(func.coalesce(func.max(CatalogRelease.release_number), 0)).where(
+                CatalogRelease.organization_id == organization_id,
+                CatalogRelease.term_id == term.id,
+            )
+        )
+        or 0
+    )
+    release = CatalogRelease(
+        id=uuid4(),
+        organization_id=organization_id,
+        term_id=term.id,
+        release_number=latest_number + 1,
+        operation="rollback",
+        reason=reason,
+        created_by=created_by,
+        idempotency_key=idempotency_key,
+        expected_release_id=expected_release_id,
+        target_release_id=target.id,
+        metadata_json={"target_release_id": str(target.id)},
+    )
+    db.add(release)
+    await db.flush()
+    target_items = (await db.scalars(select(CatalogReleaseItem).where(CatalogReleaseItem.release_id == target.id))).all()
+    for item in target_items:
+        db.add(
+            CatalogReleaseItem(
+                release_id=release.id,
+                organization_id=organization_id,
+                course_id=item.course_id,
+                course_revision_id=item.course_revision_id,
+                course_code=item.course_code,
+            )
+        )
+    operation = CatalogPublicationOperation(
+        id=uuid4(),
+        organization_id=organization_id,
+        term_id=term.id,
+        operation="rollback",
+        idempotency_key=idempotency_key,
+        expected_release_id=expected_release_id,
+        result_release_id=release.id,
+        target_release_id=target.id,
+        status="completed",
+        reason=reason,
+        request_payload=request_payload,
+        created_by=created_by,
+        completed_at=datetime.now(UTC),
+    )
+    result = {
+        **_operation_response(operation, term=term),
+        "release_number": release.release_number,
+        "target_release_id": str(target.id),
+        "course_count": len(target_items),
+    }
+    operation.request_payload = {**request_payload, _OPERATION_RESULT_KEY: result}
+    db.add(operation)
+    if pointer is None:
+        db.add(CatalogTermActiveRelease(organization_id=organization_id, term_id=term.id, release_id=release.id))
+    else:
+        pointer.release_id = release.id
+    await db.flush()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Published consumer reads
+# ---------------------------------------------------------------------------
+
+
+async def _organization_for_user(db: AsyncSession, user_id: UUID) -> UUID:
+    """Resolve the tenant from an active account, never from a client hint."""
+
+    from app.db.models import AccountDirectory, AccountStatus
+
+    account = await db.scalar(
+        select(AccountDirectory).where(
+            AccountDirectory.user_id == user_id,
+            AccountDirectory.status == AccountStatus.active,
+        )
+    )
+    if account is None or account.organization_id is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is inactive")
+    info = getattr(db, "info", {}) or {}
+    hinted = info.get("catalog_organization_id") if isinstance(info, dict) else None
+    if hinted is None and isinstance(info, dict):
+        hinted = info.get("organization_id")
+    if hinted is not None:
+        try:
+            if UUID(str(hinted)) != account.organization_id:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Catalog organization scope mismatch")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Catalog organization scope mismatch") from exc
+    return account.organization_id
+
+
+def _release_metadata(
+    release: CatalogRelease,
+    term: CatalogTerm,
+    *,
+    course_count: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "catalog_release_id": str(release.id),
+        "release_id": str(release.id),
+        "release_number": release.release_number,
+        "operation": release.operation,
+        "term": term.term_code,
+        "course_count": course_count,
+        "components": {},
+        "registration_window": _registration_window(),
+    }
+
+
+async def active_release_metadata(
+    db: AsyncSession,
+    user_id: UUID,
+    term: str,
+) -> dict[str, Any]:
+    """Return the immutable release pin used by a consumer request."""
+
+    organization_id = await _organization_for_user(db, user_id)
+    term_row = await _term_for_read(db, organization_id, term)
+    if term_row is None:
+        raise CatalogUnavailable(term)
+    release = await _release_for_term(db, organization_id, term_row, required=True)
+    return _release_metadata(release, term_row)
+
+
+async def _bulk_revision_components(
+    db: AsyncSession,
+    organization_id: UUID,
+    revisions: list[CatalogCourseRevision],
+) -> dict[str, dict[UUID, list[Any]]]:
+    """Load all release children with bounded queries for planner batches."""
+
+    revision_ids = [item.id for item in revisions]
+    if not revision_ids:
+        return {
+            "sections": {},
+            "meetings": {},
+            "instructors": {},
+            "restrictions": {},
+            "groups": {},
+            "requirements": {},
+            "replacements": {},
+        }
+    section_rows = (
+        await db.scalars(
+            select(CatalogSection)
+            .where(
+                CatalogSection.organization_id == organization_id,
+                CatalogSection.course_revision_id.in_(revision_ids),
+            )
+            .order_by(CatalogSection.course_revision_id, CatalogSection.section_code)
+        )
+    ).all()
+    section_ids = [row.id for row in section_rows]
+    meeting_rows = (
+        await db.scalars(
+            select(CatalogMeeting)
+            .where(
+                CatalogMeeting.organization_id == organization_id,
+                CatalogMeeting.section_id.in_(section_ids),
+            )
+            .order_by(CatalogMeeting.section_id, CatalogMeeting.weekday, CatalogMeeting.start_minute, CatalogMeeting.id)
+        )
+    ).all() if section_ids else []
+    instructor_rows = (
+        await db.execute(
+            select(CatalogSectionInstructor, CatalogInstructor)
+            .join(CatalogInstructor, CatalogInstructor.id == CatalogSectionInstructor.instructor_id)
+            .where(
+                CatalogSectionInstructor.organization_id == organization_id,
+                CatalogSectionInstructor.section_id.in_(section_ids),
+            )
+            .order_by(CatalogSectionInstructor.section_id, CatalogSectionInstructor.id)
+        )
+    ).all() if section_ids else []
+    restriction_rows = (
+        await db.scalars(
+            select(CatalogRestriction)
+            .where(
+                CatalogRestriction.organization_id == organization_id,
+                CatalogRestriction.course_revision_id.in_(revision_ids),
+            )
+            .order_by(
+                CatalogRestriction.course_revision_id,
+                CatalogRestriction.section_id,
+                CatalogRestriction.restriction_group,
+                CatalogRestriction.row_index,
+                CatalogRestriction.id,
+            )
+        )
+    ).all()
+    group_rows = (
+        await db.scalars(
+            select(CatalogPrerequisiteGroup)
+            .where(
+                CatalogPrerequisiteGroup.organization_id == organization_id,
+                CatalogPrerequisiteGroup.course_revision_id.in_(revision_ids),
+            )
+            .order_by(CatalogPrerequisiteGroup.course_revision_id, CatalogPrerequisiteGroup.group_no, CatalogPrerequisiteGroup.id)
+        )
+    ).all()
+    group_ids = [row.id for row in group_rows]
+    requirement_rows = (
+        await db.scalars(
+            select(CatalogPrerequisiteRequirement)
+            .where(
+                CatalogPrerequisiteRequirement.organization_id == organization_id,
+                CatalogPrerequisiteRequirement.group_id.in_(group_ids),
+            )
+            .order_by(CatalogPrerequisiteRequirement.group_id, CatalogPrerequisiteRequirement.position, CatalogPrerequisiteRequirement.id)
+        )
+    ).all() if group_ids else []
+    replacement_rows = (
+        await db.scalars(
+            select(CatalogCourseReplacement)
+            .where(
+                CatalogCourseReplacement.organization_id == organization_id,
+                CatalogCourseReplacement.course_revision_id.in_(revision_ids),
+            )
+            .order_by(CatalogCourseReplacement.course_revision_id, CatalogCourseReplacement.related_course_code, CatalogCourseReplacement.id)
+        )
+    ).all()
+
+    grouped: dict[str, dict[UUID, list[Any]]] = {
+        "sections": {},
+        "meetings": {},
+        "instructors": {},
+        "restrictions": {},
+        "groups": {},
+        "requirements": {},
+        "replacements": {},
+    }
+    for row in section_rows:
+        grouped["sections"].setdefault(row.course_revision_id, []).append(row)
+    for row in meeting_rows:
+        grouped["meetings"].setdefault(row.section_id, []).append(row)
+    for link, instructor in instructor_rows:
+        grouped["instructors"].setdefault(link.section_id, []).append((link, instructor))
+    for row in restriction_rows:
+        key = row.section_id or row.course_revision_id
+        grouped["restrictions"].setdefault(key, []).append(row)
+    for row in group_rows:
+        grouped["groups"].setdefault(row.course_revision_id, []).append(row)
+    for row in requirement_rows:
+        grouped["requirements"].setdefault(row.group_id, []).append(row)
+    for row in replacement_rows:
+        grouped["replacements"].setdefault(row.course_revision_id, []).append(row)
+    return grouped
+
+
+def _public_section_payload(
+    section: CatalogSection,
+    children: dict[str, dict[UUID, list[Any]]],
+) -> dict[str, Any]:
+    meetings = [
+        {
+            "weekday": row.weekday,
+            "day": row.weekday,
+            "start_minute": row.start_minute,
+            "end_minute": row.end_minute,
+            "room": row.room,
+            "status": row.status,
+            "raw_label": row.raw_label,
+        }
+        for row in children["meetings"].get(section.id, [])
+    ]
+    instructors = [
+        {
+            "source_name": link.source_name,
+            "name": link.source_name,
+            "position": instructor.position,
+            "researcher_id": link.researcher_id,
+            "match_method": link.match_method,
+            "resolution_status": link.resolution_status,
+        }
+        for link, instructor in children["instructors"].get(section.id, [])
+    ]
+    restrictions = [
+        _restriction_dict(row)
+        for row in children["restrictions"].get(section.id, [])
+    ]
+    payload = {
+        "section_code": section.section_code,
+        "section": section.section_code,
+        "section_number": section.section_code,
+        "status": section.status,
+        "notes": section.notes,
+        "syllabus_url": section.syllabus_url,
+        "syllabus_available": section.syllabus_available,
+        "meetings_status": section.meetings_status,
+        "meeting_status": section.meetings_status,
+        "restrictions_status": section.restrictions_status,
+        "restrictions_observed_at": _iso(section.restrictions_observed_at),
+        "restrictions_source_fetched_at": _iso(section.restrictions_source_fetched_at),
+        "meetings": meetings,
+        "schedule": meetings,
+        "instructors": instructors,
+        "restrictions": restrictions,
+    }
+    if instructors:
+        payload["instructor"] = ", ".join(item["source_name"] for item in instructors)
+    return payload
+
+
+def _public_groups(
+    revision: CatalogCourseRevision,
+    children: dict[str, dict[UUID, list[Any]]],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for group in children["groups"].get(revision.id, []):
+        requirements = [
+            {
+                "course_code": item.course_code,
+                "prerequisite_course_code": item.course_code,
+                "minimum_grade": item.minimum_grade,
+                "requirement_type": item.requirement_type,
+                "position": item.position,
+                "raw_text": item.raw_text,
+                "program_code": group.program_code,
+                "curriculum_version": group.curriculum_version,
+            }
+            for item in children["requirements"].get(group.id, [])
+        ]
+        groups.append(
+            {
+                "group_no": group.group_no,
+                "logic": group.logic,
+                "program_code": group.program_code,
+                "curriculum_version": group.curriculum_version,
+                "applicability": _jsonable(group.applicability or {}),
+                "verified": group.verified,
+                "raw_text": group.raw_text,
+                "requirements": requirements,
+            }
+        )
+    return groups
+
+
+def _flat_prerequisites(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for group in groups:
+        requirements = group.get("requirements") or []
+        logic = str(group.get("logic") or "AND").upper()
+        for position, requirement in enumerate(requirements):
+            if not isinstance(requirement, dict):
+                continue
+            row = dict(requirement)
+            row.setdefault("set_no", str(group.get("group_no") or 1))
+            if logic == "OR":
+                row["set_no"] = f"{group.get('group_no') or 1}:{position}"
+            rows.append(row)
+    return rows
+
+
+def _public_replacements(
+    revision: CatalogCourseRevision,
+    children: dict[str, dict[UUID, list[Any]]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "relationship_type": row.relationship_type,
+            "related_course_code": row.related_course_code,
+            "program_code": row.program_code,
+            "curriculum_version": row.curriculum_version,
+            "verified": row.verified,
+            "raw_text": row.raw_text,
+        }
+        for row in children["replacements"].get(revision.id, [])
+    ]
+
+
+async def _student_profile_for_catalog(
+    db: AsyncSession,
+    user_id: UUID,
+    term: CatalogTerm,
+) -> dict[str, Any] | None:
+    """Load only the student fields needed for section eligibility."""
+
+    try:
+        from app.db.models import StudentAcademicSnapshot, StudentContext
+
+        context = await db.get(StudentContext, user_id)
+        snapshot = await db.scalar(
+            select(StudentAcademicSnapshot).where(
+                StudentAcademicSnapshot.user_id == user_id,
+                StudentAcademicSnapshot.term == term.term_code,
+            )
+        )
+    except Exception:
+        return None
+    if context is None and snapshot is None:
+        return None
+    credits = float(snapshot.current_credits) if snapshot and snapshot.current_credits else 0.0
+    points = float(snapshot.current_grade_points) if snapshot else 0.0
+    return {
+        "department": (context.department or context.program_code) if context else None,
+        "surname": context.surname_prefix if context else None,
+        "year": context.year_of_study if context else None,
+        "cgpa": points / credits if credits else None,
+        "completed": list(snapshot.completed_courses or []) if snapshot else [],
+    }
+
+
+def _prior_grade(completed: list[Any], course_code: str) -> str | None:
+    from app.campus.departments import expand_course_code
+
+    def canonical(value: str) -> str:
+        normalized = normalize_course_code(value)
+        expanded = expand_course_code(normalized)
+        return expanded[0] if expanded is not None else normalized
+
+    try:
+        wanted = canonical(course_code)
+    except ValueError:
+        return None
+    for item in completed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            code = canonical(str(item.get("course_code") or item.get("code") or ""))
+        except ValueError:
+            continue
+        if code == wanted:
+            grade = item.get("grade")
+            if grade not in (None, ""):
+                return str(grade)
+    return None
+
+
+def _section_constraint_metadata(section: CatalogSection, revision: CatalogCourseRevision) -> dict[str, Any]:
+    meta = dict((revision.component_status or {}).get("constraints") or {})
+    meta.update({
+        "component": "constraints",
+        "verified": section.restrictions_status == "verified",
+        "fresh": section.restrictions_status == "verified",
+        "observed_at": _iso(section.restrictions_observed_at),
+        "source_fetched_at": _iso(section.restrictions_source_fetched_at),
+    })
+    if section.restrictions_source_fetched_at is not None:
+        meta["source_status"] = "success"
+    return _effective_component_status(meta, component="constraints", registration=_registration_window())
+
+
+_UNAVAILABLE_CATALOG_MARKERS = (
+    "closed",
+    "cancelled",
+    "canceled",
+    "notoffered",
+    "unavailable",
+    "archived",
+    "kapaliders",
+    "kapali",
+)
+
+
+def _course_or_section_unavailable(
+    revision: CatalogCourseRevision,
+    section: CatalogSection | None,
+) -> bool:
+    """Recognize explicit source/admin withdrawal states.
+
+    These rows remain visible in catalog browsing, but a known closed course
+    must never become an automatically selectable planner offering merely
+    because its historical meetings and prerequisites are complete.
+    """
+
+    values = [revision.availability]
+    if section is not None:
+        values.append(section.status)
+    normalized = " ".join(_key(value) for value in values if value not in (None, ""))
+    return any(marker in normalized for marker in _UNAVAILABLE_CATALOG_MARKERS)
+
+
+def _section_eligibility(
+    restrictions: list[CatalogRestriction],
+    revision: CatalogCourseRevision,
+    course_code: str,
+    section: CatalogSection | None,
+    profile: dict[str, Any] | None,
+) -> tuple[bool | None, str | None]:
+    component = (revision.component_status or {}).get("constraints")
+    if not isinstance(component, dict) or component.get("verified") is not True:
+        return None, "section restrictions could not be verified"
+    if section is None or section.restrictions_status != "verified":
+        return None, "section restrictions could not be verified"
+    if not _section_constraint_metadata(section, revision).get("fresh"):
+        return None, "section restrictions are stale or lack verification evidence"
+    if not restrictions:
+        return True, None
+    if profile is None:
+        return None, "student context is required to verify section restrictions"
+    if not profile.get("department"):
+        return None, "student department is required to verify section restrictions"
+    from app.campus.eligibility import evaluate
+
+    verdict = evaluate(
+        [_restriction_dict(row) for row in restrictions],
+        department=profile.get("department"),
+        surname=profile.get("surname"),
+        cgpa=profile.get("cgpa"),
+        year=profile.get("year"),
+        prior_grade=_prior_grade(profile.get("completed") or [], course_code),
+    )
+    return verdict.eligible, verdict.reason or None
+
+
+async def _published_rows(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    release: CatalogRelease,
+) -> tuple[list[tuple[CatalogCourse, CatalogCourseRevision]], dict[str, dict[UUID, list[Any]]]]:
+    pairs = await _release_revisions(db, organization_id, release)
+    revisions = [revision for _, revision in pairs]
+    children = await _bulk_revision_components(db, organization_id, revisions)
+    return pairs, children
+
+
+def _release_catalog_envelope(
+    release: CatalogRelease,
+    term: CatalogTerm,
+    *,
+    components: dict[str, Any] | None = None,
+    course_count: int | None = None,
+) -> dict[str, Any]:
+    metadata = _release_metadata(release, term, course_count=course_count)
+    metadata["components"] = _jsonable(components or {})
+    return metadata
+
+
+async def _directory_read(
+    db: AsyncSession,
+    organization_id: UUID,
+    *,
+    term_code: str | None = None,
+    query: str | None = None,
+) -> dict[str, Any]:
+    releases: list[tuple[CatalogTerm, CatalogRelease]] = []
+    if term_code:
+        term = await _term_for_read(db, organization_id, term_code)
+        if term is None:
+            raise CatalogUnavailable(term_code)
+        release = await _release_for_term(db, organization_id, term, required=True)
+        releases.append((term, release))
+    else:
+        terms = (
+            await db.scalars(
+                select(CatalogTerm)
+                .join(
+                    CatalogTermActiveRelease,
+                    (CatalogTermActiveRelease.term_id == CatalogTerm.id)
+                    & (CatalogTermActiveRelease.organization_id == organization_id),
+                )
+                .where(CatalogTerm.organization_id == organization_id)
+                .order_by(CatalogTerm.term_code)
+            )
+        ).all()
+        for term in terms:
+            release = await _release_for_term(db, organization_id, term, required=False)
+            if release is not None:
+                releases.append((term, release))
+        if not releases:
+            raise CatalogUnavailable()
+    department_codes: set[str] = set()
+    semester_rows: list[dict[str, Any]] = []
+    release_ids: list[str] = []
+    for term, release in releases:
+        release_ids.append(str(release.id))
+        semester_rows.append({"code": term.term_code, "name": term.label or term.term_code})
+        pairs = await _release_revisions(db, organization_id, release)
+        department_codes.update(course.department for course, _ in pairs if course.department)
+    departments_payload: list[dict[str, str]] = []
+    for code in sorted(department_codes):
+        try:
+            from app.campus import departments as department_directory
+
+            known = department_directory.by_code(code)
+        except Exception:
+            known = None
+        departments_payload.append({
+            "code": code,
+            "name": known.name if known else code,
+        })
+    if query:
+        folded = str(query).strip().casefold()
+        departments_payload = [
+            row for row in departments_payload
+            if folded in row["code"].casefold() or folded in row["name"].casefold()
+        ]
+    return {
+        "departments": departments_payload,
+        "semesters": semester_rows,
+        "_catalog": {
+            "release_id": release_ids[0] if len(release_ids) == 1 else None,
+            "release_ids": release_ids,
+            "course_revision_id": None,
+            "components": {},
+            "registration_window": _registration_window(),
+        },
+    }
+
+
+async def _published_summary_rows(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    release: CatalogRelease,
+    *,
+    department: str | None = None,
+    query: str | None = None,
+) -> list[dict[str, Any]]:
+    pairs = await _release_revisions(db, organization_id, release)
+    revision_ids = [revision.id for _, revision in pairs]
+    section_counts: dict[UUID, int] = {}
+    if revision_ids:
+        counts = await db.execute(
+            select(CatalogSection.course_revision_id, func.count(CatalogSection.id))
+            .where(
+                CatalogSection.organization_id == organization_id,
+                CatalogSection.course_revision_id.in_(revision_ids),
+            )
+            .group_by(CatalogSection.course_revision_id)
+        )
+        section_counts = {key: int(value) for key, value in counts.all()}
+    department_query = str(department or "").strip().casefold()
+    text_query = str(query or "").strip().casefold()
+    rows: list[dict[str, Any]] = []
+    for course, revision in pairs:
+        if department_query and department_query not in course.department.casefold():
+            continue
+        row = {
+            "course_code": course.course_code,
+            "department": course.department,
+            "title": revision.title,
+            "name": revision.title,
+            "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
+            "credits": float(revision.local_credits) if revision.local_credits is not None else None,
+            "ects": float(revision.ects) if revision.ects is not None else None,
+            "level": revision.level,
+            "availability": revision.availability,
+            "campus": revision.campus,
+            "is_thesis": bool(revision.is_thesis),
+            "state": revision.state,
+            "completeness": _jsonable(revision.completeness or {}),
+            "freshness": _freshness(revision),
+            "course_revision_id": str(revision.id),
+            "section_count": section_counts.get(revision.id, 0),
+            "_catalog": _catalog_metadata(revision, release),
+        }
+        if text_query and text_query not in " ".join(
+            str(row.get(key) or "") for key in ("course_code", "title", "department")
+        ).casefold():
+            continue
+        rows.append(row)
+    return rows
+
+
+async def _published_course_detail(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: CatalogTerm,
+    release: CatalogRelease,
+    course: CatalogCourse,
+    revision: CatalogCourseRevision,
+) -> dict[str, Any]:
+    data = await _revision_data(db, revision)
+    data.update(
+        {
+            "term": term.term_code,
+            "state": revision.state,
+            "credits": data.get("local_credits"),
+            "name": data.get("title"),
+            "release_id": str(release.id),
+            "course_revision_id": str(revision.id),
+            "_catalog": _catalog_metadata(revision, release),
+        }
+    )
+    for section in data.get("sections", []):
+        section.setdefault("section", section.get("section_code"))
+        section.setdefault("section_number", section.get("section_code"))
+        section.setdefault("schedule", section.get("meetings", []))
+        section.setdefault("meeting_status", section.get("meetings_status", "unknown"))
+    return _jsonable(data)
+
+
+async def read_tool(
+    db: AsyncSession,
+    user_id: UUID,
+    tool_suffix: str,
+    values: dict[str, Any],
+) -> Any:
+    """Read one shared Course Info operation from one pinned release."""
+
+    if tool_suffix not in CATALOG_TOOLS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Catalog tool is unavailable: {tool_suffix}")
+    organization_id = await _organization_for_user(db, user_id)
+    values = dict(values or {})
+    term_code, department, requested_course, section_code = _scope(values)
+    if tool_suffix in {"get_departments_and_semesters", "search_departments"}:
+        return await _directory_read(
+            db,
+            organization_id,
+            term_code=term_code,
+            query=_field(values, "query", "keyword", "search"),
+        )
+    if term_code is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A semester/term is required")
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        raise CatalogUnavailable(term_code)
+    release = await _release_for_term(db, organization_id, term, required=True)
+    if tool_suffix == "list_program_courses":
+        rows = await _published_summary_rows(
+            db,
+            organization_id,
+            term,
+            release,
+            department=department,
+            query=_field(values, "query", "keyword", "search"),
+        )
+        return {
+            "courses": rows,
+            "_catalog": _release_catalog_envelope(release, term, course_count=len(rows)),
+        }
+    pairs = await _release_revisions(db, organization_id, release, course_code=requested_course)
+    if tool_suffix == "get_thesis_courses":
+        rows = [
+            {
+                "course_code": course.course_code,
+                "department": course.department,
+                "title": revision.title,
+                "name": revision.title,
+                "credits": float(revision.local_credits) if revision.local_credits is not None else None,
+                "is_thesis": True,
+                "_catalog": _catalog_metadata(revision, release),
+            }
+            for course, revision in pairs
+            if revision.is_thesis and (not department or course.department == department)
+        ]
+        return {
+            "courses": rows,
+            "_catalog": _release_catalog_envelope(release, term, course_count=len(rows)),
+        }
+    if requested_course is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A course code is required")
+    match = [
+        (course, revision)
+        for course, revision in pairs
+        if course.course_code == requested_course
+    ]
+    if not match:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Course is not available in the published release")
+    course, revision = match[0]
+    if tool_suffix == "get_course_info":
+        return await _published_course_detail(db, organization_id, term, release, course, revision)
+    children = await _bulk_revision_components(db, organization_id, [revision])
+    groups = _public_groups(revision, children)
+    if tool_suffix == "get_course_prerequisites":
+        component = (revision.component_status or {}).get("prerequisites", {})
+        effective = _effective_component_status(component if isinstance(component, dict) else {})
+        return {
+            "prerequisites": _flat_prerequisites(groups),
+            "prerequisite_groups": groups,
+            "status": "verified" if effective.get("verified") else "unknown",
+            "_catalog": _catalog_metadata(revision, release),
+        }
+    if tool_suffix == "get_course_replacements":
+        replacements = _public_replacements(revision, children)
+        return {
+            "replacements": replacements,
+            "exclusions": [
+                item["related_course_code"]
+                for item in replacements
+                if item["relationship_type"].casefold() in {"exclusion", "excludes"}
+            ],
+            "_catalog": _catalog_metadata(revision, release),
+        }
+    sections = children["sections"].get(revision.id, [])
+    selected_sections = [
+        row for row in sections
+        if section_code is None or row.section_code == section_code
+    ]
+    if section_code is not None and not selected_sections:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Section is not available in the published release")
+    restrictions: list[dict[str, Any]] = []
+    for section in selected_sections:
+        restrictions.extend(
+            _restriction_dict(row)
+            for row in children["restrictions"].get(section.id, [])
+        )
+    metadata = _catalog_metadata(revision, release)
+    section_evidence = [_section_constraint_metadata(row, revision) for row in selected_sections]
+    effective = dict(section_evidence[0]) if len(section_evidence) == 1 else {
+        "verified": bool(section_evidence) and all(row.get("verified") is True for row in section_evidence),
+        "fresh": bool(section_evidence) and all(row.get("fresh") is True for row in section_evidence),
+    }
+    metadata["components"]["constraints"] = effective
+    return {
+        "section_code": section_code,
+        "constraints": restrictions,
+        "restrictions": restrictions,
+        "status": "verified" if effective.get("verified") and effective.get("fresh") else "unknown",
+        "_catalog": metadata,
+    }
+
+
+async def published_plan_inputs(
+    db: AsyncSession,
+    user_id: UUID,
+    term: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Return offerings and rules from one immutable release in one batch."""
+
+    organization_id = await _organization_for_user(db, user_id)
+    term_row = await _term_for_read(db, organization_id, term)
+    if term_row is None:
+        raise CatalogUnavailable(term)
+    release = await _release_for_term(db, organization_id, term_row, required=True)
+    pairs, children = await _published_rows(db, organization_id, term_row, release)
+    profile = await _student_profile_for_catalog(db, user_id, term_row)
+    offerings: list[dict[str, Any]] = []
+    rules: dict[str, Any] = {}
+    aggregate: dict[str, dict[str, Any]] = {}
+    for course, revision in pairs:
+        metadata = _catalog_metadata(revision, release)
+        for component, value in (metadata.get("components") or {}).items():
+            if not isinstance(value, dict):
+                continue
+            target = aggregate.setdefault(
+                component,
+                {"component": component, "verified": True, "fresh": True, "course_count": 0},
+            )
+            target["course_count"] += 1
+            target["verified"] = bool(target["verified"] and value.get("verified") is True)
+            target["fresh"] = bool(target["fresh"] and value.get("fresh") is True)
+        section_rows = children["sections"].get(revision.id, [])
+        if not section_rows:
+            section_rows = [None]
+        for section in section_rows:
+            section_payload = _public_section_payload(section, children) if section is not None else {
+                "section_code": "1",
+                "section": "1",
+                "section_number": "1",
+                "status": "unknown",
+                "meetings_status": "unknown",
+                "meeting_status": "unknown",
+                "restrictions_status": "unknown",
+                "meetings": [],
+                "schedule": [],
+                "instructors": [],
+                "restrictions": [],
+            }
+            restriction_rows = (
+                children["restrictions"].get(section.id, [])
+                if section is not None
+                else []
+            )
+            eligible, eligibility_reason = _section_eligibility(
+                restriction_rows, revision, course.course_code, section, profile
+            )
+            unavailable = _course_or_section_unavailable(revision, section)
+            if unavailable:
+                eligible = False
+                eligibility_reason = "course is not offered in this term"
+            complete = all(
+                bool((revision.completeness or {}).get(component))
+                for component in ("listing", "details", "sections")
+            ) and revision.local_credits is not None
+            data_status = "unavailable" if unavailable else _freshness(revision)
+            section_payload.update(
+                {
+                    "course_code": course.course_code,
+                    "title": revision.title,
+                    "name": revision.title,
+                    "credits": float(revision.local_credits) if revision.local_credits is not None else None,
+                    "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
+                    "ects": float(revision.ects) if revision.ects is not None else None,
+                    "department": course.department,
+                    "campus": revision.campus,
+                    "eligible": eligible,
+                    "eligibility_status": "unavailable" if unavailable else "verified" if eligible is not None else "unknown",
+                    "eligibility_reason": eligibility_reason,
+                    "data_status": data_status,
+                    "complete": complete,
+                    "catalog_release_id": str(release.id),
+                    "course_revision_id": str(revision.id),
+                    "aliases": list(course.aliases or []),
+                    "_catalog": metadata,
+                }
+            )
+            offerings.append(_jsonable(section_payload))
+        groups = _public_groups(revision, children)
+        prerequisite_component = (revision.component_status or {}).get("prerequisites", {})
+        effective_rule = _effective_component_status(
+            prerequisite_component if isinstance(prerequisite_component, dict) else {}
+        )
+        rules[course.course_code] = {
+            "course_code": course.course_code,
+            "prerequisites": _flat_prerequisites(groups),
+            "prerequisite_groups": groups,
+            "replacements": _public_replacements(revision, children),
+            "exclusions": [
+                row.related_course_code
+                for row in children["replacements"].get(revision.id, [])
+                if row.relationship_type.casefold() in {"exclusion", "excludes"}
+            ],
+            "data_status": "verified" if effective_rule.get("verified") else "unknown",
+            "fresh": bool(effective_rule.get("fresh")),
+            "catalog_release_id": str(release.id),
+            "course_revision_id": str(revision.id),
+            "_catalog": metadata,
+        }
+    metadata = _release_catalog_envelope(
+        release,
+        term_row,
+        components=aggregate,
+        course_count=len(pairs),
+    )
+    metadata["catalog_release_id"] = str(release.id)
+    return offerings, rules, metadata
+
+
+async def list_import_jobs(
+    db: AsyncSession,
+    organization_id: UUID,
+    *,
+    term: str | None = None,
+    job_status: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Admin listing for durable import state, with private payload retained."""
+
+    stmt = (
+        select(CatalogImportJob)
+        .where(CatalogImportJob.organization_id == organization_id)
+        .order_by(CatalogImportJob.created_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    if term:
+        stmt = stmt.where(CatalogImportJob.term == normalize_term(term))
+    if job_status:
+        stmt = stmt.where(CatalogImportJob.status == str(job_status).strip().lower())
+    rows = (await db.scalars(stmt)).all()
+    return {
+        "imports": [serialize_import_job(row) for row in rows],
+        "total": len(rows),
+    }
+
+
+async def list_catalog_releases(
+    db: AsyncSession,
+    organization_id: UUID,
+    term_code: str,
+    *,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List immutable publication/rollback releases for the admin tab."""
+
+    term = await _term_for_read(db, organization_id, term_code)
+    if term is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Academic term not found")
+    pointer = await db.scalar(
+        select(CatalogTermActiveRelease).where(
+            CatalogTermActiveRelease.organization_id == organization_id,
+            CatalogTermActiveRelease.term_id == term.id,
+        )
+    )
+    stmt = (
+        select(CatalogRelease)
+        .where(
+            CatalogRelease.organization_id == organization_id,
+            CatalogRelease.term_id == term.id,
+        )
+        .order_by(CatalogRelease.release_number.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    rows = (await db.scalars(stmt)).all()
+    return {
+        "releases": [
+            {
+                "id": str(row.id),
+                "release_number": row.release_number,
+                "operation": row.operation,
+                "reason": row.reason,
+                "created_by": str(row.created_by) if row.created_by else None,
+                "created_at": _iso(row.created_at),
+                "expected_release_id": str(row.expected_release_id) if row.expected_release_id else None,
+                "target_release_id": str(row.target_release_id) if row.target_release_id else None,
+                "metadata": _jsonable(row.metadata_json or {}),
+                "active": bool(pointer and pointer.release_id == row.id),
+            }
+            for row in rows
+        ],
+        "active_release_id": str(pointer.release_id) if pointer else None,
+        "term": term.term_code,
+    }
+
+
+__all__ = [
+    "CATALOG_TOOLS",
+    "CatalogConflict",
+    "CatalogUnavailable",
+    "active_release_metadata",
+    "course_detail",
+    "create_draft",
+    "enqueue_import",
+    "get_draft",
+    "import_dedup_key",
+    "ingest_observation",
+    "list_catalog_releases",
+    "list_course_rows",
+    "list_import_jobs",
+    "patch_draft",
+    "publish_drafts",
+    "published_plan_inputs",
+    "read_tool",
+    "rollback_release",
+    "serialize_draft",
+    "serialize_import_job",
+]

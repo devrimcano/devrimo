@@ -26,7 +26,18 @@ _ALPHA_PREFIX = re.compile(r"^[A-Z]{2,6}")
 # These are the spellings the deterministic eligibility evaluator actually
 # understands. Accepting a different label here would silently turn a
 # restriction row into an empty, unrestricted table.
-_DEPARTMENT_FIELDS = ("given_dept", "givenDept", "dept")
+_DEPARTMENT_FIELDS = (
+    "given_dept",
+    "givenDept",
+    "given_department",
+    "dept",
+    # Published catalog rows use a typed name for the same source field. Keep
+    # the importer-facing aliases above because old observations still carry
+    # them, but do not make a verified table depend on one spelling.
+    "department",
+    "department_code",
+    "program",
+)
 _UNAVAILABLE_RESTRICTIONS = "Section restrictions could not be verified."
 
 
@@ -69,6 +80,44 @@ async def load_student_profile(
         cgpa=cgpa,
         completed=list(snapshot.completed_courses) if snapshot else [],
     )
+
+
+def published_catalog_reads_enabled() -> bool:
+    """Whether shared course facts must come from the reviewed catalog.
+
+    This tiny helper is intentionally local to the consumer adapter so callers
+    can keep the rollout gate lazy and tests can patch it without importing the
+    settings singleton during module collection.
+    """
+
+    try:
+        from app.config import get_settings
+
+        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
+    except Exception:
+        return False
+
+
+async def read_shared_course_info(
+    db: AsyncSession,
+    user_id: UUID,
+    tool_suffix: str,
+    values: dict[str, str],
+    *,
+    session: CatalogSession | None = None,
+) -> Any:
+    """Read a shared catalog tool through the single Course Info boundary.
+
+    ``call_course_info`` dispatches to ``academic_catalog.service.read_tool``
+    once the feature flag is enabled and retains the existing cache-backed
+    Course Info behavior during rollout. Keeping this adapter in the planning
+    layer gives planner/workspace code one seam to replace in tests and keeps
+    personal ``get_student_*`` reads out of the published path.
+    """
+
+    from app.campus.course_info import call_course_info
+
+    return await call_course_info(db, user_id, tool_suffix, values, session=session)
 
 
 async def expand_course_code(
@@ -134,7 +183,26 @@ def constraint_rows(payload: Any) -> list[dict[str, Any]] | None:
 
     marker = object()
     if isinstance(payload, dict):
-        raw = payload.get("constraints", marker)
+        status_value = str(payload.get("status", "")).casefold()
+        if status_value in {"unknown", "unavailable", "unverified", "stale", "failed"}:
+            return None
+        # ``constraints`` is the upstream spelling. Published revisions may
+        # expose the semantically identical field as ``restrictions`` or
+        # ``eligibility`` while retaining the same row shape.
+        raw = marker
+        for field in ("constraints", "restrictions", "eligibility"):
+            if field in payload:
+                raw = payload[field]
+                break
+        if raw is marker and str(payload.get("status", "")).casefold() in {
+            "unknown", "unavailable", "unverified", "stale"
+        }:
+            return None
+        if raw is marker:
+            for wrapper in ("result", "data", "value", "items"):
+                nested = payload.get(wrapper)
+                if isinstance(nested, (dict, list)):
+                    return constraint_rows(nested)
     elif isinstance(payload, list):
         raw = payload
     else:
@@ -165,6 +233,11 @@ def section_verdict(
     rows = constraint_rows(payload)
     if rows is None:
         return [], None, _UNAVAILABLE_RESTRICTIONS
+    # Empty is an explicitly verified unrestricted table and needs no student
+    # profile. For populated tables the evaluator distinguishes an actual
+    # exclusion from an unavailable profile field. It also understands the
+    # registrar's no-limit encodings (0.00-4.00 and 0-95), so merely carrying
+    # those columns does not turn an otherwise verifiable row into unknown.
     held = held_grade if held_grade is not None else course_grade(profile, supplied_course, owner, full_course)
     verdict = evaluate(
         rows,

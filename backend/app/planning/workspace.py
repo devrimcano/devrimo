@@ -9,7 +9,7 @@ requests in one broker process observe the same revision ordering.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.digest import stable_digest
-from app.db.models import StudentTimetable, StudentTimetableRevision
+from app.db.models import StudentAcademicSnapshot, StudentTimetable, StudentTimetableRevision
 from app.planning.models import (
     PlanChanges,
     PlanConflictError,
@@ -37,6 +37,7 @@ _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri")
 # resulting state snapshot. The migration marks those rows with this value so
 # a retry fails closed and cannot accidentally replay an unknown request.
 LEGACY_REQUEST_DIGEST = "0" * 64
+_RELEASE_UNCHECKED = object()
 
 
 def _user_value(user_id: UUID | str) -> UUID | str:
@@ -168,27 +169,74 @@ async def _envelope(
     revision_override: int | None = None,
     payload_override: dict[str, Any] | None = None,
     updated_at_override: datetime | None = None,
+    current_release_id: str | None | object = _RELEASE_UNCHECKED,
 ) -> PlanEnvelope:
     revision = _row_revision(row) if revision_override is None else revision_override
     payload = _row_payload(row) if payload_override is None else payload_override
+    state = PlanState.from_legacy_payload(payload)
+    release_id = state.catalog_release_id
+    needs_revalidation = state.needs_revalidation
+    if current_release_id is not _RELEASE_UNCHECKED:
+        current = str(current_release_id) if current_release_id is not None else None
+        # A read must never rewrite the saved plan just because publication
+        # moved. Surface the mismatch in the envelope and leave the student's
+        # exact snapshot available for an explicit revalidation/update.
+        if release_id is not None and (current is None or current != release_id):
+            needs_revalidation = True
+        state = state.model_copy(update={"needs_revalidation": needs_revalidation})
     return PlanEnvelope(
         user_id=str(user_id),
         term=term,
         revision=revision,
         updated_at=updated_at_override if updated_at_override is not None else _row_updated_at(row),
-        state=PlanState.from_legacy_payload(payload),
+        state=state,
         can_undo=await _has_undo(db, user_id, term, revision),
         previous_revision=revision - 1 if revision > 0 else None,
         operation=operation,
         idempotency_key=idempotency_key,
+        catalog_release_id=release_id,
+        needs_revalidation=needs_revalidation,
     )
+
+
+async def _active_catalog_release(
+    db: AsyncSession, user_id: UUID | str, term: str
+) -> tuple[str | None, bool]:
+    """Return the active release for a read without changing saved state.
+
+    The second value records that the check was attempted. A temporary catalog
+    outage should keep the timetable readable while marking a previously
+    catalog-backed plan for revalidation instead of silently claiming it is
+    current.
+    """
+
+    if not _published_mode():
+        return None, False
+    try:
+        # A timetable read only needs the active release pointer. Loading all
+        # offerings and rules here was both wasteful and capable of starting a
+        # second, larger catalog read on the same request session. The catalog
+        # service owns organization scoping and returns the immutable pointer.
+        from app.academic_catalog.service import active_release_metadata
+
+        metadata = await active_release_metadata(db, user_id, term)
+        return _catalog_release(metadata), True
+    except Exception:
+        return None, True
 
 
 async def read_timetable(db: AsyncSession, user_id: UUID | str, term: str) -> PlanEnvelope:
     """Read only the authenticated account's plan for ``term``."""
 
     row = await _row(db, user_id, term)
-    return await _envelope(db, user_id, term, row)
+    release_id, checked = await _active_catalog_release(db, user_id, term)
+    return await _envelope(
+        db,
+        user_id,
+        term,
+        row,
+        current_release_id=release_id if checked else _RELEASE_UNCHECKED,
+    )
 
 
 def _entry_meeting(entry: PlanEntry) -> tuple[str, int, int]:
@@ -231,9 +279,316 @@ def _validate_state(state: PlanState) -> None:
             for row in course_rows:
                 if not isinstance(row, dict) or str(row.get("section", "")) != entry.section:
                     continue
-                if row.get("eligible") is False:
+                if row.get("eligible") is False and not entry.tentative:
                     reason = str(row.get("reason") or "section restrictions").strip()
                     raise PlanValidationError(f"section {entry.section} is not eligible: {reason}")
+
+
+def _published_mode() -> bool:
+    try:
+        from app.config import get_settings
+
+        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
+    except Exception:
+        return False
+
+
+def _catalog_meetings(offering: Any) -> list[tuple[str, int, int, str]]:
+    """Read canonical section meetings in the same minute contract as entries."""
+
+    raw = getattr(offering, "schedule", None) or getattr(offering, "meetings", None) or []
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    result: list[tuple[str, int, int, str]] = []
+    day_names = {
+        "monday": "Mon", "mon": "Mon", "pazartesi": "Mon",
+        "tuesday": "Tue", "tue": "Tue", "sali": "Tue", "salı": "Tue",
+        "wednesday": "Wed", "wed": "Wed", "carsamba": "Wed", "çarşamba": "Wed",
+        "thursday": "Thu", "thu": "Thu", "persembe": "Thu", "perşembe": "Thu",
+        "friday": "Fri", "fri": "Fri", "cuma": "Fri",
+    }
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        raw_day = item.get("day") if item.get("day") is not None else item.get("weekday")
+        if isinstance(raw_day, int) and not isinstance(raw_day, bool):
+            day = ("Mon", "Tue", "Wed", "Thu", "Fri")[raw_day] if 0 <= raw_day <= 4 else ""
+        else:
+            day = day_names.get(str(raw_day or "").strip().casefold())
+        if day is None:
+            day = str(raw_day or "").strip()
+        if not day:
+            continue
+        try:
+            start_raw = item.get("start_minute", item.get("start"))
+            end_raw = item.get("end_minute", item.get("end"))
+            if end_raw is None and item.get("duration_minutes") is not None:
+                end_raw = int(start_raw) + int(item["duration_minutes"])
+            if isinstance(start_raw, str) and ":" in start_raw:
+                hour, minute = start_raw.split(":", 1)
+                start_raw = int(hour) * 60 + int(minute)
+            if isinstance(end_raw, str) and ":" in end_raw:
+                hour, minute = end_raw.split(":", 1)
+                end_raw = int(hour) * 60 + int(minute)
+            start, end = int(start_raw), int(end_raw)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not (0 <= start < end <= 24 * 60):
+            continue
+        result.append((day, start, end, str(item.get("room") or item.get("location") or "").strip()))
+    return result
+
+
+def _catalog_release(metadata: Any) -> str | None:
+    if isinstance(metadata, dict):
+        value = (
+            metadata.get("catalog_release_id")
+            or metadata.get("release_id")
+            or metadata.get("revision_id")
+            or metadata.get("id")
+        )
+    else:
+        value = (
+            getattr(metadata, "catalog_release_id", None)
+            or getattr(metadata, "release_id", None)
+            or getattr(metadata, "revision_id", None)
+            or getattr(metadata, "id", None)
+        )
+    return str(value or "") or None
+
+
+async def _validate_published_state(
+    db: AsyncSession,
+    user_id: UUID | str,
+    term: str,
+    state: PlanState,
+) -> PlanState:
+    """Resolve every course-linked entry against the published catalog.
+
+    The browser's credits, title, instructor and meeting fields are input
+    hints. Course entries are accepted only when they match a server-owned
+    offering in the current immutable release; explicit tentative entries may
+    remain as visible planning notes while awaiting verification.
+    """
+
+    from app.planning.service import (
+        PLANNING_SNAPSHOT_MAX_AGE,
+        _offering_decision_state,
+        _published_plan_inputs,
+    )
+
+    course_entries = [
+        entry
+        for group in (state.entries, *state.alternatives, *state.favorites)
+        for entry in group
+        if entry.kind == "course" and not entry.tentative
+    ]
+
+    def mark_tentative(values: list[PlanEntry]) -> list[PlanEntry]:
+        return [
+            entry.model_copy(
+                update={"tentative": True, "verification_status": "tentative", "catalog_release_id": None}
+            )
+            if entry.kind == "course" and entry.tentative
+            else entry
+            for entry in values
+        ]
+
+    # Blocks and explicitly tentative notes do not claim catalog facts. They
+    # can be saved while the catalog or academic snapshot is unavailable. A
+    # non-empty pool or section map is course-linked state too: otherwise a
+    # client could inject ``eligible: true`` there and call ``solve`` later.
+    if not course_entries and not state.pool and not state.sections:
+        return state.model_copy(
+            update={
+                "entries": mark_tentative(state.entries),
+                "alternatives": [mark_tentative(group) for group in state.alternatives],
+                "favorites": [mark_tentative(group) for group in state.favorites],
+                "sections": {},
+            }
+        )
+    if state.sections and not state.pool and not course_entries:
+        raise PlanValidationError("course sections require a published course pool")
+
+    offerings, _, metadata = await _published_plan_inputs(db, user_id, term)
+    release_id = _catalog_release(metadata)
+    if release_id is None:
+        raise PlanValidationError("published catalog release is unavailable")
+    snapshot = await db.scalar(
+        select(StudentAcademicSnapshot)
+        .where(StudentAcademicSnapshot.user_id == user_id, StudentAcademicSnapshot.term == term)
+        .order_by(StudentAcademicSnapshot.fetched_at.desc())
+        .limit(1)
+    )
+    if snapshot is None:
+        raise PlanValidationError("student academic snapshot is required to verify course entries")
+    fetched_at = snapshot.fetched_at
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=UTC)
+    snapshot_age = datetime.now(UTC) - fetched_at
+    if snapshot_age < timedelta(0) or snapshot_age > PLANNING_SNAPSHOT_MAX_AGE:
+        raise PlanValidationError("student academic snapshot is stale; refresh it before saving course entries")
+
+    by_key: dict[tuple[str, str], Any] = {}
+    by_course: dict[str, list[Any]] = {}
+
+    def offering_code(offering: Any) -> str:
+        return str(getattr(offering, "course_code", None) or getattr(offering, "code", "")).strip()
+
+    for offering in offerings:
+        code = offering_code(offering)
+        if not code:
+            continue
+        aliases = [
+            code,
+            *(getattr(offering, "aliases", []) or []),
+        ]
+        for alias in aliases:
+            by_key[(_identity(alias), str(getattr(offering, "section", "")))] = offering
+            by_course.setdefault(_identity(alias), []).append(offering)
+
+    def section_payload(offering: Any) -> dict[str, Any]:
+        eligible = getattr(offering, "eligible", None)
+        eligibility_status = (
+            "eligible" if eligible is True else "ineligible" if eligible is False else "unknown"
+        )
+        return {
+            "section": str(getattr(offering, "section", "")),
+            "instructor": str(getattr(offering, "instructor", "") or ""),
+            "meetings": [
+                {
+                    "day": day,
+                    "start_minute": start,
+                    "duration_minutes": end - start,
+                    "room": room,
+                }
+                for day, start, end, room in _catalog_meetings(offering)
+            ],
+            "eligible": eligible,
+            "eligibility_status": eligibility_status,
+            "reason": "",
+            "data_status": str(getattr(offering, "data_status", "unknown") or "unknown"),
+            "fresh": getattr(offering, "fresh", False) is True,
+            "meetings_status": str(
+                getattr(offering, "meetings_status", "unknown") or "unknown"
+            ),
+            "complete": getattr(offering, "complete", False) is True,
+            "catalog_release_id": release_id,
+        }
+
+    def resolve_pool_course(course: Any) -> tuple[Any, Any]:
+        aliases = [getattr(course, "raw_code", None), getattr(course, "code", None)]
+        candidates: list[Any] = []
+        for alias in aliases:
+            if alias:
+                candidates.extend(by_course.get(_identity(alias), []))
+        # Keep the result deterministic when a course carries both a short and
+        # full spelling in its pool payload.
+        unique = {id(item): item for item in candidates}
+        candidates = sorted(unique.values(), key=lambda item: str(getattr(item, "section", "")))
+        requested_section = str(getattr(course, "selected_section", "") or "").strip()
+        if requested_section:
+            candidates = [
+                item for item in candidates if str(getattr(item, "section", "") or "").strip() == requested_section
+            ]
+        if not candidates:
+            raise PlanValidationError(
+                f"course {getattr(course, 'code', '')} is not in the published catalog"
+            )
+        canonical = candidates[0]
+        canonical_code = offering_code(canonical)
+        return canonical, canonical_code
+
+    def resolve(entry: PlanEntry) -> PlanEntry:
+        if entry.kind == "block":
+            return entry
+        if entry.tentative or entry.verification_status == "tentative":
+            return entry.model_copy(
+                update={
+                    "tentative": True,
+                    "verification_status": "tentative",
+                    "catalog_release_id": None,
+                }
+            )
+        offering = by_key.get((_identity(entry.code), str(entry.section)))
+        if offering is None:
+            raise PlanValidationError(
+                f"course section {entry.code} {entry.section} is not in the published catalog"
+            )
+        if getattr(offering, "eligible", None) is not True:
+            raise PlanValidationError(f"course section {entry.code} {entry.section} is not verified eligible")
+        decision_state, reason = _offering_decision_state(offering)
+        if decision_state != "usable":
+            raise PlanValidationError(reason or f"course section {entry.code} {entry.section} is not schedulable")
+        meetings = _catalog_meetings(offering)
+        target = (entry.day, entry.start_minute, entry.start_minute + entry.duration_minutes)
+        matching = next(
+            (meeting for meeting in meetings if meeting[:3] == target),
+            None,
+        )
+        if matching is None:
+            raise PlanValidationError(
+                f"meeting for course section {entry.code} {entry.section} does not match the published catalog"
+            )
+        canonical_credits = float(getattr(offering, "credits", 0) or 0)
+        return entry.model_copy(
+            update={
+                "code": offering_code(offering) or entry.code,
+                "name": str(getattr(offering, "title", entry.name) or entry.name),
+                "credits": canonical_credits,
+                "section": str(getattr(offering, "section", entry.section) or entry.section),
+                "instructor": str(getattr(offering, "instructor", entry.instructor) or entry.instructor),
+                "room": matching[3],
+                "catalog_release_id": release_id,
+                "verification_status": "verified",
+                "tentative": False,
+            }
+        )
+
+    def normalize_entries(values: list[PlanEntry]) -> list[PlanEntry]:
+        normalized: list[PlanEntry] = []
+        credited_courses: set[tuple[str, str]] = set()
+        for entry in values:
+            resolved = resolve(entry)
+            if resolved.kind == "course" and not resolved.tentative:
+                key = (_identity(resolved.code), resolved.section)
+                if key in credited_courses:
+                    resolved = resolved.model_copy(update={"credits": 0})
+                else:
+                    credited_courses.add(key)
+            normalized.append(resolved)
+        return normalized
+
+    normalized_pool = []
+    normalized_sections: dict[str, list[dict[str, Any]]] = {}
+    for course in state.pool:
+        canonical, canonical_code = resolve_pool_course(course)
+        canonical_credits = float(getattr(canonical, "credits", 0) or 0)
+        normalized_pool.append(
+            course.model_copy(
+                update={
+                    "name": str(getattr(canonical, "title", course.name) or course.name),
+                    "credits": canonical_credits,
+                    "raw_code": canonical_code,
+                }
+            )
+        )
+        normalized_sections[_identity(canonical_code)] = [
+            section_payload(item) for item in by_course.get(_identity(canonical_code), [])
+        ]
+
+    return state.model_copy(
+        update={
+            "entries": normalize_entries(state.entries),
+            "alternatives": [normalize_entries(group) for group in state.alternatives],
+            "favorites": [normalize_entries(group) for group in state.favorites],
+            "pool": normalized_pool,
+            "sections": normalized_sections,
+            "catalog_release_id": release_id,
+            "academic_snapshot_fetched_at": snapshot.fetched_at if snapshot is not None else state.academic_snapshot_fetched_at,
+            "needs_revalidation": False,
+        }
+    )
 
 
 def _set_entries(state: PlanState, entries: Iterable[PlanEntry]) -> PlanState:
@@ -268,6 +623,22 @@ def _apply_changes(state: PlanState, changes: PlanChanges) -> PlanState:
         return state.model_copy(update={"entries": imported.entries})
     if operation == "set_entries":
         return _set_entries(state, changes.entries or [])
+    if operation == "apply_proposal":
+        if changes.entries is None or changes.pool is None:
+            raise PlanValidationError("apply_proposal requires entries and pool")
+        # A proposal replaces scheduled course entries, while student-authored
+        # busy blocks remain part of the timetable. The selected pool carries
+        # credit-bearing untimed courses without manufacturing a PlanEntry.
+        blocks = [entry for entry in state.entries if entry.kind == "block"]
+        return state.model_copy(
+            update={
+                "entries": [*blocks, *changes.entries],
+                "pool": list(changes.pool),
+                "sections": changes.sections if changes.sections is not None else {},
+                "alternatives": [],
+                "alternative_index": 0,
+            }
+        )
     if operation == "add_entry":
         if changes.entry is None:
             raise PlanValidationError("add_entry requires entry")
@@ -439,11 +810,17 @@ def solve_plan_state(state: PlanState) -> PlanState:
         # whole solve, but must never turn it into a partial timetable.
         if not timed_sections:
             continue
-        eligible_sections = [
-            section
-            for section in timed_sections
-            if state.ignore_constraints or section.get("eligible") is not False
-        ]
+        if _published_mode():
+            # A missing verdict is unknown. It may be shown to the student for
+            # manual review, but an automatic solve can only use an explicit
+            # server-computed eligible=True section.
+            eligible_sections = [section for section in timed_sections if section.get("eligible") is True]
+        else:
+            eligible_sections = [
+                section
+                for section in timed_sections
+                if state.ignore_constraints or section.get("eligible") is not False
+            ]
         # A course for which every timed section is closed to the student is
         # reported separately by the client. It cannot be made schedulable by
         # choosing another combination, so it must not suppress valid plans
@@ -598,6 +975,8 @@ async def update_timetable(
         raise PlanConflictError(await _envelope(db, user_id, term, current))
     current_state = _state(current)
     next_state = _apply_changes(current_state, changes)
+    if _published_mode():
+        next_state = await _validate_published_state(db, user_id, term, next_state)
     _validate_state(next_state)
     return await _commit(
         db,
@@ -651,6 +1030,8 @@ async def undo_timetable(
     if prior is None:
         raise PlanValidationError("the earlier timetable revision is unavailable")
     state = PlanState.from_legacy_payload(prior.payload)
+    if _published_mode():
+        state = await _validate_published_state(db, user_id, term, state)
     _validate_state(state)
     return await _commit(
         db,
@@ -693,8 +1074,91 @@ def projection_from_state(state: PlanState) -> dict[str, Any]:
                 "credits": 0,
                 "instructor": entry.instructor,
                 "meetings": [],
+                "tentative": entry.tentative,
+                "verification_status": entry.verification_status,
+                "catalog_release_id": entry.catalog_release_id,
             },
         )
         course["credits"] += entry.credits
         course["meetings"].append(meeting)
+        if entry.tentative:
+            course["tentative"] = True
+            course["verification_status"] = "tentative"
+        elif course.get("catalog_release_id") is None and entry.catalog_release_id:
+            course["catalog_release_id"] = entry.catalog_release_id
+
+    # A selected untimed course is a credit-planning fact, not a calendar
+    # event. Keep it in the projection with an empty meeting list and an
+    # explicit status so downstream consumers do not mistake missing schedule
+    # data for either a fabricated meeting or a silently dropped course.
+    for pool_course in state.pool:
+        if getattr(pool_course, "selected", False) is not True:
+            continue
+        aliases = {
+            _identity(getattr(pool_course, "code", "")),
+            _identity(getattr(pool_course, "raw_code", "")),
+        }
+        aliases.discard("")
+        raw_sections = state.sections.get(_identity(getattr(pool_course, "raw_code", "")), [])
+        if not raw_sections:
+            raw_sections = state.sections.get(_identity(getattr(pool_course, "code", "")), [])
+        if isinstance(raw_sections, dict):
+            raw_sections = list(raw_sections.values())
+        rows = [row for row in raw_sections if isinstance(row, dict)]
+        selected_section = str(getattr(pool_course, "selected_section", "") or "").strip()
+        untimed_rows = []
+        for row in rows:
+            status = str(row.get("meetings_status") or row.get("meeting_status") or "").strip().casefold()
+            if status not in {"untimed", "explicitly_untimed"}:
+                continue
+            row_section = str(row.get("section") or row.get("section_number") or "").strip()
+            if selected_section and row_section != selected_section:
+                continue
+            if _section_meetings(row):
+                # Contradictory catalog evidence stays out of the projection;
+                # the write boundary rejects it rather than inventing a
+                # scheduling interpretation.
+                continue
+            untimed_rows.append(row)
+        if not selected_section and len(untimed_rows) > 1:
+            # A pool course without a selected section is a candidate set, not
+            # enough information to claim that every untimed section was
+            # selected. Leave the ambiguity visible in state for the caller
+            # to resolve instead of duplicating credits in the projection.
+            untimed_rows = []
+        if not untimed_rows:
+            status = str(getattr(pool_course, "timing_status", "") or "").strip().casefold()
+            if status in {"untimed", "explicitly_untimed"} and not rows:
+                untimed_rows = [{}]
+        for row in untimed_rows:
+            section = str(row.get("section") or row.get("section_number") or "")
+            if any(
+                _identity(code) in aliases and (not section or stored_section == section)
+                for code, stored_section in courses
+            ):
+                continue
+            key = (str(getattr(pool_course, "code", "")), section)
+            eligible = row.get("eligible")
+            data_status = str(row.get("data_status") or "").strip().casefold()
+            meeting_status = str(
+                row.get("meetings_status") or row.get("meeting_status") or ""
+            ).strip().casefold()
+            verified = (
+                eligible is True
+                and data_status in {"fresh", "verified", "current"}
+                and meeting_status in {"untimed", "explicitly_untimed"}
+            )
+            courses[key] = {
+                "code": getattr(pool_course, "code", ""),
+                "name": getattr(pool_course, "name", ""),
+                "section": section,
+                "credits": float(getattr(pool_course, "credits", 0) or 0),
+                "instructor": str(row.get("instructor") or ""),
+                "meetings": [],
+                "tentative": False,
+                "verification_status": "verified" if verified else "unknown",
+                "catalog_release_id": state.catalog_release_id,
+                "timing_status": "untimed",
+                "eligible": eligible,
+            }
     return {"courses": list(courses.values()), "busy_blocks": list(blocks.values())}

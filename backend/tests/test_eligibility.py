@@ -85,23 +85,21 @@ def test_a_95_year_ceiling_is_not_a_ceiling():
 
 
 @pytest.mark.parametrize("missing", [{"surname": None}, {"cgpa": None}, {"year": None}, {}])
-def test_what_we_do_not_know_never_excludes(missing):
-    """A student who has told us nothing is not thereby ineligible.
+def test_missing_profile_fields_are_unknown_only_when_needed(missing):
+    """A missing value is explicit unknown when the row needs that dimension.
 
-    A false "you cannot take this" steers someone away from a section they were
-    entitled to and they never find out; a false "you can" surfaces at
-    registration, where they can act on it.
+    The CENG row's 0.00-4.00 CGPA range imposes no effective floor or ceiling,
+    so CGPA may remain absent while the surname range and year floor still
+    require their corresponding values.
     """
-    # Start from a student the table admits on every dimension, then blank the
-    # one under test. Spreading over an explicit ``year=3`` instead raised
-    # TypeError for the year case, so that parameter never actually ran.
     known = {"surname": "Kemal", "cgpa": 3.0, "year": 3}
-    assert evaluate(MATH260, department="CENG", **{**known, **missing}).eligible
+    expected = None if set(missing) & {"surname", "year"} else True
+    assert evaluate(MATH260, department="CENG", **{**known, **missing}).eligible is expected
 
 
 def test_an_unknown_department_skips_the_table_entirely():
-    assert evaluate(MATH260, department=None, surname="Kemal").eligible
-    assert evaluate(MATH260, department="", surname="Kemal").eligible
+    assert evaluate(MATH260, department=None, surname="Kemal").eligible is None
+    assert evaluate(MATH260, department="", surname="Kemal").eligible is None
 
 
 def test_matched_department_is_reported():

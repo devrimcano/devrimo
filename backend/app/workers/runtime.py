@@ -31,8 +31,21 @@ async def _pass(kind):
         from app.knowledge.retention import sweep_expired_schedule_cache
 
         async with get_session_factory("catalog")() as db:
-            return await sweep_expired_schedule_cache(db)
+            swept = await sweep_expired_schedule_cache(db)
+        if get_settings().academic_catalog_ingestion_enabled or get_settings().academic_catalog_reads_enabled:
+            from app.academic_catalog.retention import sweep_failed_observations
+
+            swept += await sweep_failed_observations()
+        return swept
     elif kind == "catalog":
+        settings = get_settings()
+        if settings.academic_catalog_ingestion_enabled:
+            from app.academic_catalog.worker import run_once
+
+            return await run_once()
+        if settings.academic_catalog_reads_enabled:
+            # Published mode must never fall back to the old raw-cache warmer.
+            return 0
         from app.campus.warmer import warm_once
 
         return await warm_once()

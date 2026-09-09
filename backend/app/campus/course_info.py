@@ -137,6 +137,14 @@ async def prefetch(pairs: Iterable[tuple[str, dict[str, str]]]) -> None:
     Silent by design about anything not shared: a per-student tool has no
     business in a cache keyed without the student.
     """
+    # Once the reviewed catalog is enabled, the old raw Course Info cache is
+    # deliberately dead for shared data.  Seeding it here would make a later
+    # flag rollback (or an un-migrated consumer) observe an importer payload
+    # that has never passed the draft/review/publication boundary.  The
+    # published reader owns its own database reads and release pinning.
+    if _published_catalog_reads_enabled():
+        return
+
     wanted: dict[str, tuple[str, ...]] = {}
     for tool_suffix, values in pairs:
         if tool_suffix not in _SHARED_TOOL_TTLS:
@@ -338,11 +346,21 @@ async def call_course_info(
     Pass ``session`` when a request makes several of these calls, so they share
     one connection instead of spawning a campus server each.
     """
+    shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
+
+    # Shared catalog facts have a separate authority once the rollout flag is
+    # enabled.  They must remain readable for a student who has not connected
+    # their own Course Info credential: the published catalog is an
+    # organization-owned resource.  Personal ``get_student_*`` tools continue
+    # through the consent and credential gate below.
+    if shared_ttl is not None and _published_catalog_reads_enabled():
+        await require_published_catalog_access(db, user_id)
+        return await _read_published_tool(db, user_id, tool_suffix, values)
+
     if session is None:
         await require_catalog_access(db, user_id)
     else:
         await session.authorize()
-    shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
     identity, key_hash = catalog_key(tool_suffix, values)
     # A shared answer must not be keyed by the student who happened to ask for
     # it first, or every account would still pay for its own copy.
@@ -392,6 +410,78 @@ async def call_course_info(
             source=source,
             shared=shared_ttl is not None,
         )
+
+
+def _published_catalog_reads_enabled() -> bool:
+    """Return the rollout switch without importing settings at module load.
+
+    Keeping this lookup lazy lets the Course Info unit tests and lightweight
+    worker modules import this adapter without constructing the full settings
+    object.  ``getattr`` is intentional during the migration window: an older
+    settings object means the published reader is off.
+    """
+
+    try:
+        from app.config import get_settings
+
+        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
+    except Exception:
+        # Configuration errors are handled by application startup. A helper
+        # call should not accidentally bypass the legacy, explicitly gated
+        # Course Info path while settings are unavailable.
+        return False
+
+
+async def require_published_catalog_access(db: AsyncSession, user_id: UUID) -> None:
+    """Authorize a read of published shared catalog data.
+
+    A published catalog is not a student's private SAIS account.  Requiring a
+    Course Info credential here would make the admin-approved catalog unusable
+    for students who have not opted into personal campus integrations.  The
+    account check still protects suspended/deleted users.
+    """
+
+    if db is None:
+        # Small pure adapter tests use ``None`` as their database stand-in. Real
+        # API and workspace requests always provide an AsyncSession.
+        return
+    from app.admin.directory import active_account
+
+    if await active_account(db, user_id) is None:
+        raise HTTPException(403, "Account is inactive")
+
+
+async def _read_published_tool(
+    db: AsyncSession,
+    user_id: UUID,
+    tool_suffix: str,
+    values: dict[str, str],
+) -> Any:
+    """Read one shared tool from the reviewed, published academic catalog.
+
+    The service deliberately returns the same payload shapes as the upstream
+    Course Info functions.  Metadata such as ``catalog_release_id`` may be
+    carried in a mapping by the service and is preserved for callers that need
+    provenance; no fallback to the raw campus integration is allowed here.
+    """
+
+    try:
+        from app.academic_catalog.service import read_tool
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The published academic catalog is not available yet.",
+        ) from exc
+    try:
+        return await read_tool(db, user_id, tool_suffix, values)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("published_catalog_read_failed", tool=tool_suffix, error=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The published academic catalog could not be read.",
+        ) from exc
 
 
 @asynccontextmanager

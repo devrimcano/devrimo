@@ -19,6 +19,15 @@ def current_term():
     return resolve()
 
 
+def _catalog_source() -> str:
+    try:
+        from app.planning.catalog_service import published_catalog_reads_enabled
+
+        return "academic_catalog" if published_catalog_reads_enabled() else "course_info"
+    except Exception:
+        return "course_info"
+
+
 def envelope(ref: ResourceRef, data, *, source: str = "devrimo", freshness: str = "cached") -> dict:
     return {
         "resource": ref.model_dump(exclude_none=True),
@@ -114,7 +123,7 @@ class WorkspaceService:
             if ref.kind == "catalog.eligibility":
                 name = "check_section_eligibility"
                 arguments["section"] = ref.section or ""
-            return envelope(ref, await self.domain(name, **arguments), source="course_info")
+            return envelope(ref, await self.domain(name, **arguments), source=_catalog_source())
         if ref.kind == "planning.course_group":
             return envelope(
                 ref,
@@ -168,7 +177,7 @@ class WorkspaceService:
                         if values.get(k) is not None
                     },
                 )
-            return envelope(ref, data, source=integration)
+            return envelope(ref, data, source=_catalog_source())
         async with integration_session(self.user_id, integration) as connected:
             data = await self.invoke(connected, integration, method, values)
         return envelope(ref, data, source=integration, freshness="live")

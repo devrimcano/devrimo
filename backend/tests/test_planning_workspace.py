@@ -1,7 +1,13 @@
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.db.models import StudentTimetable
 from app.db.session import SessionLocal
+from app.planning import service as planning_service
+from app.planning import workspace as planning_workspace
+from app.planning.models import PlanState
 from tests.conftest import auth_header, new_user_id
 
 
@@ -153,3 +159,160 @@ async def test_concurrent_first_writes_are_ordered_by_revision(client):
     current = await client.get(f"/api/v1/schedule/timetable?term={term}", headers=headers)
     assert current.status_code == 200
     assert current.json()["revision"] == 1
+
+
+async def test_published_write_uses_server_credits_and_preserves_tentative_entries(monkeypatch):
+    from app.config import get_settings
+    from app.db.models import StudentAcademicSnapshot
+
+    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
+    user_id = new_user_id()
+    term = "20261"
+    fetched_at = datetime.now(UTC)
+    offering = SimpleNamespace(
+        course_code="2402201",
+        section="1",
+        title="History",
+        credits=3,
+        aliases=["HIST2201"],
+        schedule=[{"day": "Mon", "start_minute": 540, "end_minute": 590, "room": "B1"}],
+        instructor="Registrar",
+        eligible=True,
+        data_status="fresh",
+        fresh=True,
+        meetings_status="verified",
+        complete=True,
+    )
+
+    async with SessionLocal() as db:
+        db.add(
+            StudentAcademicSnapshot(
+                user_id=user_id,
+                term=term,
+                completed_courses=[],
+                enrolled_courses=[],
+                current_credits=30,
+                current_grade_points=90,
+                fetched_at=fetched_at,
+                source="sais",
+            )
+        )
+        await db.commit()
+
+        async def published_inputs(_db, _user_id, _term):
+            return [offering], {}, {"catalog_release_id": "release-a"}
+
+        monkeypatch.setattr(planning_service, "_published_plan_inputs", published_inputs)
+        state = PlanState(
+            pool=[{"code": "HIST2201", "name": "client supplied", "credits": 59}],
+            entries=[
+                {
+                    **_entry("tentative-history"),
+                    "code": "HIST2201",
+                    "tentative": True,
+                    "verification_status": "tentative",
+                }
+            ],
+        )
+        normalized = await planning_workspace._validate_published_state(db, user_id, term, state)
+
+    assert normalized.catalog_release_id == "release-a"
+    assert normalized.pool[0].raw_code == "2402201"
+    assert normalized.pool[0].credits == 3
+    assert normalized.entries[0].tentative is True
+    assert normalized.entries[0].verification_status == "tentative"
+    assert normalized.sections["2402201"][0]["eligible"] is True
+
+
+async def test_published_plan_keeps_explicitly_untimed_course_for_credit_planning(monkeypatch):
+    from app.config import get_settings
+    from app.db.models import StudentAcademicSnapshot
+    from app.planning.service import SemesterPlanRequest
+
+    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
+    user_id = new_user_id()
+    term = "20261"
+    snapshot = StudentAcademicSnapshot(
+        user_id=user_id,
+        term=term,
+        completed_courses=[],
+        enrolled_courses=[],
+        current_credits=30,
+        current_grade_points=90,
+        fetched_at=datetime.now(UTC),
+        source="sais",
+    )
+    offering = SimpleNamespace(
+        course_code="2402201",
+        section="1",
+        title="Thesis",
+        credits=3,
+        schedule=[],
+        source_url=None,
+        eligible=True,
+        data_status="fresh",
+        fresh=True,
+        meetings_status="untimed",
+        complete=True,
+        instructor="",
+    )
+    monkeypatch.setattr(
+        planning_service,
+        "prepare_planning_snapshot",
+        AsyncMock(return_value=(snapshot, {"fresh": True, "status": "fresh"})),
+    )
+    monkeypatch.setattr(
+        planning_service,
+        "_published_plan_inputs",
+        AsyncMock(
+            return_value=(
+                [offering],
+                {"2402201": {"prerequisites": [], "data_status": "verified", "fresh": True}},
+                {"catalog_release_id": "release-a"},
+            )
+        ),
+    )
+
+    async with SessionLocal() as db:
+        result = await planning_service.plan_semester(
+            db,
+            user_id,
+            SemesterPlanRequest(term=term, required_courses=["2402201"], min_credits=3, max_credits=6),
+        )
+
+    assert result["status"] == "ok"
+    assert result["selected_credits"] == 3
+    assert result["courses"] == [{
+        "course_code": "2402201",
+        "section": "1",
+        "title": "Thesis",
+        "credits": 3.0,
+        "schedule": [],
+        "source_url": None,
+        "timing_status": "untimed",
+    }]
+
+
+async def test_published_timetable_read_marks_release_mismatch_without_rewriting_plan(monkeypatch):
+    user_id = new_user_id()
+    term = "20261"
+    row = SimpleNamespace(
+        revision=4,
+        updated_at=datetime.now(UTC),
+        payload=PlanState(catalog_release_id="release-a").model_dump(mode="json"),
+    )
+    monkeypatch.setattr(planning_workspace, "_has_undo", AsyncMock(return_value=False))
+
+    envelope = await planning_workspace._envelope(
+        SimpleNamespace(),
+        user_id,
+        term,
+        row,
+        current_release_id="release-b",
+    )
+
+    assert envelope.catalog_release_id == "release-a"
+    assert envelope.needs_revalidation is True
+    assert envelope.state.catalog_release_id == "release-a"
+    assert envelope.state.needs_revalidation is True
+    assert row.payload["catalog_release_id"] == "release-a"

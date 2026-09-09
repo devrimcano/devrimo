@@ -773,3 +773,4 @@ class StudentTimetableRevision(Base):
 
 
 from app.assistant.models import AssistantRun, AssistantRunEvent  # noqa: E402,F401
+from app.academic_catalog import models as academic_catalog_models  # noqa: E402,F401

@@ -23,6 +23,54 @@ def test_dd_or_higher_satisfies_a_prerequisite():
     assert prerequisites.unmet_prerequisites([row("2300213")], completed) == ()
 
 
+def test_minimum_grade_is_enforced():
+    required_bb = [row("2300213") | {"min_grade": "BB"}]
+    assert prerequisites.unmet_prerequisites(
+        required_bb, [{"course_code": "PHYS213", "grade": "DD"}]
+    ) == ("2300213",)
+    assert prerequisites.unmet_prerequisites(
+        required_bb, [{"course_code": "PHYS213", "grade": "BB"}]
+    ) == ()
+
+
+def test_typed_prerequisite_groups_preserve_and_or_and_scope():
+    payload = {
+        "prerequisite_groups": [
+            {
+                "group_no": 1,
+                "logic": "AND",
+                "program_code": "CENG",
+                "requirements": [
+                    {"course_code": "2300213", "minimum_grade": "BB"},
+                    {"course_code": "5670219", "minimum_grade": "DD"},
+                ],
+            },
+            {
+                "group_no": 2,
+                "logic": "OR",
+                "program_code": "CENG",
+                "requirements": [
+                    {"course_code": "5670101", "minimum_grade": "DD"},
+                    {"course_code": "5710111", "minimum_grade": "DD"},
+                ],
+            },
+        ]
+    }
+    completed = [
+        {"course_code": "PHYS213", "grade": "BB"},
+        {"course_code": "EE219", "grade": "DD"},
+    ]
+    assert prerequisites.evaluate_prerequisites(
+        prerequisites._rows(payload), completed, program_code="CENG"
+    ).eligible is True
+    assert prerequisites.evaluate_prerequisites(
+        prerequisites._rows(payload), completed, program_code="MATH"
+    ).eligible is True
+    assert prerequisites.evaluate_prerequisites(
+        prerequisites._rows(payload), completed
+    ).eligible is None
+
+
 def test_display_code_keeps_four_digit_course_numbers():
     assert prerequisites.display_code("2300213") == "PHYS 213"
     assert prerequisites.display_code("2402201") == "HIST 2201"

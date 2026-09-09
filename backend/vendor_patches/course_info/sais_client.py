@@ -179,6 +179,7 @@ class SAISClient:
         username: Optional[str] = None,
         password: Optional[str] = None,
         locale: Optional[str] = None,
+        request_gate=None,
     ):
         self.username = username or settings.sais_username
         self.password = password or settings.sais_password
@@ -196,9 +197,18 @@ class SAISClient:
         # holding the proxy session is a request count and nothing else, so it
         # has to be observable from outside to be believed.
         self._requests = 0
+        async def admit_request(request):
+            # HTTPX invokes request hooks for redirects too. A worker's gate
+            # reserves its durable budget before any network attempt; denial
+            # therefore cannot overshoot the limit through a multi-page tool.
+            if request_gate is not None:
+                await request_gate()
+            self._requests += 1
+
         self._client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
+            event_hooks={"request": [admit_request]},
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -208,16 +218,6 @@ class SAISClient:
                 "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
             },
         )
-        # Wrapped at ``send`` rather than at each call site, so a request added
-        # anywhere in this file is counted without anyone remembering to.
-        _send = self._client.send
-
-        async def counting_send(*args, **kwargs):
-            self._requests += 1
-            return await _send(*args, **kwargs)
-
-        self._client.send = counting_send
-
     async def aclose(self):
         """Close the underlying HTTP client."""
         await self._client.aclose()
@@ -718,11 +718,13 @@ class SAISClient:
                                 if any(sch_cells) and len(sch_cells) >= 3:
                                     start = sch_cells[1] if len(sch_cells) > 1 else ""
                                     end = sch_cells[2] if len(sch_cells) > 2 else ""
+                                    separate_times = bool(re.fullmatch(r"\d{1,2}[:.]\d{2}", start)
+                                                          and re.fullmatch(r"\d{1,2}[:.]\d{2}", end))
                                     current_section.schedule.append(
                                         ScheduleEntry(
                                             day=sch_cells[0] if len(sch_cells) > 0 else "",
-                                            time=f"{start}-{end}" if len(sch_cells) >= 4 else start,
-                                            room=sch_cells[3] if len(sch_cells) >= 4 else end,
+                                            time=f"{start}-{end}" if len(sch_cells) >= 4 or separate_times else start,
+                                            room=sch_cells[3] if len(sch_cells) >= 4 else "" if separate_times else end,
                                         )
                                     )
 

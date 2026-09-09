@@ -151,6 +151,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app app
+COPY vendor_patches/course_info vendor_patches/course_info
 COPY alembic alembic
 COPY alembic.ini .
 

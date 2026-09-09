@@ -234,6 +234,15 @@ class Settings(BaseSettings):
     # in the image so it can be turned off without a rebuild.
     course_info_session_cache: bool = True
 
+    # Enable published-only reads after administrators publish the initial catalog.
+    # Ingestion can be enabled first so migration never exposes an unreviewed draft.
+    academic_catalog_reads_enabled: bool = False
+    academic_catalog_ingestion_enabled: bool = False
+    academic_catalog_registration_start: str = ""
+    academic_catalog_registration_end: str = ""
+    academic_catalog_job_lease_seconds: int = 900
+    academic_catalog_max_attempts: int = 3
+
     # --- Catalog pre-warming ----------------------------------------------
     # Course offerings are published per term and then barely move, so the
     # cache can be filled before students arrive instead of by whoever opens a

@@ -14,6 +14,7 @@ from app.api.v1 import (
     student,
 )
 from app.researchers.admin import router as researchers_router
+from app.academic_catalog.admin import router as catalog_router
 
 router = APIRouter()
 router.include_router(health.router, tags=["health"])
@@ -29,3 +30,4 @@ router.include_router(admin.router, prefix="/admin", tags=["admin"])
 router.include_router(knowledge_admin.router, prefix="/admin", tags=["knowledge-admin"])
 
 router.include_router(researchers_router, prefix="/admin", tags=["researchers-admin"])
+router.include_router(catalog_router, prefix="/admin", tags=["academic-catalog"])

@@ -5,6 +5,7 @@ import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "motion/
 import { useSearchParams } from "next/navigation";
 import {
   ActivityIcon,
+  BookOpenIcon,
   BotIcon,
   Building2Icon,
   ChevronRightIcon,
@@ -33,6 +34,7 @@ import { cn } from "@/lib/utils";
 import type { AdminPrincipal } from "@/lib/admin/types";
 import type { Copy } from "@/components/admin/admin-shared";
 import { OverviewPanel } from "@/components/admin/panels/overview-panel";
+import { CoursesPanel } from "@/components/admin/panels/courses-panel";
 import { UsersPanel } from "@/components/admin/panels/users-panel";
 import { ResearchersPanel } from "@/components/admin/panels/researchers-panel";
 import { KnowledgePanel } from "@/components/admin/panels/knowledge-panel";
@@ -49,6 +51,7 @@ import {
 
 export type AdminSection =
   | "overview"
+  | "courses"
   | "users"
   | "agents"
   | "integrations"
@@ -70,6 +73,7 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { id: "overview", label: { tr: "Genel bakış", en: "Overview" }, description: { tr: "Hesaplar, bağlantılar ve çalışma zamanı sağlığı.", en: "Accounts, connections, and runtime health." }, icon: GaugeIcon, permission: "overview:read", group: "manage" },
+  { id: "courses", label: { tr: "Dersler", en: "Courses" }, description: { tr: "Ders kataloğunu, sürümleri ve kaynak doğrulamasını yönetin.", en: "Manage the course catalog, releases, and source verification." }, icon: BookOpenIcon, permission: "catalog:read", group: "manage" },
   { id: "users", label: { tr: "Kullanıcılar", en: "Users" }, description: { tr: "Hesap desteği, davetler ve yaşam döngüsü.", en: "Account support, invitations, and lifecycle." }, icon: UsersIcon, permission: "users:read", group: "manage" },
   { id: "agents", label: { tr: "Ajanlar", en: "Agents" }, description: { tr: "Yerleşik ajanlar ve korumalı işlemler.", en: "Resident agents and guarded operations." }, icon: BotIcon, permission: "agents:read", group: "operate" },
   { id: "integrations", label: { tr: "Entegrasyonlar", en: "Integrations" }, description: { tr: "METU araçlarının benimsenmesi ve doğrulanması.", en: "METU tool adoption and verification." }, icon: Building2Icon, permission: "integrations:read", group: "operate" },
@@ -226,6 +230,7 @@ function AdminNavButton({ item, active, onClick }: { item: NavItem; active: bool
 function AdminPanel({ section, principal, title, description }: { section: AdminSection; principal: AdminPrincipal; title: string; description: string }) {
   switch (section) {
     case "overview": return <OverviewPanel title={title} description={description} />;
+    case "courses": return <CoursesPanel principal={principal} title={title} description={description} />;
     case "users": return <UsersPanel principal={principal} title={title} description={description} />;
     case "agents": return <AgentsPanel principal={principal} title={title} description={description} />;
     case "integrations": return <IntegrationsPanel title={title} description={description} />;

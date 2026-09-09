@@ -26,6 +26,10 @@ export type PlanEntry = {
   start_minute: number;
   duration_minutes: number;
   room: string;
+  /** A section added while catalog verification was incomplete. */
+  tentative?: boolean;
+  verification_status?: "verified" | "tentative" | string;
+  catalog_release_id?: string | null;
 };
 
 export type PlanCourse = {
@@ -34,6 +38,10 @@ export type PlanCourse = {
   credits: number;
   raw_code?: string | null;
   rawCode?: string;
+  /** Selected by a credit plan even when it has no calendar meetings. */
+  selected?: boolean;
+  timing_status?: string | null;
+  selected_section?: string | null;
   [key: string]: unknown;
 };
 
@@ -50,6 +58,9 @@ export type PlanState = {
   alternative_index: number;
   favorites: PlanEntry[][];
   favorite_index: number;
+  catalog_release_id?: string | null;
+  academic_snapshot_fetched_at?: string | null;
+  needs_revalidation?: boolean;
 };
 
 export type PlanEnvelope = {
@@ -65,6 +76,8 @@ export type PlanEnvelope = {
   idempotency_key?: string | null;
   courses?: unknown[];
   busy_blocks?: unknown[];
+  catalog_release_id?: string | null;
+  needs_revalidation?: boolean;
 };
 
 export type PlanChanges = {
@@ -72,6 +85,7 @@ export type PlanChanges = {
     | "replace"
     | "replace_projection"
     | "set_entries"
+    | "apply_proposal"
     | "add_entry"
     | "remove_entry"
     | "set_pool"
@@ -312,6 +326,14 @@ export function usePlanning(term: string) {
     return enqueue({ epoch: loadSequence.current, kind: "update", term, idempotency_key: idempotencyKey, changes });
   }, [enqueue, term]);
 
+  /** Apply a server-generated plan proposal through the same revision queue. */
+  const applyProposal = useCallback((changes: PlanChanges, idempotencyKey = crypto.randomUUID()) => {
+    if (changes.operation !== "apply_proposal") {
+      return Promise.reject(new Error("A proposal application must use apply_proposal."));
+    }
+    return update(changes, idempotencyKey);
+  }, [update]);
+
   const undo = useCallback((idempotencyKey = crypto.randomUUID()) => {
     if (blocked.current || pendingFailure.current || activeTerm.current !== term) return Promise.resolve(null);
     return enqueue({ epoch: loadSequence.current, kind: "undo", term, idempotency_key: idempotencyKey });
@@ -357,6 +379,7 @@ export function usePlanning(term: string) {
     retryable,
     retry,
     update,
+    applyProposal,
     undo,
     importLegacy,
     refreshAfterConflict,

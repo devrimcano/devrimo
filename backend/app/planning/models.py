@@ -19,6 +19,7 @@ PlanOperation = Literal[
     "replace",
     "replace_projection",
     "set_entries",
+    "apply_proposal",
     "add_entry",
     "remove_entry",
     "set_pool",
@@ -129,6 +130,13 @@ def _legacy_entry(value: Any, index: int, kind: Literal["course", "block"] = "co
         return None
     credits_number = _legacy_number(item.get("credits", 0))
     color_number = _legacy_number(item.get("color", 0))
+    tentative = bool(item.get("tentative", item.get("isTentative", False)))
+    verification_status = _legacy_text(
+        item.get("verification_status", item.get("verificationStatus")), limit=32
+    ) or ("tentative" if tentative else "verified")
+    release_id = _legacy_text(
+        item.get("catalog_release_id", item.get("catalogReleaseId")), limit=128
+    ) or None
     return {
         "id": entry_id,
         "code": code,
@@ -142,6 +150,12 @@ def _legacy_entry(value: Any, index: int, kind: Literal["course", "block"] = "co
         "start_minute": start,
         "duration_minutes": duration,
         "room": _legacy_text(item.get("room"), limit=128),
+        # A student may deliberately keep a hand-entered course while catalog
+        # data is unavailable. It remains visibly tentative and is never
+        # treated as a verified registration/timetable fact.
+        "tentative": tentative,
+        "verification_status": verification_status,
+        "catalog_release_id": release_id,
     }
 
 
@@ -211,6 +225,13 @@ class PlanSection(BaseModel):
     # rejection.
     eligible: bool | None = None
     reason: str = Field(default="", max_length=1000)
+    eligibility_status: str = Field(default="unknown", max_length=32)
+    # Missing catalog evidence is unknown. Legacy section payloads are still
+    # accepted, but a response model must not turn an omitted status into a
+    # claim that the row was reviewed.
+    data_status: str = Field(default="unknown", max_length=32)
+    meetings_status: str = Field(default="unknown", max_length=32)
+    catalog_release_id: str | None = Field(default=None, max_length=128)
 
 
 class PlanEntry(BaseModel):
@@ -228,6 +249,9 @@ class PlanEntry(BaseModel):
     start_minute: int = Field(ge=0, le=1439)
     duration_minutes: int = Field(ge=1, le=1440)
     room: str = Field(default="", max_length=128)
+    tentative: bool = False
+    verification_status: Literal["verified", "tentative"] = "verified"
+    catalog_release_id: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="before")
     @classmethod
@@ -251,6 +275,12 @@ class PlanEntry(BaseModel):
     def fit_in_day(self) -> PlanEntry:
         if self.start_minute + self.duration_minutes > 24 * 60:
             raise ValueError("entry must end before midnight")
+        # Keep the two wire fields coherent. A browser may send either the
+        # explicit flag or the status label; both describe a hand-entered
+        # course that has not been verified against the published catalog.
+        if self.kind == "course" and (self.tentative or self.verification_status == "tentative"):
+            self.tentative = True
+            self.verification_status = "tentative"
         return self
 
     def to_legacy(self) -> dict[str, Any]:
@@ -269,6 +299,9 @@ class PlanEntry(BaseModel):
             "instructor": self.instructor,
             "start_minute": self.start_minute,
             "duration_minutes": self.duration_minutes,
+            "tentative": self.tentative,
+            "verification_status": self.verification_status,
+            "catalog_release_id": self.catalog_release_id,
         }
 
 
@@ -279,6 +312,13 @@ class PlanCourse(BaseModel):
     name: str = Field(default="", max_length=240)
     credits: float = Field(default=0, ge=0, le=60)
     raw_code: str | None = Field(default=None, max_length=32)
+    # The regular planner pool contains candidate courses.  Proposal
+    # application marks the selected subset explicitly so a credit-bearing
+    # course with no calendar meetings can survive in the saved state without
+    # being mistaken for a scheduled entry.
+    selected: bool = False
+    timing_status: str | None = Field(default=None, max_length=32)
+    selected_section: str | None = Field(default=None, max_length=32)
 
     @field_validator("raw_code", mode="before")
     @classmethod
@@ -313,6 +353,12 @@ class PlanState(BaseModel):
     alternative_index: int = Field(default=0, ge=0)
     favorites: list[list[PlanEntry]] = Field(default_factory=list, max_length=10)
     favorite_index: int = Field(default=-1, ge=-1)
+    # The immutable academic catalog release and student snapshot used to
+    # produce course-linked entries. A later catalog publication marks this
+    # state for revalidation without rewriting the student's plan.
+    catalog_release_id: str | None = Field(default=None, max_length=128)
+    academic_snapshot_fetched_at: datetime | None = None
+    needs_revalidation: bool = False
 
     @model_validator(mode="after")
     def normalize_indexes(self) -> PlanState:
@@ -346,10 +392,16 @@ class PlanState(BaseModel):
             "ignore_constraints": "ignoreConstraints",
             "alternative_index": "alternativeIndex",
             "favorite_index": "favoriteIndex",
+            "catalog_release_id": "catalogReleaseId",
+            "academic_snapshot_fetched_at": "academicSnapshotFetchedAt",
+            "needs_revalidation": "needsRevalidation",
         }
         for canonical, legacy in aliases.items():
             if (canonical not in data or data[canonical] is None) and legacy in data:
                 data[canonical] = data[legacy]
+
+        def is_explicitly_untimed(value: Any) -> bool:
+            return str(value or "").strip().casefold() in {"untimed", "explicitly_untimed"}
 
         pool: list[dict[str, Any]] = []
         raw_pool = data.get("pool")
@@ -372,8 +424,56 @@ class PlanState(BaseModel):
                         "name": _legacy_text(course.get("name"), code, limit=240),
                         "credits": max(0.0, min(60.0, credits if credits is not None else 0.0)),
                         "raw_code": _legacy_text(raw_code, code, limit=32),
+                        "selected": course.get("selected") is True,
+                        "timing_status": (
+                            "untimed"
+                            if is_explicitly_untimed(course.get("timing_status"))
+                            or course.get("untimed") is True
+                            else None
+                        ),
+                        "selected_section": _legacy_text(
+                            course.get("selected_section", course.get("selectedSection")), limit=32
+                        ) or None,
                     }
                 )
+
+        # The old projection had no timetable entry shape for a credit-bearing
+        # course without meeting times. Preserve an explicitly untimed course
+        # in the canonical pool when importing that projection; an empty or
+        # malformed schedule alone never implies this status.
+        legacy_courses = data.get("courses") if isinstance(data.get("courses"), list) else []
+        for value in legacy_courses:
+            if not isinstance(value, dict):
+                continue
+            meetings = value.get("meetings") if isinstance(value.get("meetings"), list) else []
+            if meetings or not (
+                is_explicitly_untimed(value.get("timing_status")) or value.get("untimed") is True
+            ):
+                continue
+            code = _legacy_text(value.get("code"), limit=32).strip()
+            if not code:
+                continue
+            raw_code = _legacy_text(value.get("raw_code", value.get("rawCode", code)), code, limit=32)
+            identity = "".join(code.upper().split())
+            existing = next((item for item in pool if "".join(str(item.get("code", "")).upper().split()) == identity), None)
+            if existing is not None:
+                existing["selected"] = True
+                existing["timing_status"] = "untimed"
+                continue
+            credits = _legacy_number(value.get("credits", 0))
+            pool.append(
+                {
+                    "code": code,
+                    "name": _legacy_text(value.get("name"), code, limit=240),
+                    "credits": max(0.0, min(60.0, credits if credits is not None else 0.0)),
+                    "raw_code": raw_code,
+                    "selected": True,
+                    "timing_status": "untimed",
+                    "selected_section": _legacy_text(
+                        value.get("section", value.get("section_number")), limit=32
+                    ) or None,
+                }
+            )
         data["pool"] = pool
 
         # Explicit entries win. If the old projection has no entries, expand
@@ -383,7 +483,7 @@ class PlanState(BaseModel):
             raw_entries = data["entries"]
         else:
             raw_entries = []
-            courses = data.get("courses") if isinstance(data.get("courses"), list) else []
+            courses = legacy_courses
             for course in courses:
                 if not isinstance(course, dict):
                     continue
@@ -463,6 +563,10 @@ class PlanState(BaseModel):
         favorite_index = _legacy_number(data.get("favorite_index", favorite_default))
         data["alternative_index"] = max(0, int(alternative_index) if alternative_index is not None else 0)
         data["favorite_index"] = int(favorite_index) if favorite_index is not None else favorite_default
+        data["catalog_release_id"] = _legacy_text(data.get("catalog_release_id"), limit=128) or None
+        snapshot_time = data.get("academic_snapshot_fetched_at")
+        data["academic_snapshot_fetched_at"] = snapshot_time
+        data["needs_revalidation"] = bool(data.get("needs_revalidation", False))
 
         raw_sections = data.get("sections")
         sections: dict[str, list[dict[str, Any]]] = {}
@@ -492,6 +596,13 @@ class PlanState(BaseModel):
                 "ignoreConstraints": self.ignore_constraints,
                 "alternativeIndex": self.alternative_index,
                 "favoriteIndex": self.favorite_index,
+                "catalogReleaseId": self.catalog_release_id,
+                "academicSnapshotFetchedAt": (
+                    self.academic_snapshot_fetched_at.isoformat()
+                    if self.academic_snapshot_fetched_at is not None
+                    else None
+                ),
+                "needsRevalidation": self.needs_revalidation,
             }
         )
         return data
@@ -526,6 +637,8 @@ class PlanEnvelope(BaseModel):
     previous_revision: int | None = None
     operation: str | None = None
     idempotency_key: str | None = None
+    catalog_release_id: str | None = None
+    needs_revalidation: bool = False
 
 
 class PlanConflictError(Exception):

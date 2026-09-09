@@ -41,6 +41,8 @@ def _value(record: dict[str, Any], names: tuple[str, ...]) -> Any:
 
 
 def _day(value: Any) -> Day | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return ("Mon", "Tue", "Wed", "Thu", "Fri")[value] if 0 <= value <= 4 else None
     folded = _key(value)
     for day, names in _DAYS:
         if any(name in folded for name in names):
@@ -129,7 +131,7 @@ def _records(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, dict):
         return []
     keys = {_key(name) for name in value}
-    if keys.intersection({"section", "sectionnumber", "sectionno", "sec"}):
+    if keys.intersection({"section", "sectionnumber", "sectioncode", "sectionno", "sec"}):
         return [value]
     return [record for child in value.values() for record in _records(child)]
 
@@ -174,17 +176,53 @@ def normalize_sections(value: Any) -> list[dict[str, Any]]:
             value = json.loads(value)
         except (TypeError, ValueError):
             return _text_sections(value)
+    # Published detail responses carry release/component evidence on the
+    # envelope, while the individual section rows carry only meeting status.
+    # Preserve that evidence as a fallback without inventing a verified state
+    # when the envelope is absent or incomplete.
+    catalog_metadata = value.get("_catalog") if isinstance(value, dict) else None
+    if not isinstance(catalog_metadata, dict):
+        catalog_metadata = {}
+    components = catalog_metadata.get("components")
+    if isinstance(components, dict):
+        relevant = [components.get(name) for name in ("listing", "details", "sections")]
+        if all(isinstance(item, dict) and item.get("verified") is True for item in relevant):
+            envelope_status = (
+                "fresh"
+                if all(item.get("fresh") is True for item in relevant)
+                else "stale"
+            )
+        else:
+            envelope_status = "unknown"
+    else:
+        envelope_status = "unknown"
+    envelope_release = (
+        catalog_metadata.get("catalog_release_id")
+        or catalog_metadata.get("release_id")
+        or catalog_metadata.get("revision_id")
+    )
+
     rows: list[dict[str, Any]] = []
     for index, record in enumerate(_records(value)):
-        section_value = _value(record, ("section_number", "sectionnumber", "section", "sectionno", "sec"))
+        section_value = _value(
+            record,
+            ("section_number", "sectionnumber", "section_code", "sectioncode", "section", "sectionno", "sec"),
+        )
         section = str(section_value).strip() if section_value not in (None, "") else str(index + 1)
         instructor_value = _value(record, ("instructors", "instructor", "lecturer", "teacher"))
-        instructor = (
-            ", ".join(str(item).strip() for item in instructor_value if item)
-            if isinstance(instructor_value, list)
-            else str(instructor_value or "").strip()
-        )
-        schedule = _value(record, ("schedule", "meeting", "hours", "time"))
+        if isinstance(instructor_value, list):
+            instructor = ", ".join(
+                str(
+                    item.get("source_name") or item.get("name") or item.get("instructor")
+                    if isinstance(item, dict)
+                    else item
+                ).strip()
+                for item in instructor_value
+                if item
+            )
+        else:
+            instructor = str(instructor_value or "").strip()
+        schedule = _value(record, ("schedule", "meetings", "meeting", "hours", "time"))
         candidates: list[dict[str, Any]] = []
 
         def visit(item: Any, found: list[dict[str, Any]]) -> None:
@@ -203,15 +241,35 @@ def normalize_sections(value: Any) -> list[dict[str, Any]]:
         meetings = [meeting for item in candidates if (meeting := _meeting(item)) is not None]
         if not meetings and isinstance(schedule, str):
             meetings.extend(_text_meetings(schedule))
-        rows.append(
-            {
-                "section": section,
-                "instructor": instructor,
-                "meetings": meetings,
-                "constraint": str(
-                    _value(record, ("critical_info", "criticalinfo", "critical", "constraint", "kisit", "eklenti"))
-                    or ""
-                ).strip(),
-            }
-        )
+        normalized = {
+            "section": section,
+            "instructor": instructor,
+            "meetings": meetings,
+            "constraint": str(
+                _value(record, ("critical_info", "criticalinfo", "critical", "constraint", "kisit", "eklenti"))
+                or ""
+            ).strip(),
+        }
+        # Keep the old compact dict stable when a legacy source has no typed
+        # decision metadata. Published rows carry these fields and therefore
+        # expose the verified/unknown distinction to the schedule client.
+        eligible_value = _value(record, ("eligible", "is_eligible", "allowed"))
+        if isinstance(eligible_value, bool):
+            normalized["eligible"] = eligible_value
+        for key, names in (
+            ("eligibility_status", ("eligibility_status", "eligibilityStatus")),
+            ("data_status", ("data_status", "dataStatus")),
+            ("meetings_status", ("meetings_status", "meetingsStatus", "meeting_status")),
+        ):
+            value = _value(record, names)
+            if value not in (None, ""):
+                normalized[key] = str(value).strip()
+        if catalog_metadata:
+            normalized.setdefault("data_status", envelope_status)
+        release_value = _value(record, ("catalog_release_id", "catalogReleaseId", "release_id"))
+        if release_value in (None, ""):
+            release_value = envelope_release
+        if release_value not in (None, ""):
+            normalized["catalog_release_id"] = str(release_value).strip()
+        rows.append(normalized)
     return rows

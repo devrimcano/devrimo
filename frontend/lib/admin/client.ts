@@ -7,6 +7,6 @@ export function adminGet<T>(path: string) {
   return adminFetch<T>(path);
 }
 
-export function adminMutate<T>(path: string, method: "POST" | "PUT" | "DELETE", body: unknown) {
+export function adminMutate<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body: unknown) {
   return adminFetch<T>(path, { method, body });
 }

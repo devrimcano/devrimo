@@ -2,3 +2,7 @@
 # services know which commit they are. Never committed.
 .release-sha
 __pycache__/
+/frontend/node_modules
+/frontend/.next/
+/frontend/tsconfig.tsbuildinfo
+/backend/.pytest_cache/

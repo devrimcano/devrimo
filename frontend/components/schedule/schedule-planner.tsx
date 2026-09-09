@@ -29,14 +29,23 @@ import { formatMetuCourseCode } from "@/lib/metu-course-code";
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
 // students' browsers and must keep loading.
-type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string };
-type CatalogCourse = { code: string; name: string; credits: number; rawCode: string };
-type CatalogSection = { section: string; instructor: string; meetings: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string }[]; constraint: string; eligible?: boolean; reason?: string };
-type ApiCatalogSection = { section?: unknown; instructor?: unknown; meetings?: unknown; constraint?: unknown; eligible?: unknown; reason?: unknown };
+type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string; tentative?: boolean; verification_status?: "verified" | "tentative"; catalog_release_id?: string | null };
+type CatalogCourse = {
+  code: string;
+  name: string;
+  credits: number;
+  rawCode: string;
+  /** A server-generated credit plan can select a course without a meeting. */
+  selected?: boolean;
+  timing_status?: string | null;
+  selected_section?: string | null;
+};
+type CatalogSection = { section: string; instructor: string; meetings: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string }[]; constraint: string; eligible: boolean | null; reason?: string; eligibility_status?: string; data_status?: string; meetings_status?: string; catalog_release_id?: string | null };
+type ApiCatalogSection = { section?: unknown; instructor?: unknown; meetings?: unknown; constraint?: unknown; eligible?: unknown; reason?: unknown; eligibility_status?: unknown; data_status?: unknown; meetings_status?: unknown; catalog_release_id?: unknown };
 type SectionMap = Record<string, CatalogSection[]>;
 // Keyed by course identity, then by section number.
-type ConstraintRow = { given_dept?: string; start_char?: string; end_char?: string; min_cgpa?: string; max_cgpa?: string; min_year?: string; max_year?: string };
-type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean; reason: string };
+type ConstraintRow = { given_dept?: string; start_char?: string; end_char?: string; min_cgpa?: string; max_cgpa?: string; min_year?: string; max_year?: string; [key: string]: unknown };
+type SectionVerdict = { rows: ConstraintRow[]; eligible: boolean | null; reason: string; eligibility_status?: string; constraints_verified?: boolean; data_status?: string; meetings_status?: string; catalog_release_id?: string | null };
 type ConstraintMap = Record<string, Record<string, SectionVerdict>>;
 type StudentDepartment = { code: string; label: string };
 type AiPlanCourse = { code?: string; display_code?: string; name?: string; credits?: number; sections?: unknown };
@@ -47,6 +56,37 @@ type PrerequisiteRejection = {
   prerequisite_course_labels?: string[];
 };
 type SubmittedMutation = { term: string; fingerprint: string; idempotencyKey: string };
+type PlanningMetadata = {
+  status: "complete" | "blocked" | "needs_verification" | "partial";
+  blockedCourses: string[];
+  needsVerification: string[];
+  catalogReleaseId: string | null;
+};
+
+function curriculumPlanningMetadata({
+  warnings,
+  unavailable,
+  partial,
+  prerequisiteRejections,
+  catalogReleaseId,
+}: {
+  warnings: string[];
+  unavailable: boolean;
+  partial: boolean;
+  prerequisiteRejections: PrerequisiteRejection[];
+  catalogReleaseId: string | null;
+}): PlanningMetadata {
+  const blockedCourses = prerequisiteRejections
+    .map((item) => item.course_code?.trim())
+    .filter((code): code is string => Boolean(code));
+  const needsVerification = unavailable || partial || warnings.length > 0 ? ["curriculum"] : [];
+  return {
+    status: unavailable || warnings.length > 0 ? "needs_verification" : blockedCourses.length ? "blocked" : partial ? "partial" : "complete",
+    blockedCourses,
+    needsVerification,
+    catalogReleaseId,
+  };
+}
 
 const DAYS: Day[] = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 const DEFAULT_HOURS = Array.from({ length: 10 }, (_, index) => index + 8);
@@ -149,6 +189,11 @@ function courseIdentity(code: string) {
   return code.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function isExplicitlyUntimed(value: { timing_status?: string | null; meetings_status?: string | null }) {
+  const status = value.timing_status ?? value.meetings_status;
+  return status === "untimed" || status === "explicitly_untimed";
+}
+
 function cleanCourseName(value: string) {
   return value
     .replace(/\(\s*\)/g, "")
@@ -217,6 +262,14 @@ function localizedCurriculumWarning(
   );
 }
 
+const UNKNOWN_SECTION_STATUSES = new Set(["unknown", "unavailable", "unverified", "stale", "failed", "invalid"]);
+
+function sectionNeedsVerification(section: CatalogSection): boolean {
+  if (section.eligible === null) return true;
+  return [section.eligibility_status, section.data_status, section.meetings_status]
+    .some((status) => status !== undefined && UNKNOWN_SECTION_STATUSES.has(status.toLowerCase()));
+}
+
 // The first three digits of a seven-digit code name the department that owns
 // the course. Anything shorter does not say, and the backend resolves it
 // against the catalog rather than assuming the student's own department.
@@ -277,8 +330,12 @@ function fromTypedSections(value: unknown): CatalogSection[] {
       instructor: String(row.instructor ?? ""),
       meetings,
       constraint: String(row.constraint ?? ""),
-      eligible: typeof row.eligible === "boolean" ? row.eligible : undefined,
+      eligible: row.eligible === true ? true : row.eligible === false ? false : null,
       reason: String(row.reason ?? ""),
+      eligibility_status: row.eligibility_status === undefined ? undefined : String(row.eligibility_status),
+      data_status: row.data_status === undefined ? undefined : String(row.data_status),
+      meetings_status: row.meetings_status === undefined ? undefined : String(row.meetings_status),
+      catalog_release_id: row.catalog_release_id === undefined || row.catalog_release_id === null ? null : String(row.catalog_release_id),
     }];
   });
 }
@@ -303,6 +360,9 @@ function toCanonicalEntry(entry: Entry): PlanEntry {
     start_minute: itemStartMinute(entry),
     duration_minutes: itemDurationMinutes(entry),
     room: entry.room ?? "",
+    tentative: entry.tentative === true,
+    verification_status: entry.verification_status ?? (entry.tentative ? "tentative" : "verified"),
+    catalog_release_id: entry.catalog_release_id ?? null,
   };
 }
 
@@ -313,6 +373,9 @@ function fromCanonicalEntry(entry: PlanEntry): Entry {
     duration: Math.max(1, Math.ceil(entry.duration_minutes / 60)),
     startMinute: entry.start_minute,
     durationMinutes: entry.duration_minutes,
+    tentative: entry.tentative === true || entry.verification_status === "tentative",
+    verification_status: entry.verification_status === "tentative" ? "tentative" : "verified",
+    catalog_release_id: entry.catalog_release_id ?? null,
   };
 }
 
@@ -329,6 +392,9 @@ function canonicalStateFromLocal(values: {
   alternativeIndex: number;
   favorites: Entry[][];
   favoriteIndex: number;
+  catalogReleaseId: string | null;
+  academicSnapshotFetchedAt: string | null;
+  needsRevalidation: boolean;
 }): PlanState {
   return {
     entries: values.entries.map(toCanonicalEntry),
@@ -343,6 +409,9 @@ function canonicalStateFromLocal(values: {
     alternative_index: values.alternativeIndex,
     favorites: values.favorites.map((favorite) => favorite.map(toCanonicalEntry)),
     favorite_index: values.favoriteIndex,
+    catalog_release_id: values.catalogReleaseId,
+    academic_snapshot_fetched_at: values.academicSnapshotFetchedAt,
+    needs_revalidation: values.needsRevalidation,
   };
 }
 
@@ -371,6 +440,9 @@ function canonicalStateFingerprint(state: PlanState): string {
     start_minute: value.start_minute,
     duration_minutes: value.duration_minutes,
     room: value.room,
+    tentative: value.tentative === true || value.verification_status === "tentative",
+    verification_status: value.verification_status ?? (value.tentative ? "tentative" : "verified"),
+    catalog_release_id: value.catalog_release_id ?? null,
   });
   const section = (value: Record<string, unknown>) => ({
     section: String(value.section ?? value.section_number ?? ""),
@@ -381,6 +453,10 @@ function canonicalStateFingerprint(state: PlanState): string {
     constraint: String(value.constraint ?? ""),
     eligible: value.eligible === true ? true : value.eligible === false ? false : null,
     reason: String(value.reason ?? ""),
+    eligibility_status: value.eligibility_status === undefined ? undefined : String(value.eligibility_status),
+    data_status: value.data_status === undefined ? undefined : String(value.data_status),
+    meetings_status: value.meetings_status === undefined ? undefined : String(value.meetings_status),
+    catalog_release_id: value.catalog_release_id === undefined || value.catalog_release_id === null ? null : String(value.catalog_release_id),
   });
   return JSON.stringify({
     entries: state.entries.map(entry),
@@ -394,6 +470,9 @@ function canonicalStateFingerprint(state: PlanState): string {
       name: course.name,
       credits: course.credits,
       raw_code: course.raw_code ?? course.rawCode ?? course.code,
+      selected: course.selected === true,
+      timing_status: course.timing_status ?? null,
+      selected_section: course.selected_section ?? null,
     })),
     sections: Object.fromEntries(Object.entries(state.sections).map(([key, rows]) => [
       key,
@@ -403,6 +482,9 @@ function canonicalStateFingerprint(state: PlanState): string {
     alternative_index: state.alternative_index,
     favorites: state.favorites.map((favorite) => favorite.map(entry)),
     favorite_index: state.favorite_index,
+    catalog_release_id: state.catalog_release_id ?? null,
+    academic_snapshot_fetched_at: state.academic_snapshot_fetched_at ?? null,
+    needs_revalidation: state.needs_revalidation === true,
   });
 }
 
@@ -432,8 +514,12 @@ function fromCanonicalSections(value: Record<string, unknown[]>): SectionMap {
         instructor: String(row.instructor ?? ""),
         meetings,
         constraint: String(row.constraint ?? ""),
-        eligible: typeof row.eligible === "boolean" ? row.eligible : undefined,
+        eligible: row.eligible === true ? true : row.eligible === false ? false : null,
         reason: String(row.reason ?? ""),
+        eligibility_status: row.eligibility_status === undefined ? undefined : String(row.eligibility_status),
+        data_status: row.data_status === undefined ? undefined : String(row.data_status),
+        meetings_status: row.meetings_status === undefined ? undefined : String(row.meetings_status),
+        catalog_release_id: row.catalog_release_id === undefined || row.catalog_release_id === null ? null : String(row.catalog_release_id),
       }];
     });
   }
@@ -459,16 +545,23 @@ function canonicalSectionsFromLocal(
   }
   return Object.fromEntries(Object.entries(sections).filter(([key]) => wanted.has(key)).map(([key, rows]) => [
     key,
-    rows.map((row) => ({
+    rows.map((row) => {
+      const verdict = constraints[key]?.[row.section];
+      return ({
       ...row,
-      eligible: constraints[key]?.[row.section]?.eligible ?? row.eligible,
-      reason: constraints[key]?.[row.section]?.reason ?? row.reason ?? "",
+      eligible: verdict ? verdict.eligible : row.eligible,
+      reason: verdict ? verdict.reason : row.reason ?? "",
+      eligibility_status: verdict?.eligibility_status ?? row.eligibility_status,
+      data_status: verdict?.data_status ?? row.data_status,
+      meetings_status: verdict?.meetings_status ?? row.meetings_status,
+      catalog_release_id: verdict ? verdict.catalog_release_id ?? null : row.catalog_release_id ?? null,
       meetings: row.meetings.map((meeting) => ({
         ...meeting,
         start_minute: itemStartMinute(meeting),
         duration_minutes: itemDurationMinutes(meeting),
       })),
-    })),
+    });
+    }),
   ]));
 }
 
@@ -544,6 +637,15 @@ export function SchedulePlanner() {
   // on a sentence it also translates.
   const [curriculumFailed, setCurriculumFailed] = useState(false);
   const [prerequisiteRejections, setPrerequisiteRejections] = useState<PrerequisiteRejection[]>([]);
+  const [catalogReleaseId, setCatalogReleaseId] = useState<string | null>(null);
+  const [academicSnapshotFetchedAt, setAcademicSnapshotFetchedAt] = useState<string | null>(null);
+  const [needsRevalidation, setNeedsRevalidation] = useState(false);
+  const [planningMetadata, setPlanningMetadata] = useState<PlanningMetadata>({
+    status: "needs_verification",
+    blockedCourses: [],
+    needsVerification: [],
+    catalogReleaseId: null,
+  });
   const [mobileDay, setMobileDay] = useState<Day>("Mon");
   const [poolQuery, setPoolQuery] = useState("");
   const [suggestions, setSuggestions] = useState<CatalogCourse[]>([]);
@@ -572,10 +674,14 @@ export function SchedulePlanner() {
   const applyCanonicalState = useCallback((state: PlanState) => {
     const nextEntries = state.entries.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) }));
     const nextPool = state.pool.map((course) => ({
+      ...course,
       code: formatMetuCourseCode(course.code),
       name: course.name,
       credits: course.credits,
       rawCode: course.raw_code ?? course.rawCode ?? course.code,
+      selected: course.selected === true,
+      timing_status: course.timing_status ?? null,
+      selected_section: course.selected_section ?? null,
     }));
     const nextSections = fromCanonicalSections(state.sections);
     const nextAlternatives = state.alternatives.map((alternative) => alternative.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })));
@@ -590,6 +696,9 @@ export function SchedulePlanner() {
     setAlternativeIndex(state.alternative_index);
     setFavorites(nextFavorites);
     setFavoriteIndex(state.favorite_index);
+    setCatalogReleaseId(state.catalog_release_id ?? null);
+    setAcademicSnapshotFetchedAt(state.academic_snapshot_fetched_at ?? null);
+    setNeedsRevalidation(state.needs_revalidation === true);
     serverStateFingerprint.current = canonicalStateFingerprint(state);
   }, []);
 
@@ -619,6 +728,9 @@ export function SchedulePlanner() {
     alternativeIndex,
     favorites,
     favoriteIndex,
+    catalogReleaseId,
+    academicSnapshotFetchedAt,
+    needsRevalidation,
   }), [
     alternatives,
     alternativeIndex,
@@ -631,6 +743,9 @@ export function SchedulePlanner() {
     favoriteIndex,
     favorites,
     ignoreConstraints,
+    academicSnapshotFetchedAt,
+    catalogReleaseId,
+    needsRevalidation,
     studentDepartment?.label,
   ]);
 
@@ -642,8 +757,13 @@ export function SchedulePlanner() {
   const reconcileResponse = useCallback((next: PlanEnvelope, fingerprint: string) => {
     const decision = saveTracker.current.acknowledge(next, fingerprint);
     if (decision === "ignore") return;
-    if (decision === "adopt") applyCanonicalState(next.state);
-    else serverStateFingerprint.current = canonicalStateFingerprint(next.state);
+    const state = {
+      ...next.state,
+      catalog_release_id: next.state.catalog_release_id ?? next.catalog_release_id ?? null,
+      needs_revalidation: next.state.needs_revalidation === true || next.needs_revalidation === true,
+    };
+    if (decision === "adopt") applyCanonicalState(state);
+    else serverStateFingerprint.current = canonicalStateFingerprint(state);
     setHydrated(true);
   }, [applyCanonicalState]);
 
@@ -716,8 +836,12 @@ export function SchedulePlanner() {
   // --- derived ------------------------------------------------------------
 
   const conflicts = useMemo(() => new Set(entries.flatMap((entry, index) => entries.slice(index + 1).filter((other) => overlaps(entry, other)).flatMap((other) => [entry.id, other.id]))), [entries]);
-  const uniqueCourses = new Set(entries.filter((entry) => entry.kind === "course").map((entry) => entry.code)).size;
-  const totalCredits = entries.filter((entry) => entry.kind === "course").reduce((sum, entry) => sum + entry.credits, 0);
+  const selectedUntimedCourses = catalogCourses.filter((course) => course.selected === true && isExplicitlyUntimed(course));
+  const plannedCourseIdentities = new Set(entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
+  selectedUntimedCourses.forEach((course) => plannedCourseIdentities.add(courseIdentity(course.rawCode || course.code)));
+  const uniqueCourses = plannedCourseIdentities.size;
+  const totalCredits = entries.filter((entry) => entry.kind === "course").reduce((sum, entry) => sum + entry.credits, 0)
+    + selectedUntimedCourses.reduce((sum, course) => sum + course.credits, 0);
   const totalHours = entries.reduce((sum, entry) => sum + entry.duration, 0);
   const scheduledCourseGroups = useMemo(() => {
     const groups = new Map<string, Entry[]>();
@@ -729,7 +853,9 @@ export function SchedulePlanner() {
   }, [entries]);
   const scheduledCodes = new Set(entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
   const selectedPoolCount = catalogCourses.filter((course) =>
-    scheduledCodes.has(courseIdentity(course.code)) || scheduledCodes.has(courseIdentity(course.rawCode))).length;
+    course.selected === true
+    || scheduledCodes.has(courseIdentity(course.code))
+    || scheduledCodes.has(courseIdentity(course.rawCode))).length;
   const mobileEntries = entries
     .filter((entry) => entry.day === mobileDay)
     .sort((a, b) => itemStartMinute(a) - itemStartMinute(b) || a.code.localeCompare(b.code));
@@ -769,7 +895,7 @@ export function SchedulePlanner() {
   async function addEntry() {
     const code = draft.code.trim().toUpperCase().replace(/\s+/g, " ");
     if (!code) return toast.error(t("Ders kodu veya blok adı gerekli.", "A course code or block name is required."));
-    const next: Entry = { ...draft, id: crypto.randomUUID(), code, name: draft.name.trim() || code, room: draft.room.trim(), color: uniqueCourses % COLORS.length, kind: code.startsWith("BLOCK:") ? "block" : "course" };
+    let next: Entry = { ...draft, id: crypto.randomUUID(), code, name: draft.name.trim() || code, room: draft.room.trim(), color: uniqueCourses % COLORS.length, kind: code.startsWith("BLOCK:") ? "block" : "course" };
     if (emptyDays.includes(next.day)) return toast.error(t("Bu günü boş gün olarak seçtin.", "You selected this as an empty day."));
     if (avoidConflicts && entries.some((entry) => overlaps(entry, next))) return toast.error(t("Bu saat mevcut bir dersle çakışıyor.", "This time conflicts with an existing course."));
 
@@ -779,20 +905,29 @@ export function SchedulePlanner() {
       try {
         const verdicts = await loadConstraints(code);
         const verdict = verdicts[section];
-        if (verdict && !verdict.eligible && !ignoreConstraints) {
+        if (verdict?.eligible === false && !ignoreConstraints) {
           const reason = localizedRestrictionReason(verdict.reason, t);
           return toast.error(verdict.reason
             ? t(`Şube ${section} sana kapalı: ${reason}. Yine de eklemek için "Şube kısıtlarını yok say"ı aç.`,
                 `Section ${section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
             : t(`Şube ${section} kısıtlarına uymuyorsun.`, `You do not meet section ${section}'s restrictions.`));
         }
-        if (verdict && !verdict.eligible) {
+        if (verdict?.eligible === false) {
           toast.warning(t(`Şube ${section} kısıtlara uymuyor, kısıtlar yok sayıldığı için eklendi.`,
             `Section ${section} does not meet its restrictions; added because restrictions are ignored.`));
+          next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
+        } else if (!verdict || verdict.eligible === null) {
+          toast.warning(t(`Şube ${section} için uygunluk doğrulanamadı; taslak olarak eklendi.`,
+            `Eligibility for section ${section} could not be verified; it was added as tentative.`));
+          next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
+        } else {
+          next = { ...next, tentative: false, verification_status: "verified", catalog_release_id: verdict.catalog_release_id ?? null };
         }
       } finally {
         setManualBusy(false);
       }
+    } else if (next.kind === "course") {
+      next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
     }
 
     setEntries((current) => [...current, next]);
@@ -989,7 +1124,8 @@ export function SchedulePlanner() {
             });
           } catch {
             // One failed group must not cost the rest their verdicts. A course
-            // with none is treated as unrestricted, exactly as before.
+            // with none stays unknown. Missing evidence cannot be presented as
+            // an unrestricted section or be persisted as verified.
           }
         }
       } finally {
@@ -1026,7 +1162,8 @@ export function SchedulePlanner() {
       return sections;
     } catch {
       // A course whose table cannot be read keeps its sections and simply gets
-      // no verdict, which the eligibility check treats as "not restricted".
+      // no verdict. The absence of a verdict remains unknown, so a manual add
+      // is visibly tentative and a published planner can fail closed.
       setConstraints((current) => (current[identity] ? current : { ...current, [identity]: {} }));
       return {};
     }
@@ -1047,8 +1184,8 @@ export function SchedulePlanner() {
   /** Display the server's eligibility verdict; the browser never recomputes it. */
   const sectionAllowed = useCallback((course: CatalogCourse, section: CatalogSection) => {
     const verdict = constraints[courseIdentity(course.rawCode)]?.[section.section];
-    if (verdict) return { allowed: verdict.eligible, reason: verdict.reason };
-    return { allowed: section.eligible !== false, reason: section.reason ?? "" };
+    if (verdict) return { allowed: verdict.eligible, reason: verdict.reason, status: verdict.eligibility_status ?? (verdict.eligible === null ? "unknown" : verdict.eligible ? "eligible" : "ineligible") };
+    return { allowed: section.eligible, reason: section.reason ?? "", status: section.eligibility_status ?? (section.eligible === null ? "unknown" : section.eligible ? "eligible" : "ineligible") };
   }, [constraints]);
 
   async function requestCurriculum(courses: CatalogCourse[]) {
@@ -1108,6 +1245,13 @@ export function SchedulePlanner() {
       const result = await requestCurriculum([]);
       setCatalogCourses(result.courses);
       setPrerequisiteRejections(result.prerequisiteRejections);
+      setPlanningMetadata(curriculumPlanningMetadata({
+        warnings: result.warnings,
+        unavailable: result.unavailable,
+        partial: result.partial,
+        prerequisiteRejections: result.prerequisiteRejections,
+        catalogReleaseId,
+      }));
       // Every course the curriculum names, checked now rather than when the
       // student happens to expand one: the red flags have to be visible while
       // they are choosing, not after.
@@ -1180,6 +1324,7 @@ export function SchedulePlanner() {
     try {
       const unavailable: string[] = [];
       const unpublished: string[] = [];
+      const needsVerification: string[] = [];
       // One request for everything still missing, rather than one per course
       // inside the loop below. A pool the catalog has already seen this week
       // costs a single call that touches no campus page at all.
@@ -1200,7 +1345,12 @@ export function SchedulePlanner() {
         } catch { unavailable.push(course.code); continue; }
         if (!sections.length) { unavailable.push(course.code); continue; }
         const timed = sections.filter((section) => section.meetings.length > 0);
-        if (!timed.length) { unpublished.push(course.code); continue; }
+        const explicitUntimed = sections.filter((section) => isExplicitlyUntimed(section) && !section.meetings.length);
+        if (!timed.length) {
+          if (explicitUntimed.some((section) => section.eligible !== true)) needsVerification.push(course.code);
+          continue;
+        }
+        if (timed.some(sectionNeedsVerification)) needsVerification.push(course.code);
       }
 
       // The fetched sections and server generated eligibility verdicts are
@@ -1211,6 +1361,7 @@ export function SchedulePlanner() {
       const staged = await submitPlanningUpdate({
         operation: "set_pool",
         pool: catalogCourses.map((course) => ({
+          ...course,
           code: course.code,
           name: course.name,
           credits: course.credits,
@@ -1226,17 +1377,29 @@ export function SchedulePlanner() {
       const restricted = catalogCourses
         .filter((course) => {
           const rows = sectionPayload[courseIdentity(course.rawCode)] ?? [];
-          return rows.length > 0 && rows.every((row) => row && typeof row === "object" && (row as { eligible?: boolean }).eligible === false);
+          return rows.length > 0 && rows.every((row) => row && typeof row === "object" && (row as { eligible?: boolean | null }).eligible === false);
         })
         .map((course) => course.code);
       const unplaced = catalogCourses
         .filter((course) => !scheduled.has(courseIdentity(course.code)))
-        .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !restricted.includes(course.code))
+        .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !needsVerification.includes(course.code) && !restricted.includes(course.code))
         .map((course) => course.code);
+
+      const metadataNeedsVerification = [...new Set([...unavailable, ...unpublished, ...needsVerification])];
+      const blockedCourses = [...new Set([...restricted, ...prerequisiteRejections.map((item) => item.course_code).filter((code): code is string => Boolean(code))])];
+      setCatalogReleaseId(solved.state.catalog_release_id ?? catalogReleaseId);
+      setNeedsRevalidation(solved.state.needs_revalidation === true);
+      setPlanningMetadata({
+        status: metadataNeedsVerification.length ? "needs_verification" : blockedCourses.length ? "blocked" : unplaced.length || !solved.state.alternatives.length ? "partial" : "complete",
+        blockedCourses,
+        needsVerification: metadataNeedsVerification,
+        catalogReleaseId: solved.state.catalog_release_id ?? catalogReleaseId,
+      });
 
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
       if (restricted.length) toast.warning(t(`${restricted.join(", ")} için soyadına açık şube yok. Kısıtları yok sayarak tekrar dene.`, `No section of ${restricted.join(", ")} is open to your surname. Try again with restrictions ignored.`));
+      if (needsVerification.length) toast.warning(t(`${needsVerification.join(", ")} için katalog uygunluğu henüz doğrulanmadı; oluşturulan programı kontrol et.`, `Catalog eligibility for ${needsVerification.join(", ")} is not verified yet; review the generated plan.`));
       if (!solved.state.alternatives.length) {
         toast.error(t(
           "Saat bilgisi olan tüm dersleri içeren bir program bulunamadı. Boş gün veya şube kısıtı tercihlerini değiştirip tekrar dene.",
@@ -1297,11 +1460,43 @@ export function SchedulePlanner() {
   }
 
   function addCatalogSection(course: CatalogCourse, section: CatalogSection) {
-    if (!section.meetings.length) return toast.warning(t("Bu şubenin gün ve saati ODTÜ tarafından henüz yayımlanmamış.", "METU has not published this section's day and time yet."));
+    const untimed = isExplicitlyUntimed(section) && !section.meetings.length;
+    if (!section.meetings.length && !untimed) return toast.warning(t("Bu şubenin gün ve saati ODTÜ tarafından henüz yayımlanmamış.", "METU has not published this section's day and time yet."));
+    const check = sectionAllowed(course, section);
+    if (check.allowed === false && !ignoreConstraints) {
+      const reason = localizedRestrictionReason(check.reason, t);
+      return toast.error(check.reason
+        ? t(`Şube ${section.section} sana kapalı: ${reason}. Yine de eklemek için "Şube kısıtlarını yok say"ı aç.`, `Section ${section.section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
+        : t(`Şube ${section.section} kısıtlarına uymuyorsun.`, `You do not meet section ${section.section}'s restrictions.`));
+    }
+    if (untimed) {
+      // Credit planning may retain an explicitly untimed section, but only
+      // after the same server eligibility verdict used by scheduled entries.
+      // There is deliberately no local PlanEntry for this selection.
+      if (check.allowed !== true) {
+        return toast.warning(t(
+          `Şube ${section.section} için kredi planı uygunluğu henüz doğrulanmadı.`,
+          `Credit eligibility for section ${section.section} is not verified yet.`,
+        ));
+      }
+      setCatalogCourses((current) => current.map((item) => (
+        courseIdentity(item.rawCode) === courseIdentity(course.rawCode)
+          ? { ...item, selected: true, timing_status: "untimed", selected_section: section.section }
+          : item
+      )));
+      toast.success(t(`${course.code} şube ${section.section} kredi planına eklendi (saat yok).`, `${course.code} section ${section.section} added to the credit plan (untimed).`));
+      return;
+    }
+    const tentative = check.allowed !== true;
+    if (check.allowed === false && ignoreConstraints) {
+      toast.warning(t(`Şube ${section.section} kısıtları yok sayıldığı için taslak olarak eklendi.`, `Section ${section.section} was added as tentative because its restrictions are being ignored.`));
+    } else if (check.allowed === null) {
+      toast.warning(t(`Şube ${section.section} için uygunluk doğrulanamadı; taslak olarak eklendi.`, `Eligibility for section ${section.section} could not be verified; it was added as tentative.`));
+    }
     // Eligibility is checked by the canonical owner when this state is saved.
     // The browser may show the catalog verdict, but it cannot make the
     // registration decision that chat and other clients must also observe.
-    const additions = section.meetings.map((meeting, index) => ({ id: crypto.randomUUID(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, ...meeting }));
+    const additions = section.meetings.map((meeting, index) => ({ id: crypto.randomUUID(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, tentative, verification_status: tentative ? "tentative" as const : "verified" as const, catalog_release_id: tentative ? null : section.catalog_release_id ?? null, ...meeting }));
     if (avoidConflicts && additions.some((next) => entries.some((entry) => overlaps(entry, next)))) return toast.error(t("Bu şube mevcut programla çakışıyor.", "This section conflicts with your schedule."));
     setEntries((current) => [...current, ...additions]);
     toast.success(t(`${course.code} şube ${section.section} eklendi.`, `${course.code} section ${section.section} added.`));
@@ -1466,6 +1661,7 @@ export function SchedulePlanner() {
               <Button onClick={() => void loadRequiredCourses()} disabled={busy || departmentBusy}>{planBusy ? t("Dersler belirleniyor…", "Finding courses…") : t("Almam gereken dersleri getir", "Load required courses")}</Button>
               {planBusy ? <p className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2 text-xs text-muted-foreground" role="status" aria-live="polite"><Loader2Icon className="size-3.5 animate-spin" />{t("Müfredatın okunuyor…", "Reading your curriculum…")}</p> : null}
               {curriculumNotice ? <p className={curriculumFailed ? "rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-xs leading-5 text-destructive" : "rounded-lg border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground"} role={curriculumFailed ? "alert" : undefined}>{curriculumNotice}</p> : null}
+              {catalogCourses.length || planningMetadata.blockedCourses.length || needsRevalidation ? <PlanningStatusNotice metadata={planningMetadata} needsRevalidation={needsRevalidation} /> : null}
               {catalogCourses.length ? (
                 <div className="flex items-center justify-between gap-3 text-xs" aria-live="polite">
                   <span className="font-medium">{t(`${catalogCourses.length} dersten ${selectedPoolCount} tanesi programa eklendi`, `${selectedPoolCount} of ${catalogCourses.length} courses added to the schedule`)}</span>
@@ -1532,6 +1728,8 @@ export function SchedulePlanner() {
                               const check = sectionAllowed(course, section);
                               const eligible = check.allowed;
                               const reason = localizedRestrictionReason(check.reason, t);
+                              const closed = eligible === false;
+                              const unknown = eligible === null;
                               const closedLabel = check.reason
                                 ? t(`Bu şube sana kapalı: ${reason}.`, `This section is closed to you: ${reason}.`)
                                 : t("Bu şubenin kısıtlarına uymuyorsun.", "You do not meet this section's restrictions.");
@@ -1539,14 +1737,17 @@ export function SchedulePlanner() {
                                 <button
                                   key={section.section}
                                   onClick={() => addCatalogSection(course, section)}
-                                  className={cn("w-full rounded-lg border bg-background p-2 text-left text-sm transition hover:border-primary/40 hover:bg-primary/5", !eligible && !ignoreConstraints && "opacity-60")}
+                                  className={cn("w-full rounded-lg border bg-background p-2 text-left text-sm transition hover:border-primary/40 hover:bg-primary/5", closed && !ignoreConstraints && "opacity-60", unknown && "border-amber-500/40")}
                                 >
                                   <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                     <span className="font-semibold">{t("Şube", "Section")} {section.section}</span>
+                                    {eligible === true ? <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-300">{t("Uygunluğu doğrulandı", "Eligibility verified")}</span> : null}
+                                    {unknown ? <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{t("Doğrulama bekliyor", "Verification pending")}</span> : null}
                                   </span>
-                                  {!eligible ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
+                                  {closed ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
+                                  {unknown ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin uygunluğu henüz doğrulanmadı; eklenirse taslak olarak işaretlenir.", "This section's eligibility is not verified yet; adding it marks the course as tentative.")}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
-                                  <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
+                                  <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : isExplicitlyUntimed(section) ? t("Saat yok; kredi planına eklenebilir", "Untimed; can be added to the credit plan") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
                                   {/* Shown as returned by the server. The
                                       department's free-text note remains
                                       context; eligibility is a server verdict. */}
@@ -1562,10 +1763,16 @@ export function SchedulePlanner() {
               </> : null}
             </CardContent></Card>
 
-            {entries.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
+            {entries.length || selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
+              {selectedUntimedCourses.map((course) => (
+                <div key={`${course.rawCode}-untimed`} className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/35 bg-amber-500/5 px-3 py-2">
+                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{course.code} · {localizedCourseName(course.name, locale)} <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Saat yok", "Untimed")}</span></p><p className="text-xs text-muted-foreground">{course.credits} {t("kredi", "credits")} · {course.selected_section ? `${t("Şube", "Section")} ${course.selected_section} · ` : ""}{t("Takvim saati yok; kredi planında tutuluyor.", "No calendar time; retained in the credit plan.")}</p></div>
+                  <Button size="icon" variant="ghost" aria-label={t("Dersi havuzdan çıkar", "Remove course from pool")} onClick={() => removePoolCourse(course)}><Trash2Icon /></Button>
+                </div>
+              ))}
               {scheduledCourseGroups.map((courseEntries) => { const entry = courseEntries[0]; return (
                 <div key={`${entry.code}-${entry.section}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
-                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)}`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
+                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{entry.code} · {localizedCourseName(entry.name, locale)} {entry.tentative ? <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Taslak", "Tentative")}</span> : null}</p><p className="text-xs text-muted-foreground">{courseEntries.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)}`).join(" / ")} · {t("Şube", "Section")} {entry.section}{entry.instructor ? ` · ${entry.instructor}` : ""}</p></div>
                   <Button size="icon" variant="ghost" aria-label={t("Dersi kaldır", "Remove course")} onClick={() => removeScheduledCourse(courseEntries)}><Trash2Icon /></Button>
                 </div>
               ); })}
@@ -1640,7 +1847,7 @@ export function SchedulePlanner() {
                           {formatItemRange(entry)}
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}</span>
+                          <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}{entry.tentative ? <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Taslak", "Tentative")}</span> : null}</span>
                           <span className="mt-0.5 block text-xs leading-snug opacity-85">{localizedCourseName(entry.name, locale)}</span>
                           <span className="mt-1 block text-xs opacity-75">{entry.room?.trim() || (entry.kind === "course" ? "TBA" : "—")}{entry.instructor ? ` · ${entry.instructor}` : ""}</span>
                         </span>
@@ -1734,6 +1941,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                                   somewhere unexpected showed no room at all. */}
                               <span className="flex items-baseline gap-1.5">
                                 <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{entry.code} · {entry.section}</span>
+                                {entry.tentative ? <span title={t("Katalog doğrulaması bekliyor", "Catalog verification pending")} className="shrink-0 rounded bg-amber-500/20 px-1 text-[10px] font-bold text-amber-800 dark:text-amber-200">?</span> : null}
                                 {entry.kind === "course" || entry.room?.trim() ? (
                                   <span className="shrink-0 text-[11px] font-medium opacity-80">{entry.room?.trim() || "TBA"}</span>
                                 ) : null}
@@ -1771,6 +1979,33 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
           </section>
         </div>
       </div>
+    </div>
+  );
+}
+
+function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: PlanningMetadata; needsRevalidation: boolean }) {
+  const { pick } = useLocale();
+  const blocked = metadata.status === "blocked";
+  const uncertain = metadata.status === "needs_verification" || metadata.status === "partial" || needsRevalidation;
+  const label = metadata.status === "complete"
+    ? pick({ tr: "Planlama tamamlandı", en: "Planning complete" })
+    : blocked
+      ? pick({ tr: "Planlama engellendi", en: "Planning blocked" })
+      : pick({ tr: "Planlama doğrulama bekliyor", en: "Planning needs verification" });
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-2 text-xs leading-5",
+        blocked ? "border-destructive/40 bg-destructive/10 text-destructive" : uncertain ? "border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-100" : "border-emerald-500/35 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100",
+      )}
+      data-planning-status={metadata.status}
+      role={blocked ? "alert" : "status"}
+    >
+      <p className="font-medium">{label}</p>
+      {metadata.blockedCourses.length ? <p>{pick({ tr: `Engellenen dersler: ${metadata.blockedCourses.join(", ")}`, en: `Blocked courses: ${metadata.blockedCourses.join(", ")}` })}</p> : null}
+      {metadata.needsVerification.length ? <p>{pick({ tr: `Doğrulanması gerekenler: ${metadata.needsVerification.join(", ")}`, en: `Needs verification: ${metadata.needsVerification.join(", ")}` })}</p> : null}
+      {needsRevalidation ? <p>{pick({ tr: "Katalog sürümü değişti; programı yeniden doğrulamalısın.", en: "The catalog release changed; revalidate this schedule before relying on it." })}</p> : null}
+      {metadata.catalogReleaseId ? <p className="font-mono text-[11px] opacity-80">{pick({ tr: "Katalog sürümü", en: "Catalog release" })}: {metadata.catalogReleaseId}</p> : null}
     </div>
   );
 }

@@ -47,6 +47,7 @@ from app.planning.catalog_service import (
     constraint_rows,
     course_grade,
     load_student_profile,
+    published_catalog_reads_enabled,
     section_verdict,
 )
 from app.planning.catalog_service import expand_course_code as expand_catalog_course_code
@@ -437,6 +438,40 @@ def _search_fold(text: str) -> str:
     return str(text).translate(_SEARCH_FOLD).casefold()
 
 
+async def _published_search_index(
+    db: AsyncSession,
+    user_id,
+    semester: str,
+) -> tuple[list[tuple[str, dict]], set[str]]:
+    """Build the search index from one published term listing.
+
+    The old title search read every department's raw persistent-cache row. Once
+    publication is enabled that cache is no longer authoritative, so one
+    semester-only ``list_program_courses`` read supplies the complete searchable
+    surface and its release pin through ``call_course_info``.
+    """
+
+    payload = await call_course_info(
+        db,
+        user_id,
+        "list_program_courses",
+        {"semester": semester},
+    )
+    rows: list[tuple[str, dict]] = []
+    covered: set[str] = set()
+    for row in _catalog_rows(payload):
+        full_code = re.sub(r"[^0-9]", "", str(row.get("course_code") or row.get("code") or ""))
+        owner_value = row.get("department") or row.get("department_code") or row.get("dept")
+        owner = departments.resolve(str(owner_value)) if owner_value else None
+        if owner is None and len(full_code) == 7:
+            owner = departments.by_code(full_code[:3])
+        if owner is None:
+            continue
+        covered.add(owner.code)
+        rows.extend(_index_rows({"courses": [row]}, owner))
+    return rows, covered
+
+
 @router.get("/courses/search")
 async def search_courses(
     query: str = Query(min_length=2, max_length=60),
@@ -472,6 +507,43 @@ async def search_courses(
 
     context = await db.get(StudentContext, user.id)
     home = departments.resolve((context.department or context.program_code) if context else None)
+
+    if published_catalog_reads_enabled():
+        # The published reader supports a semester-only listing. Keep both code
+        # and title search on that source so an old shared cache row can never
+        # leak into a published response.
+        indexed, covered = await _published_search_index(db, user.id, semester)
+        wanted = _search_fold(typed)
+        if named is not None or (digits and not letters):
+            matches = [
+                course
+                for haystack, course in indexed
+                if (
+                    not digits
+                    or re.sub(r"[^0-9]", "", course["code"]).startswith(digits)
+                    or re.sub(r"[^0-9]", "", course["full_code"])[3:].startswith(digits)
+                )
+                and (not wanted or wanted in haystack)
+            ]
+            if named is not None:
+                matches = [
+                    course
+                    for course in matches
+                    if course["department"] in {named.abbreviation, named.code}
+                ]
+            return {
+                "courses": matches[:40],
+                "searched_departments": len(covered),
+                "scope": "published_catalog",
+            }
+        courses = [course for haystack, course in indexed if wanted in haystack]
+        if home is not None:
+            courses.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
+        return {
+            "courses": courses[:40],
+            "searched_departments": len(covered),
+            "scope": "published_catalog",
+        }
 
     # A code lookup: the letters name a department, or there are only digits.
     if named is not None or (digits and not letters):
@@ -524,6 +596,8 @@ def _listing_key(department_code: str, semester: str) -> str:
 
 async def _cached_listings(semester: str) -> dict[str, Any]:
     """Every department listing already in the shared cache, by department code."""
+    if published_catalog_reads_enabled():
+        return {}
     wanted = {_listing_key(entry.code, semester): entry.code for entry in departments.all_departments()}
     found = await read_many_cached(list(wanted))
     return {wanted[key]: payload for key, payload in found.items()}
@@ -546,10 +620,10 @@ def _index_rows(payload: Any, owner: Any) -> list[tuple[str, dict]]:
     """
     rows: list[tuple[str, dict]] = []
     for row in _catalog_rows(payload):
-        full_code = str(row.get("course_code") or "").strip()
+        full_code = str(row.get("course_code") or row.get("code") or "").strip()
         if not full_code:
             continue
-        name = " ".join(str(row.get("name") or "").split())
+        name = " ".join(str(row.get("name") or row.get("title") or "").split())
         short = _short_code(full_code, owner.abbreviation)
         rows.append((
             _search_fold(f"{short} {name}"),
@@ -557,7 +631,7 @@ def _index_rows(payload: Any, owner: Any) -> list[tuple[str, dict]]:
                 "code": short,
                 "full_code": full_code,
                 "name": name,
-                "credits": _credit_value(row.get("credit")),
+                "credits": _credit_value(row.get("credit", row.get("credits"))),
                 "department": owner.abbreviation or owner.code,
             },
         ))
@@ -602,12 +676,32 @@ def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list
 
 def _catalog_rows(payload: Any) -> list[dict]:
     """The course rows inside whatever wrapper the catalog answered with."""
+    def normalize(rows: list[Any]) -> list[dict]:
+        normalized: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            nested = row.get("data")
+            if isinstance(nested, dict):
+                value = dict(nested)
+                # Keep identity and provenance supplied beside a typed data
+                # object. Missing fields remain missing so downstream callers
+                # can report unknown rather than inventing a course fact.
+                value.update({key: item for key, item in row.items() if key != "data"})
+                row = value
+            normalized.append(row)
+        return normalized
+
     if isinstance(payload, dict):
         for key in ("result", "courses", "data", "items"):
             if isinstance(payload.get(key), list):
-                return [row for row in payload[key] if isinstance(row, dict)]
+                return normalize(payload[key])
+            if isinstance(payload.get(key), dict):
+                nested = _catalog_rows(payload[key])
+                if nested:
+                    return nested
         return []
-    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+    return normalize(payload) if isinstance(payload, list) else []
 
 
 def _credit_value(raw: Any) -> float:
@@ -772,12 +866,22 @@ async def bulk_constraints(
                 results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
                 return raw, _NOT_PRELOADED
 
-        loaded = await asyncio.gather(
-            *(
-                load_course_info(raw, compact_course, lookup_department)
+        if published_catalog_reads_enabled():
+            # The published reader performs SQL through this request's one
+            # AsyncSession. SQLAlchemy forbids concurrent operations on that
+            # session, and the catalog service already batches whole-plan
+            # reads; keep this endpoint's section pages serialized as well.
+            loaded = [
+                await load_course_info(raw, compact_course, lookup_department)
                 for raw, (compact_course, lookup_department) in expanded.items()
+            ]
+        else:
+            loaded = await asyncio.gather(
+                *(
+                    load_course_info(raw, compact_course, lookup_department)
+                    for raw, (compact_course, lookup_department) in expanded.items()
+                )
             )
-        )
         course_info = {raw: info for raw, info in loaded if info is not _NOT_PRELOADED}
 
         # Once the course pages reveal the section numbers, seed every section
@@ -816,13 +920,17 @@ async def bulk_constraints(
                 logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
                 return raw, {"course": raw, "error": str(exc.detail), "sections": {}}
 
-        checked = await asyncio.gather(
-            *(
-                check_course(raw, compact_course, lookup_department)
-                for raw, (compact_course, lookup_department) in expanded.items()
-                if raw in course_info
+        checks = [
+            (raw, compact_course, lookup_department)
+            for raw, (compact_course, lookup_department) in expanded.items()
+            if raw in course_info
+        ]
+        if published_catalog_reads_enabled():
+            checked = [await check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks]
+        else:
+            checked = await asyncio.gather(
+                *(check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks)
             )
-        )
         results.update(checked)
     return {"courses": results}
 
@@ -928,6 +1036,10 @@ async def _constraints_for(
             "rows": rows,
             "eligible": eligible,
             "reason": reason,
+            "eligibility_status": (
+                "eligible" if eligible is True else "ineligible" if eligible is False else "unknown"
+            ),
+            "constraints_verified": eligible is not None,
         }
 
     return {
@@ -1098,8 +1210,20 @@ async def _curriculum_courses(
     )
     warnings.extend(variant_warnings)
     kept.sort(key=lambda course: (course["_year"], course["_rank"], course["code"]))
+    # Scoped prerequisite groups are evaluated against the setup-owned student
+    # context. Read it once for the whole curriculum batch so a missing
+    # programme/curriculum value becomes an explicit verification warning
+    # without issuing one query per course.
+    context = await db.get(StudentContext, user.id) if db is not None else None
     approved, prerequisite_rejections, prerequisite_warnings = await prerequisites.filter_courses(
-        db, user.id, catalog, semester, kept, completed
+        db,
+        user.id,
+        catalog,
+        semester,
+        kept,
+        completed,
+        program_code=getattr(context, "program_code", None),
+        curriculum_version=getattr(context, "curriculum_version", None),
     )
     warnings.extend(prerequisite_warnings)
     complete = complete and not prerequisite_warnings
@@ -1186,7 +1310,8 @@ async def curriculum_plan(
     if courses and complete:
         # What a student asked for tonight is what the warmer should have ready
         # tomorrow. Course codes only, never who wanted them.
-        await record_wanted_courses(body.semester.strip(), [course["code"] for course in courses])
+        if not published_catalog_reads_enabled():
+            await record_wanted_courses(body.semester.strip(), [course["code"] for course in courses])
         await write_cached(
             cache_key,
             response,

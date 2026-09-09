@@ -439,6 +439,37 @@ async def test_course_info_read_rejects_a_plausible_previous_page(sais):
         await client.get_course_info("567", "20261", "5670201")
 
 
+@pytest.mark.parametrize(
+    "meeting_cells, expected_time, expected_room",
+    [
+        (["Monday", "09:00", "10:00", "B101"], "09:00-10:00", "B101"),
+        (["Monday", "09:00", "10:00"], "09:00-10:00", ""),
+        (["Monday", "09:00-10:00", "B101"], "09:00-10:00", "B101"),
+    ],
+)
+async def test_course_info_preserves_meeting_layouts(sais, meeting_cells, expected_time, expected_room):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    cells = "".join(f"<td>{value}</td>" for value in meeting_cells)
+    page = (
+        "<table><tr><th>Section</th><th>Instructor</th><th>Instructor</th></tr>"
+        '<tr><td><input name="submit_section" value="1"></td>'
+        "<td>Jane Example</td><td></td><td><table><tr>"
+        + cells + "</tr></table></td></tr></table>"
+    )
+    _post_returning(client, [page])
+    result = await client.get_course_info("567", "20261", "5670201")
+
+    assert len(result.sections) == 1
+    assert len(result.sections[0].schedule) == 1
+    meeting = result.sections[0].schedule[0]
+    assert (meeting.day, meeting.time, meeting.room) == ("Monday", expected_time, expected_room)
+
+
 async def test_section_constraint_read_rejects_a_plausible_previous_page(sais):
     client = _client(sais)
 
