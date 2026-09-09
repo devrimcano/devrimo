@@ -34,7 +34,8 @@ endpoint. Observation time and actual source fetch time are shown separately.
 ## Activation
 
 1. Apply the additive academic-catalog migration with the migration identity.
-2. Enable `ACADEMIC_CATALOG_INGESTION_ENABLED=true` for the catalog worker.
+2. Keep `ACADEMIC_CATALOG_INGESTION_ENABLED=true` on both the API and catalog
+   worker. Production deployment and fresh local environments enable it.
 3. Use **Admin → Courses / Dersler** to import, inspect source differences, edit
    drafts, and publish selected courses. Campus admins can edit/publish within
    their organization; operators can read.
