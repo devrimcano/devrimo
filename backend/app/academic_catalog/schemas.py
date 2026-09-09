@@ -418,7 +418,189 @@ class CourseListQuery(BaseModel):
         return normalize_term(value)
 
 
+# Response contracts for the admin surface.  The nested catalog payloads are
+# deliberately permissive because source adapters may add fields, while the
+# stable envelope and identifiers remain typed in OpenAPI and generated
+# frontend clients.
+class CatalogCourseRowOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    course_code: str
+    department: str | None = None
+    title: str | None = None
+    local_credits: float | None = None
+    ects: float | None = None
+    level: str | None = None
+    availability: str | None = None
+    campus: str | None = None
+    state: str
+    completeness: dict[str, Any] = Field(default_factory=dict)
+    freshness: str = "unknown"
+    source_conflicts: bool | int | list[dict[str, Any]] = False
+    draft_id: str | None = None
+    course_revision_id: str | None = None
+    section_count: int = 0
+    catalog: dict[str, Any] = Field(default_factory=dict, alias="_catalog")
+
+
+class CatalogCourseListOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    courses: list[CatalogCourseRowOut] = Field(default_factory=list)
+    total: int = 0
+    release_id: str | None = None
+    counts: dict[str, int] = Field(default_factory=dict)
+    term: str | None = None
+
+
+class CatalogCourseDetailOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    course_code: str
+    term: str | None = None
+    department: str | None = None
+    title: str | None = None
+    credits: float | None = None
+    local_credits: float | None = None
+    ects: float | None = None
+    level: str | None = None
+    availability: str | None = None
+    campus: str | None = None
+    is_thesis: bool = False
+    state: str
+    completeness: dict[str, Any] = Field(default_factory=dict)
+    component_status: dict[str, Any] = Field(default_factory=dict)
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    prerequisite_groups: list[dict[str, Any]] = Field(default_factory=list)
+    replacements: list[dict[str, Any]] = Field(default_factory=list)
+    source_observations: list[dict[str, Any]] = Field(default_factory=list)
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    catalog: dict[str, Any] = Field(default_factory=dict, alias="_catalog")
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+    field_overrides: dict[str, Any] = Field(default_factory=dict)
+    draft_id: str | None = None
+    draft_revision: int | None = None
+    draft: dict[str, Any] | None = None
+
+
+class CatalogDraftOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    revision: int
+    state: str
+    term: str | None = None
+    course_code: str | None = None
+    term_id: str
+    course_id: str
+    base_revision_id: str | None = None
+    published_revision_id: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+    field_overrides: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    created_by: str | None = None
+    updated_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class CatalogImportJobOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    organization_id: str
+    term: str
+    department: str | None = None
+    course_codes: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+    attempts: int = 0
+    lease_until: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    dedup_key: str
+    reason: str | None = None
+    priority: int = 50
+    created_at: str | None = None
+    updated_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class CatalogImportsOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    imports: list[CatalogImportJobOut] = Field(default_factory=list)
+    total: int = 0
+
+
+class CatalogReleaseOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    release_number: int | None = None
+    operation: str | None = None
+    reason: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
+    expected_release_id: str | None = None
+    target_release_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    active: bool = False
+
+
+class CatalogReleasesOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    releases: list[CatalogReleaseOut] = Field(default_factory=list)
+    active_release_id: str | None = None
+    term: str | None = None
+
+
+class CatalogOperationOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    operation_id: str
+    operation: str
+    status: str
+    term: str
+    release_id: str | None = None
+    target_release_id: str | None = None
+    idempotency_key: str
+    release_number: int | None = None
+    published_draft_ids: list[str] = Field(default_factory=list)
+    course_revision_ids: list[str] = Field(default_factory=list)
+    course_count: int | None = None
+
+
+class CatalogSourceObservationOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    payload: Any = None
+    candidate_data: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    observed_at: Any = None
+    source_fetched_at: Any = None
+    parser_version: str | None = None
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
 __all__ = [
+    "CatalogCourseDetailOut",
+    "CatalogCourseListOut",
+    "CatalogCourseRowOut",
+    "CatalogDraftOut",
+    "CatalogImportJobOut",
+    "CatalogImportsOut",
+    "CatalogOperationOut",
+    "CatalogReleaseOut",
+    "CatalogReleasesOut",
+    "CatalogSourceObservationOut",
     "CourseListQuery",
     "CoursePatch",
     "DraftCreateIn",

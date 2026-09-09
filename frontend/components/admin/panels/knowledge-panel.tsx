@@ -277,6 +277,7 @@ export function KnowledgePanel({
               settings={embedding.data}
               loading={embedding.isLoading}
               canWrite={canWrite}
+              canConfigure={principal.role === "super_admin"}
               onDone={refresh}
             />
           ))}
@@ -638,6 +639,7 @@ function EmbeddingPanel(props: {
   settings?: EmbeddingSettings;
   loading: boolean;
   canWrite: boolean;
+  canConfigure: boolean;
   onDone: () => void;
 }) {
   if (props.loading || !props.settings)
@@ -657,6 +659,7 @@ function EmbeddingPanel(props: {
       key={settingsKey}
       settings={props.settings}
       canWrite={props.canWrite}
+      canConfigure={props.canConfigure}
       onDone={props.onDone}
     />
   );
@@ -665,10 +668,12 @@ function EmbeddingPanel(props: {
 function EmbeddingPanelEditor({
   settings,
   canWrite,
+  canConfigure,
   onDone,
 }: {
   settings: EmbeddingSettings;
   canWrite: boolean;
+  canConfigure: boolean;
   onDone: () => void;
 }) {
   const { pick } = useLocale();
@@ -782,7 +787,7 @@ function EmbeddingPanelEditor({
             </Label>
             <Select
               value={provider}
-              disabled={!canWrite}
+              disabled={!canConfigure}
               onValueChange={(value) => {
                 const next = (value ??
                   "disabled") as EmbeddingSettings["provider"];
@@ -831,7 +836,7 @@ function EmbeddingPanelEditor({
             <Input
               id="knowledge-field-3"
               value={model}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onChange={(event) => {
                 setModel(event.target.value);
                 setDirty(true);
@@ -845,7 +850,7 @@ function EmbeddingPanelEditor({
             <Input
               id="knowledge-field-4"
               value={baseUrl}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onChange={(event) => {
                 setBaseUrl(event.target.value);
                 setDirty(true);
@@ -863,7 +868,7 @@ function EmbeddingPanelEditor({
             </Label>
             <Select
               value={dimensions}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onValueChange={(value) => {
                 setDimensions(value ?? "1536");
                 setDirty(true);
@@ -891,7 +896,7 @@ function EmbeddingPanelEditor({
               min={1}
               max={128}
               value={batchSize}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onChange={(event) => {
                 setBatchSize(event.target.value);
                 setDirty(true);
@@ -905,7 +910,7 @@ function EmbeddingPanelEditor({
             <Input
               id="knowledge-field-7"
               value={queryPrefix}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onChange={(event) => {
                 setQueryPrefix(event.target.value);
                 setDirty(true);
@@ -926,7 +931,7 @@ function EmbeddingPanelEditor({
             <Input
               id="knowledge-field-8"
               value={documentPrefix}
-              disabled={!canWrite || provider === "disabled"}
+              disabled={!canConfigure || provider === "disabled"}
               onChange={(event) => {
                 setDocumentPrefix(event.target.value);
                 setDirty(true);
@@ -960,7 +965,7 @@ function EmbeddingPanelEditor({
                 id="knowledge-field-9"
                 type="password"
                 value={apiKey}
-                disabled={!canWrite}
+                disabled={!canConfigure}
                 onChange={(event) => {
                   setApiKey(event.target.value);
                   setDirty(true);
@@ -978,7 +983,7 @@ function EmbeddingPanelEditor({
           ) : null}
           <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
             <Button
-              disabled={!canWrite || !dirty || !valid || save.isPending}
+              disabled={!canConfigure || !dirty || !valid || save.isPending}
               onClick={() => save.mutate()}
             >
               <SaveIcon />

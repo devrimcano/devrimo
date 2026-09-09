@@ -73,6 +73,24 @@ AUTOLOGIN = '<html><body><form id="autologin"><input name="x" value="y"></form><
 EMPTY_PAGE = "<html><body><p>No records found.</p></body></html>"
 
 
+def _course_identity(course="5670201", semester="20261", section=None):
+    html = f'<input type="hidden" name="text_course_code" value="{course}">'
+    html += f'<input type="hidden" name="select_semester" value="{semester}">'
+    if section is not None:
+        html += f'<input type="hidden" name="section" value="{section}">'
+    return html
+
+
+def test_response_term_label_uses_the_official_selector_label(sais):
+    page = _soup("<p>Course Code: 5670201 Semester: Official Fall Term Course Name: Fixture</p>")
+    sais._verify_course_response_identity(page, "5670201", "20261", semester_label="Official Fall Term")
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_response_identity(page, "5670201", "20261", semester_label="Official Spring Term")
+    wrong_label = _soup(_course_identity() + "<p>Semester: Official Spring Term</p>")
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_response_identity(wrong_label, "5670201", "20261", semester_label="Official Fall Term")
+
+
 class _Response:
     def __init__(self, html: str):
         self.content = html.encode("utf-8")
@@ -406,12 +424,40 @@ async def test_explicit_empty_course_listing_remains_valid(sais):
     client = _client(sais)
 
     async def course_list(*_args, **_kwargs):
-        page = "<html><body><p>No course records found.</p></body></html>"
+        page = '<input name="select_dept" value="567"><input name="select_semester" value="20261"><p>No course records found.</p>'
         return "https://example.invalid/main.php", page, _soup(page)
 
     client._submit_course_list_page = course_list
 
     assert await client.list_program_courses("567", "20261") == []
+
+
+@pytest.mark.parametrize("method", ["list_program_courses", "get_thesis_courses"])
+@pytest.mark.parametrize("department,semester", [("240", "20261"), ("567", "20252"), ("", "")])
+async def test_readable_listing_requires_requested_context(sais, method, department, semester):
+    client = _client(sais)
+    page = (f'<input name="select_dept" value="{department}">'
+            f'<input name="select_semester" value="{semester}">' + COURSE_LIST)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+    with pytest.raises(ValueError, match="identity"):
+        await getattr(client, method)("567", "20261")
+
+
+async def test_verified_empty_thesis_table_is_valid(sais):
+    client = _client(sais)
+    page = '<input name="select_dept" value="567"><input name="select_semester" value="20261">' + COURSE_LIST
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+    assert await client.get_thesis_courses("567", "20261") == []
 
 
 async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sais):
@@ -421,7 +467,7 @@ async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sai
         return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
 
     client._submit_course_list_page = course_list
-    _post_returning(client, ["<p>This course does not have any prerequisites.</p>"])
+    _post_returning(client, [_course_identity() + "<p>This course does not have any prerequisites.</p>"])
 
     assert await client.get_course_prerequisites("567", "20261", "5670201") == []
 
@@ -461,7 +507,7 @@ async def test_course_info_preserves_meeting_layouts(sais, meeting_cells, expect
         "<td>Jane Example</td><td></td><td><table><tr>"
         + cells + "</tr></table></td></tr></table>"
     )
-    _post_returning(client, [page])
+    _post_returning(client, [_course_identity() + page])
     result = await client.get_course_info("567", "20261", "5670201")
 
     assert len(result.sections) == 1
@@ -477,11 +523,76 @@ async def test_section_constraint_read_rejects_a_plausible_previous_page(sais):
         return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
 
     client._submit_course_list_page = course_list
-    course_page = '<form><input type="hidden" name="hidden_redir" value="Course_Info"></form>'
+    course_page = _course_identity() + '<form><input type="hidden" name="hidden_redir" value="Course_Info"></form>'
     _post_returning(client, [course_page, COURSE_LIST])
 
     with pytest.raises(ValueError, match="restriction table"):
         await client.get_section_constraints("567", "20261", "5670201", "1")
+
+
+@pytest.mark.parametrize("identity", [
+    _course_identity(course="5670202"),
+    _course_identity(semester="20252"),
+    "",
+    _course_identity() + "<p>Course Code: 5670202</p>",
+])
+async def test_readable_stale_course_detail_is_rejected(sais, identity):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [identity + "<table><tr><td>Course Name: Previous Course Credit: 3</td></tr></table>"])
+    with pytest.raises(ValueError, match="identity"):
+        await client.get_course_info("567", "20261", "5670201")
+
+
+@pytest.mark.parametrize("course, semester, section", [
+    ("5670202", "20261", "1"), ("5670201", "20252", "1"), ("5670201", "20261", "2"),
+])
+async def test_readable_stale_section_constraints_are_rejected(sais, course, semester, section):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    table = "<table><tr><th>Dept</th><th>Char</th></tr></table>"
+    _post_returning(client, [_course_identity(), _course_identity(course, semester, section) + table])
+    with pytest.raises(ValueError, match="identity"):
+        await client.get_section_constraints("567", "20261", "5670201", "1")
+
+
+async def test_verified_empty_section_constraints_remain_valid(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    page = "<p>Course Code: 5670201 Semester: 20261 Section: 01</p><table><tr><th>Dept</th><th>Char</th></tr></table>"
+    _post_returning(client, [_course_identity(), page])
+    result = await client.get_section_constraints("567", "20261", "5670201", "1")
+    assert result.constraints == []
+
+
+@pytest.mark.parametrize("method, body", [
+    ("get_course_prerequisites", "<p>This course does not have any prerequisites.</p>"),
+    ("get_course_replacements", "<p>This course does not have any replacements.</p>"),
+])
+async def test_empty_rules_must_belong_to_the_requested_course(sais, method, body):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [_course_identity(course="5670202") + body])
+    with pytest.raises(ValueError, match="identity"):
+        await getattr(client, method)("567", "20261", "5670201")
+    _post_returning(client, [_course_identity() + body])
+    assert await getattr(client, method)("567", "20261", "5670201") == []
 
 def test_curriculum_parser_rejects_missing_board(sais):
     with pytest.raises(ValueError):

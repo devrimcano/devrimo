@@ -8,14 +8,18 @@ import random
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, case, cast, or_, select, text, update
+from sqlalchemy import ARRAY, DateTime, Text, case, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
-from app.academic_catalog.models import (
-    CatalogCourse, CatalogDraft, CatalogHttpBudget, CatalogImportJob,
-    CatalogTerm, CatalogTermActiveRelease,
-)
 from app.academic_catalog import service as catalog_service
+from app.academic_catalog.models import (
+    CatalogCourse,
+    CatalogDraft,
+    CatalogHttpBudget,
+    CatalogImportJob,
+    CatalogTerm,
+    CatalogTermActiveRelease,
+)
 from app.academic_catalog.source import CatalogSource
 from app.campus import service as campus_service
 from app.campus.credentials import secrets_for
@@ -36,11 +40,38 @@ class ImportDeferred(Exception):
     """A policy limit, not a failed source read."""
 
 
+class CatalogPassResult(int):
+    """Numeric worker count with a safe, machine-readable pass outcome.
+
+    The standalone worker historically returned an integer and the runtime
+    uses that count for aggregate pass telemetry.  Keep the integer shape for
+    callers while carrying the distinction between an idle pass, a deferred
+    job, and a completed or failed job.  The runtime can inspect these bounded
+    fields without requiring source payloads or exception text.
+    """
+
+    def __new__(
+        cls,
+        count: int = 0,
+        *,
+        outcome: str = "idle",
+        job_id: UUID | None = None,
+        error_code: str | None = None,
+        scheduled_count: int = 0,
+    ):
+        value = super().__new__(cls, count)
+        value.outcome = outcome
+        value.job_id = str(job_id) if job_id is not None else None
+        value.error_code = error_code
+        value.scheduled_count = scheduled_count
+        return value
+
+
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
-async def admit_request(organization_id: UUID, job_id: UUID, lease_token: UUID | None = None) -> None:
+async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token: UUID | None = None) -> None:
     """Serialize and reserve every HTTP attempt, including redirects and sign-in."""
     settings = get_settings()
     while True:
@@ -51,15 +82,35 @@ async def admit_request(organization_id: UUID, job_id: UUID, lease_token: UUID |
         async with SessionLocal() as db:
             if lease_token is not None:
                 await _owned_job(db, job_id, lease_token)
-            await db.execute(insert(CatalogHttpBudget).values(
+            inserted = await db.scalar(insert(CatalogHttpBudget).values(
                 organization_id=organization_id, budget_date=local.date(), attempted_count=0,
                 next_request_at=now, daily_limit=settings.catalog_warm_daily_limit,
                 min_interval_seconds=settings.catalog_warm_interval_seconds,
-            ).on_conflict_do_nothing())
+            ).on_conflict_do_nothing().returning(CatalogHttpBudget.budget_date))
             row = await db.scalar(select(CatalogHttpBudget).where(
                 CatalogHttpBudget.organization_id == organization_id,
                 CatalogHttpBudget.budget_date == local.date(),
             ).with_for_update())
+            if row is None:
+                # The insert and the select are in one transaction. A row can
+                # only be absent if the database rejected the insert without
+                # reporting a conflict, which is a real admission failure and
+                # must never be treated as permission to make a request.
+                raise RuntimeError("catalog HTTP budget row could not be created")
+            if inserted is not None:
+                # The counter resets at local midnight, but the request clock
+                # must not. Carry the previous day's reservation into a newly
+                # created row so an overnight window cannot issue two requests
+                # back-to-back at the date boundary.
+                previous = await db.scalar(select(CatalogHttpBudget).where(
+                    CatalogHttpBudget.organization_id == organization_id,
+                    CatalogHttpBudget.budget_date < local.date(),
+                ).order_by(CatalogHttpBudget.budget_date.desc()).limit(1).with_for_update())
+                if previous is not None and previous.next_request_at is not None:
+                    previous_next = _aware(previous.next_request_at)
+                    current_next = _aware(row.next_request_at) if row.next_request_at else None
+                    if current_next is None or previous_next > current_next:
+                        row.next_request_at = previous_next
             if row.attempted_count >= settings.catalog_warm_daily_limit:
                 raise ImportDeferred("daily_http_budget_exhausted")
             wait = max(0, (_aware(row.next_request_at) - now).total_seconds()) if row.next_request_at else 0
@@ -70,9 +121,10 @@ async def admit_request(organization_id: UUID, job_id: UUID, lease_token: UUID |
                 row.next_request_at = now + timedelta(seconds=(
                     settings.catalog_warm_interval_seconds + random.uniform(0, settings.catalog_warm_jitter_seconds)
                 ))
-                await db.execute(update(CatalogImportJob).where(CatalogImportJob.id == job_id).values(
-                    lease_until=now + timedelta(seconds=settings.academic_catalog_job_lease_seconds),
-                ))
+                if job_id is not None:
+                    await db.execute(update(CatalogImportJob).where(CatalogImportJob.id == job_id).values(
+                        lease_until=now + timedelta(seconds=settings.academic_catalog_job_lease_seconds),
+                    ))
                 await db.commit()
                 return
             await db.commit()
@@ -192,8 +244,58 @@ async def _owned_job(db, job_id, lease_token):
 async def _save(job_id, lease_token, **values):
     async with SessionLocal() as db:
         job = await _owned_job(db, job_id, lease_token)
+        checkpoint = values.get("checkpoint")
+        if "checkpoint_offset" not in values and isinstance(checkpoint, dict):
+            values["checkpoint_offset"] = int(checkpoint.get("offset", 0))
         for name, value in values.items():
             setattr(job, name, value)
+        await db.commit()
+
+
+async def _save_offset(
+    job_id,
+    lease_token,
+    offset: int,
+    *,
+    retry_at: str | None = None,
+    clear_retry_at: bool = False,
+    **values,
+):
+    """Persist progress without rewriting a growing operation plan.
+
+    The step plan is durable whenever it changes. Between expansions only the
+    scalar cursor and job fields change, so update the dedicated cursor column.
+    This keeps a whole-school import's ordinary write size bounded rather than
+    rewriting the already-known JSONB operation plan after each request. The
+    plan is still rewritten when a source response expands it.
+    """
+    async with SessionLocal() as db:
+        await _owned_job(db, job_id, lease_token)
+        update_values = {"checkpoint_offset": offset, **values}
+        if retry_at is not None:
+            checkpoint = func.jsonb_set(
+                CatalogImportJob.checkpoint,
+                cast(["offset"], ARRAY(Text)),
+                func.to_jsonb(offset),
+                True,
+            )
+            update_values["checkpoint"] = func.jsonb_set(
+                checkpoint,
+                cast(["retry_at"], ARRAY(Text)),
+                func.to_jsonb(retry_at),
+                True,
+            )
+        elif clear_retry_at:
+            update_values["checkpoint"] = CatalogImportJob.checkpoint.op("-")("retry_at")
+        await db.execute(
+            update(CatalogImportJob)
+            .where(
+                CatalogImportJob.id == job_id,
+                CatalogImportJob.lease_token == lease_token,
+                CatalogImportJob.status == "running",
+            )
+            .values(**update_values)
+        )
         await db.commit()
 
 
@@ -207,80 +309,138 @@ async def schedule_due() -> int:
     settings = get_settings()
     now = datetime.now(UTC)
     made = 0
+    course_jobs = 0
+    discovery_jobs = 0
     async with SessionLocal() as db:
         terms = (await db.scalars(select(CatalogTerm).outerjoin(
             CatalogTermActiveRelease, CatalogTermActiveRelease.term_id == CatalogTerm.id,
         ).where(or_(CatalogTerm.is_current.is_(True), CatalogTermActiveRelease.release_id.is_not(None))))).all()
         for term in terms:
             demand = await _wanted_courses(term.term_code)
-            courses = (await db.scalars(select(CatalogCourse).join(
-                CatalogDraft, CatalogDraft.course_id == CatalogCourse.id,
-            ).where(
-                CatalogCourse.organization_id == term.organization_id,
-                CatalogDraft.term_id == term.id,
-            ).distinct().order_by(CatalogCourse.course_code))).all()
-            # Missing/oldest observations eventually get a turn after high demand.
-            candidates = sorted(courses, key=lambda row: (-demand.get(row.course_code, 0), row.course_code))
-            for course in candidates:
-                last_job = await db.scalar(select(CatalogImportJob).where(
-                    CatalogImportJob.organization_id == term.organization_id,
-                    CatalogImportJob.term == term.term_code,
-                    CatalogImportJob.course_codes.contains([course.course_code]),
-                ).order_by(CatalogImportJob.created_at.desc()).limit(1))
-                if last_job is not None and (
-                    last_job.status in {"queued", "running"}
-                    or (now - _aware(last_job.updated_at)).total_seconds() < 86400
-                ):
-                    continue
-                await catalog_service.enqueue_import(db, term.organization_id, term.term_code, course_codes=[course.course_code],
-                                     reason="Scheduled catalog freshness check", payload={"scheduled": True})
-                made += 1
-                if made >= settings.catalog_warm_courses_per_pass:
-                    break
+            if course_jobs < settings.catalog_warm_courses_per_pass:
+                courses = (await db.scalars(select(CatalogCourse).join(
+                    CatalogDraft, CatalogDraft.course_id == CatalogCourse.id,
+                ).where(
+                    CatalogCourse.organization_id == term.organization_id,
+                    CatalogDraft.term_id == term.id,
+                ).distinct().order_by(CatalogCourse.course_code))).all()
+                # Missing/oldest observations eventually get a turn after high demand.
+                candidates = sorted(courses, key=lambda row: (-demand.get(row.course_code, 0), row.course_code))
+                for course in candidates:
+                    last_job = await db.scalar(select(CatalogImportJob).where(
+                        CatalogImportJob.organization_id == term.organization_id,
+                        CatalogImportJob.term == term.term_code,
+                        CatalogImportJob.course_codes.contains([course.course_code]),
+                    ).order_by(CatalogImportJob.created_at.desc()).limit(1))
+                    if last_job is not None and (
+                        last_job.status in {"queued", "running"}
+                        or (now - _aware(last_job.updated_at)).total_seconds() < 86400
+                    ):
+                        continue
+                    await catalog_service.enqueue_import(
+                        db,
+                        term.organization_id,
+                        term.term_code,
+                        course_codes=[course.course_code],
+                        reason="Scheduled catalog freshness check",
+                        payload={"scheduled": True},
+                    )
+                    course_jobs += 1
+                    made += 1
+                    if course_jobs >= settings.catalog_warm_courses_per_pass:
+                        break
             directory_job = await db.scalar(select(CatalogImportJob).where(
                 CatalogImportJob.organization_id == term.organization_id,
                 CatalogImportJob.term == term.term_code,
                 CatalogImportJob.payload["discovery_only"].as_boolean().is_(True),
                 CatalogImportJob.created_at > now - timedelta(days=30),
             ).limit(1))
-            if directory_job is None:
+            if directory_job is None and discovery_jobs < settings.catalog_warm_discoveries_per_pass:
                 await catalog_service.enqueue_import(db, term.organization_id, term.term_code, reason="Scheduled catalog discovery",
                                      payload={"scheduled": True, "discovery_only": True})
+                discovery_jobs += 1
                 made += 1
         await db.commit()
+    logger.info(
+        "catalog_schedule_due",
+        jobs=made,
+        course_jobs=course_jobs,
+        discovery_jobs=discovery_jobs,
+    )
     return made
 
 
-async def run_once() -> int:
+async def run_once() -> CatalogPassResult:
     settings = get_settings()
     if not settings.academic_catalog_ingestion_enabled or not settings.catalog_warm_enabled:
-        return 0
+        return CatalogPassResult(0, outcome="idle", error_code="ingestion_disabled")
     if not _within_hours(datetime.now(ISTANBUL), settings.catalog_warm_hours):
-        return 0
-    await schedule_due()
+        return CatalogPassResult(0, outcome="idle", error_code="outside_import_hours")
+    scheduled_count = await schedule_due()
     job = await _claim()
     if job is None:
-        return 0
+        return CatalogPassResult(0, outcome="idle", scheduled_count=scheduled_count)
     selected = await _account(job.organization_id)
     if selected is None:
         await _save(job.id, job.lease_token, status="queued", lease_until=None, error_code="no_eligible_source_account")
-        return 0
+        return CatalogPassResult(
+            0,
+            outcome="deferred",
+            job_id=job.id,
+            error_code="no_eligible_source_account",
+            scheduled_count=scheduled_count,
+        )
     user_id, secret = selected
     checkpoint = dict(job.checkpoint or {})
     try:
-        steps = checkpoint.get("steps") or initial_steps(job)
+        stored_steps = checkpoint.get("steps")
+        plan_persisted = isinstance(stored_steps, list) and bool(stored_steps)
+        steps = stored_steps if plan_persisted else initial_steps(job)
     except ValueError:
         await _save(job.id, job.lease_token, status="failed", lease_until=None, error_code="invalid_import_scope")
-        return 0
-    offset = int(checkpoint.get("offset", 0))
+        return CatalogPassResult(
+            0,
+            outcome="failed",
+            job_id=job.id,
+            error_code="invalid_import_scope",
+            scheduled_count=scheduled_count,
+        )
+    # 0034 moves the hot cursor out of the growing JSONB plan. The fallback
+    # keeps jobs written before that migration resumable and also tolerates
+    # hand-created legacy fixtures that only have the JSONB cursor.
+    # Migration 0034 backfills every row, including zero.  A scalar zero is
+    # therefore a real cursor and must not fall back to a stale JSON offset.
+    # The getattr fallback keeps this worker compatible with lightweight test
+    # doubles and pre-migration objects that do not expose the new attribute.
+    checkpoint_offset = getattr(job, "checkpoint_offset", None)
+    offset = int(checkpoint_offset if checkpoint_offset is not None else checkpoint.get("offset", 0))
+    retry_pending = bool(checkpoint.get("retry_at"))
     fetched = 0
+    # A job created before the first operation has no durable plan yet. Save it
+    # once so offset-only updates remain resumable even when the first response
+    # does not expand the plan.
+    if not plan_persisted:
+        await _save(
+            job.id,
+            job.lease_token,
+            checkpoint={"steps": steps, "offset": offset},
+            error_code=None,
+            attempts=0,
+        )
+        retry_pending = False
     # Dedicated connection: session advisory lock never returns to the pool held.
     lock_key = int.from_bytes(hashlib.sha256(f"catalog-source:{user_id}".encode()).digest()[:8], "big", signed=True)
     async with engine.connect() as lock:
         acquired = await lock.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key})
         if not acquired:
             await _save(job.id, job.lease_token, status="queued", lease_until=None)
-            return 0
+            return CatalogPassResult(
+                0,
+                outcome="deferred",
+                job_id=job.id,
+                error_code="source_account_busy",
+                scheduled_count=scheduled_count,
+            )
         source = None
         try:
             source = CatalogSource(secret, lambda: admit_request(job.organization_id, job.id, job.lease_token))
@@ -304,16 +464,68 @@ async def run_once() -> int:
                     steps.extend(s for s in added if str((s["tool"], sorted(s["values"].items()))) not in existing)
                 offset += 1
                 fetched += 1
-                checkpoint = {"steps": steps, "offset": offset}
-                await _save(job.id, job.lease_token, checkpoint=checkpoint, error_code=None, attempts=0)
+                if added:
+                    # Persist a changed operation plan in full. The common
+                    # case after that is a cursor-only update below.
+                    await _save(
+                        job.id,
+                        job.lease_token,
+                        checkpoint={"steps": steps, "offset": offset},
+                        error_code=None,
+                        attempts=0,
+                    )
+                    retry_pending = False
+                else:
+                    await _save_offset(
+                        job.id,
+                        job.lease_token,
+                        offset,
+                        clear_retry_at=retry_pending,
+                        error_code=None,
+                        attempts=0,
+                    )
+                    retry_pending = False
             done = offset >= len(steps)
-            await _save(job.id, job.lease_token, status="completed" if done else "queued", checkpoint=checkpoint,
-                        lease_until=None, completed_at=datetime.now(UTC) if done else None)
+            await _save_offset(
+                job.id,
+                job.lease_token,
+                offset,
+                clear_retry_at=retry_pending,
+                status="completed" if done else "queued",
+                lease_until=None,
+                completed_at=datetime.now(UTC) if done else None,
+            )
+            return CatalogPassResult(
+                fetched,
+                outcome="completed" if done else "progress",
+                job_id=job.id,
+                scheduled_count=scheduled_count,
+            )
         except LeaseLost:
             logger.info("catalog_import_lease_replaced", job_id=str(job.id))
+            return CatalogPassResult(
+                fetched,
+                outcome="lease_lost",
+                job_id=job.id,
+                error_code="lease_lost",
+                scheduled_count=scheduled_count,
+            )
         except ImportDeferred as exc:
-            checkpoint = {"steps": steps, "offset": offset}
-            await _save(job.id, job.lease_token, status="queued", checkpoint=checkpoint, lease_until=None, error_code=str(exc))
+            await _save_offset(
+                job.id,
+                job.lease_token,
+                offset,
+                status="queued",
+                lease_until=None,
+                error_code=str(exc),
+            )
+            return CatalogPassResult(
+                fetched,
+                outcome="deferred",
+                job_id=job.id,
+                error_code=str(exc),
+                scheduled_count=scheduled_count,
+            )
         except Exception as exc:
             # Retain failed evidence without provider error text (which can
             # contain authentication details). Prior verified values stay intact.
@@ -329,16 +541,30 @@ async def run_once() -> int:
                     logger.warning("catalog_failure_observation_unavailable", job_id=str(job.id))
             attempts = int(job.attempts or 0) + 1
             auth = type(exc).__name__ == "SAISAuthError"
-            checkpoint = {"steps": steps, "offset": offset,
-                          "retry_at": (datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()}
-            await _save(job.id, job.lease_token, status="failed" if auth or attempts >= settings.academic_catalog_max_attempts else "queued",
-                        attempts=attempts, checkpoint=checkpoint, lease_until=None,
-                        error_code="source_authentication_failed" if auth else type(exc).__name__)
+            retry_at = (datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()
+            error_code = "source_authentication_failed" if auth else type(exc).__name__
+            await _save_offset(
+                job.id,
+                job.lease_token,
+                offset,
+                retry_at=retry_at,
+                status="failed" if auth or attempts >= settings.academic_catalog_max_attempts else "queued",
+                attempts=attempts,
+                lease_until=None,
+                error_code=error_code,
+            )
             logger.warning("catalog_import_failed", job_id=str(job.id), error_type=type(exc).__name__)
+            return CatalogPassResult(
+                fetched,
+                outcome="failed",
+                job_id=job.id,
+                error_code=error_code,
+                scheduled_count=scheduled_count,
+            )
         finally:
             try:
                 if source is not None:
                     await source.aclose()
             finally:
                 await lock.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
-    return fetched
+    return CatalogPassResult(fetched, outcome="idle", scheduled_count=scheduled_count)

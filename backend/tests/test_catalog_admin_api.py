@@ -2,8 +2,10 @@
 
 from uuid import uuid4
 
+from sqlalchemy import select
+
 from app.config import get_settings
-from app.db.models import AccountDirectory, AdminMembership, AdminRole, Organization
+from app.db.models import AccountDirectory, AdminAuditEvent, AdminMembership, AdminRole, Organization
 from app.db.session import SessionLocal
 from tests.conftest import auth_header, new_user_id
 
@@ -30,6 +32,11 @@ async def test_operator_can_inspect_but_cannot_edit_or_publish(client):
 async def test_courses_tab_draft_publish_and_read_contract(client, monkeypatch):
     user = new_user_id()
     monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(user))
+    domain_events = []
+    monkeypatch.setattr(
+        "app.academic_catalog.admin.capture",
+        lambda event, **properties: domain_events.append((event, properties)),
+    )
     headers = auth_header(user)
     await client.get("/api/v1/profile", headers=headers)
     response = await client.post("/api/v1/admin/catalog/drafts", headers=headers, json={
@@ -38,6 +45,20 @@ async def test_courses_tab_draft_publish_and_read_contract(client, monkeypatch):
     })
     assert response.status_code == 201, response.text
     draft = response.json()
+    draft_event = next(
+        properties for event, properties in domain_events if properties["action"] == "catalog.draft.create"
+    )
+    assert draft_event["outcome"] == "success"
+    assert draft_event["actor_user_id"] == str(user)
+    assert draft_event["organization_id"]
+    assert draft_event["draft_id"] == draft["id"]
+    async with SessionLocal() as db:
+        audit = await db.scalar(
+            select(AdminAuditEvent)
+            .where(AdminAuditEvent.action == "catalog.draft.create", AdminAuditEvent.actor_user_id == user)
+            .order_by(AdminAuditEvent.created_at.desc())
+        )
+        assert audit is not None and audit.after_state["draft_id"] == draft["id"]
     response = await client.get("/api/v1/admin/catalog/courses?term=20261", headers=headers)
     assert response.status_code == 200, response.text
     listing = response.json()
@@ -55,6 +76,10 @@ async def test_courses_tab_draft_publish_and_read_contract(client, monkeypatch):
                "idempotency_key": str(uuid4()), "reason": "Publish fixture for contract validation"}
     response = await client.post("/api/v1/admin/catalog/publish", headers=headers, json=request)
     assert response.status_code == 200, response.text
+    publish_event = next(properties for event, properties in domain_events if properties["action"] == "catalog.publish")
+    assert publish_event["outcome"] == "success"
+    assert publish_event["operation_id"] == response.json()["operation_id"]
+    assert publish_event["release_id"] == response.json()["release_id"]
     replay = await client.post("/api/v1/admin/catalog/publish", headers=headers, json=request)
     assert replay.status_code == 200, replay.text
     assert replay.json() == response.json()

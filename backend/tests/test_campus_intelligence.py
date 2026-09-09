@@ -9,6 +9,9 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.models import (
+    AccountDirectory,
+    AdminMembership,
+    AdminRole,
     CampusIngestionJob,
     CampusKnowledgeRecord,
     CampusSource,
@@ -31,6 +34,34 @@ from app.knowledge.retrieval import read_campus_page, search_knowledge
 from app.knowledge.types import FetchedDocument
 from app.planning.service import _prerequisite_met, upsert_academic_snapshot
 from tests.conftest import auth_header, new_user_id
+
+
+async def test_scoped_admin_cannot_configure_network_providers_or_write_global_catalog(client, monkeypatch):
+    admin_id = new_user_id()
+    headers = auth_header(admin_id)
+    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", False)
+    monkeypatch.setattr(get_settings(), "academic_catalog_ingestion_enabled", False)
+    await client.get("/api/v1/profile", headers=headers)
+    async with SessionLocal() as db:
+        account = await db.get(AccountDirectory, admin_id)
+        db.add(AdminMembership(user_id=admin_id, organization_id=account.organization_id,
+                               role=AdminRole.campus_admin, granted_by=admin_id))
+        await db.commit()
+    response = await client.put("/api/v1/admin/planning/catalog", headers=headers, json={
+        "reason": "Attempt global catalog import",
+        "offerings": [{"term": "20261", "course_code": "CENG213", "section": "1",
+                       "title": "Scoped change", "credits": 4, "schedule": []}],
+        "rules": [],
+    })
+    assert response.status_code == 403, response.text
+    response = await client.put("/api/v1/admin/embedding-settings", headers=headers, json={
+        "provider": "local", "model": "fixture", "base_url": "http://127.0.0.1:8080/v1",
+        "dimensions": 384, "batch_size": 2,
+    })
+    assert response.status_code == 403, response.text
+    async with SessionLocal() as db:
+        assert await db.scalar(select(CourseOffering)) is None
+        assert await db.scalar(select(KnowledgeEmbeddingSettings)) is None
 
 
 def test_pure_adapters_normalize_curated_json_and_ical():

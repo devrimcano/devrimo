@@ -31,17 +31,20 @@ once every department listing is in hand, so the cheap job that the search box
 depends on can never be crowded out by the expensive one.
 """
 
-import asyncio
-import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
+
+from app.academic_catalog.models import CatalogHttpBudget
+from app.admin.directory import METU_ID
 from app.campus import departments as department_directory
 from app.campus import service as campus_service
 from app.campus.course_info import call_course_info, catalog_key, catalog_session, section_numbers
 from app.config import get_settings
 from app.core.digest import stable_digest
 from app.core.persistent_cache import read_cached, write_cached
+from app.db.models import AccountDirectory, AccountStatus
 from app.db.session import SessionLocal
 from app.logging import get_logger
 from app.planning.service import current_term
@@ -54,7 +57,6 @@ logger = get_logger(__name__)
 ISTANBUL = ZoneInfo("Europe/Istanbul")
 
 WARM_TOOL = "list_program_courses"
-BUDGET_NAMESPACE = "catalog-warm-budget"
 WANTED_NAMESPACE = "catalog-warm-wanted"
 
 # One row per term holding {course_code: times asked for}. A row rather than a
@@ -66,19 +68,26 @@ WANTED_LIMIT = 500
 WANTED_TTL_SECONDS = 14 * 24 * 3600
 
 
-def _budget_key(day: str) -> str:
-    return stable_digest({"namespace": BUDGET_NAMESPACE, "day": day})
-
-
 async def _spent_today(day: str) -> int:
-    value = await read_cached(_budget_key(day))
-    return int(value) if isinstance(value, (int, float)) else 0
+    """Read the legacy warmer's shared daily admission counter.
 
+    The actual increment is performed by ``academic_catalog.worker`` under a
+    row lock. This read is only an early skip/logging hint; a concurrent pass
+    must still reserve each request immediately before sending it.
+    """
+    try:
+        from datetime import date
 
-async def _record_spend(day: str, count: int) -> None:
-    # Two days of life so the row is still there for a job that starts before
-    # midnight and finishes after it, and is reclaimed by the ordinary sweep.
-    await write_cached(_budget_key(day), count, namespace=BUDGET_NAMESPACE, ttl_seconds=2 * 24 * 3600)
+        budget_date = date.fromisoformat(day)
+        async with SessionLocal() as db:
+            row = await db.scalar(select(CatalogHttpBudget).where(
+                CatalogHttpBudget.organization_id == METU_ID,
+                CatalogHttpBudget.budget_date == budget_date,
+            ))
+        return int(row.attempted_count) if row is not None else 0
+    except Exception as exc:  # a missing/unavailable budget must fail closed
+        logger.warning("catalog_warm_budget_read_failed", error_type=type(exc).__name__)
+        return get_settings().catalog_warm_daily_limit
 
 
 def _wanted_key(semester: str) -> str:
@@ -130,11 +139,14 @@ def _within_hours(now: datetime, window: str) -> bool:
     ``now`` must already be in Istanbul time. The end is exclusive and the
     window may wrap midnight, which is the normal shape of an overnight one.
     """
-    try:
-        start, _, end = window.partition("-")
-        low, high = int(start), int(end)
-    except ValueError:
-        return True
+    from app.config import parse_catalog_warm_hours
+
+    parsed = parse_catalog_warm_hours(window)
+    if parsed is None:
+        # A malformed safety setting must stop requests, never turn the guard
+        # into an always-open window.
+        return False
+    low, high = parsed
     hour = now.hour
     return low <= hour < high if low <= high else (hour >= low or hour < high)
 
@@ -159,13 +171,27 @@ async def _warming_user() -> "tuple[object, object] | None":
     """
     async with SessionLocal() as db:
         candidates = await campus_service.users_with_tool(db, "course_info")
-    if not candidates:
+        active = set((await db.scalars(select(AccountDirectory.user_id).where(
+            AccountDirectory.organization_id == METU_ID,
+            AccountDirectory.status == AccountStatus.active,
+            AccountDirectory.user_id.in_(candidates),
+        ))).all()) if candidates else set()
+    if not active:
         return None
-    ordered = sorted(str(user_id) for user_id in candidates)
+    ordered = sorted(str(user_id) for user_id in active)
     index = datetime.now(ISTANBUL).toordinal() % len(ordered)
     from uuid import UUID
 
     return UUID(ordered[index]), len(ordered)
+
+
+async def _admit_warm_request() -> None:
+    """Reserve one legacy warmer request through the shared DB admission gate."""
+    # Import lazily: worker.py imports the hour guard from this module. The
+    # function is called only after both modules have finished importing.
+    from app.academic_catalog.worker import admit_request
+
+    await admit_request(METU_ID, None)
 
 
 async def warm_once() -> int:
@@ -218,6 +244,7 @@ async def warm_once() -> int:
         async with catalog_session(db, user_id) as catalog:
             for code in missing[:allowance]:
                 try:
+                    await _admit_warm_request()
                     await call_course_info(
                         db, user_id, WARM_TOOL, {"department": code, "semester": semester}, session=catalog
                     )
@@ -228,11 +255,6 @@ async def warm_once() -> int:
                     logger.warning("catalog_warm_stopped", department=code, error=str(exc))
                     break
                 fetched += 1
-                await _record_spend(day, spent + fetched)
-                await asyncio.sleep(
-                    settings.catalog_warm_interval_seconds
-                    + random.uniform(0, settings.catalog_warm_jitter_seconds)
-                )
 
     logger.info("catalog_warm_finished", fetched=fetched, semester=semester)
     return fetched
@@ -270,23 +292,17 @@ async def _warm_courses(user_id, semester: str, day: str, spent: int) -> int:
             for code in uncached:
                 values = {"department": code[:3], "semester": semester, "course": code}
                 try:
+                    await _admit_warm_request()
                     info = await call_course_info(db, user_id, "get_course_info", values, session=catalog)
                 except Exception as exc:
                     logger.warning("catalog_warm_stopped", course=code, error=str(exc))
                     break
                 requests += 1
-                await _record_spend(day, spent + requests)
-                await asyncio.sleep(
-                    settings.catalog_warm_interval_seconds
-                    + random.uniform(0, settings.catalog_warm_jitter_seconds)
-                )
 
                 stop = False
                 for number in section_numbers(info):
-                    if spent + requests >= settings.catalog_warm_daily_limit:
-                        stop = True
-                        break
                     try:
+                        await _admit_warm_request()
                         await call_course_info(
                             db, user_id, "get_section_constraints",
                             {**values, "section": number}, session=catalog,
@@ -296,11 +312,6 @@ async def _warm_courses(user_id, semester: str, day: str, spent: int) -> int:
                         stop = True
                         break
                     requests += 1
-                    await _record_spend(day, spent + requests)
-                    await asyncio.sleep(
-                        settings.catalog_warm_interval_seconds
-                        + random.uniform(0, settings.catalog_warm_jitter_seconds)
-                    )
                 if stop:
                     break
 

@@ -65,6 +65,72 @@ from .models import (
 )
 
 
+def _verify_course_response_identity(
+    soup: BeautifulSoup, course_code: Optional[str], semester_code: str, *, section: Optional[str] = None,
+    semester_label: Optional[str] = None,
+    department_code: Optional[str] = None,
+) -> None:
+    """Require identity carried by the returned page, never by our POST data.
+
+    SAIS can return a perfectly readable previous page. Only selected/hidden
+    form values and explicitly labelled page identity count as evidence; a
+    course code appearing somewhere in a list of other courses does not.
+    """
+    names = {
+        "course": {"text_course_code", "course_code", "hidden_course_code", "select_course_code"},
+        "semester": {"select_semester", "semester", "semester_code", "hidden_semester", "text_semester"},
+        "section": {"submit_section", "section", "section_code", "hidden_section", "text_section"},
+        "department": {"select_dept", "department_code", "hidden_dept", "text_dept"},
+    }
+    patterns = {"course": r"\d{7}", "semester": r"\d{5}", "section": r"\d+", "department": r"\d+"}
+    observed = {key: set() for key in names}
+    for key, aliases in names.items():
+        for control in soup.find_all(["input", "select"], attrs={"name": list(aliases)}):
+            if control.name == "select":
+                selected = control.find_all("option", selected=True)
+                values = [option.get("value", "") for option in selected]
+            else:
+                kind = str(control.get("type", "text")).lower()
+                if kind in {"radio", "checkbox"} and not control.has_attr("checked"):
+                    continue
+                if kind in {"submit", "button"}:
+                    continue
+                values = [control.get("value", "")]
+            for value in values:
+                value = str(value).strip()
+                if re.fullmatch(patterns[key], value):
+                    observed[key].add(str(int(value)) if key == "section" else value)
+    text = soup.get_text(" ", strip=True)
+    # Some SAIS detail pages display the official term label rather than its
+    # numeric code. The label must come from the source's own term selector;
+    # never guess the year/season mapping from the requested code.
+    if semester_label:
+        label_pattern = r"\s+".join(re.escape(part) for part in semester_label.split())
+        if re.search(r"\bSemester\s*:\s*" + label_pattern + r"(?=\s|$)", text, re.I):
+            observed["semester"].add(str(semester_code).strip())
+        elif re.search(r"\bSemester\s*:\s*(?!\d{5}\b)\S", text, re.I):
+            observed["semester"].add("mismatched_label")
+    for key, label in {
+        "course": r"Course\s*(?:Code|No\.?|Number)?",
+        "semester": r"Semester(?:\s*Code)?",
+        "section": r"Section\s*(?:No\.?|Number)?",
+        "department": r"Department(?:\s*Code)?",
+    }.items():
+        for value in re.findall(r"\b" + label + r"\s*:\s*(" + patterns[key] + r")\b", text, re.I):
+            observed[key].add(str(int(value)) if key == "section" else value)
+    expected = {"semester": str(semester_code).strip()}
+    if course_code is not None:
+        expected["course"] = str(course_code).strip()
+    if department_code is not None:
+        expected["department"] = str(department_code).strip()
+    if section is not None:
+        expected["section"] = str(int(str(section).strip()))
+    for key, value in expected.items():
+        if observed[key] != {value}:
+            page = "section restriction" if section is not None else "course information"
+            raise ValueError(f"SAIS {page} page {key} identity is missing, ambiguous, or mismatched")
+
+
 def clean_text(text: Optional[str]) -> str:
     """Cleans up text, normalizes whitespace and repairs windows-1252 / latin-1 mojibake if present."""
     if not text:
@@ -472,6 +538,10 @@ class SAISClient:
             "hidden_redir": hidden_redir,
             "hidden_creds": hidden_creds,
         }
+        self._course_semester_labels = {
+            str(option.get("value", "")).strip(): clean_text(option.get_text(" ", strip=True))
+            for option in soup.select('select[name="select_semester"] option[value]')
+        }
 
         resp = await self._client.post(
             action,
@@ -541,7 +611,8 @@ class SAISClient:
 
         if not course_table_found and not _explicit_empty_result(soup, "course"):
             raise ValueError("SAIS programme course table could not be read")
-
+        _verify_course_response_identity(soup, None, semester_code, department_code=department_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
         return courses
 
     async def get_section_constraints(
@@ -573,6 +644,8 @@ class SAISClient:
             headers={"Referer": action_url},
         )
         course_soup = BeautifulSoup(self._decode_html(resp), "html.parser")
+        _verify_course_response_identity(course_soup, course_code, semester_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
         post_data: Dict[str, str] = {}
         for hidden in course_soup.find_all("input", {"type": "hidden"}):
@@ -622,6 +695,8 @@ class SAISClient:
 
         if not constraint_table_found:
             raise ValueError("SAIS section restriction table could not be read")
+        _verify_course_response_identity(soup, course_code, semester_code, section=section,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
         return SectionConstraints(
             department=str(department_code),
@@ -730,6 +805,8 @@ class SAISClient:
 
         if not c_name and not section_table_found:
             raise ValueError("SAIS course information page could not be read")
+        _verify_course_response_identity(res_soup, course_code, semester_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
         return CourseDetails(
             department=dept_name or department_code,
@@ -788,6 +865,8 @@ class SAISClient:
 
         if not prerequisite_table_found and not _explicit_empty_result(soup, "prerequisite"):
             raise ValueError("SAIS prerequisite table could not be read")
+        _verify_course_response_identity(soup, course_code, semester_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
         return prereqs
 
@@ -812,12 +891,14 @@ class SAISClient:
         soup = BeautifulSoup(html, "html.parser")
 
         replacements: List[CourseReplacement] = []
+        replacement_table_found = False
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
                 continue
             headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(["td", "th"])]
             if any("course code" in h or "replacement" in h for h in headers) and any("name" in h for h in headers):
+                replacement_table_found = True
                 for tr in rows[1:]:
                     cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
                     if len(cells) >= 6:
@@ -833,6 +914,10 @@ class SAISClient:
                             )
                         )
 
+        if not replacement_table_found and not _explicit_empty_result(soup, "replacement"):
+            raise ValueError("SAIS replacement table could not be read")
+        _verify_course_response_identity(soup, course_code, semester_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
         return replacements
 
     async def get_thesis_courses(
@@ -854,13 +939,17 @@ class SAISClient:
         html = self._decode_html(resp)
         soup = BeautifulSoup(html, "html.parser")
 
+        _verify_course_response_identity(soup, None, semester_code, department_code=department_code,
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
         courses: List[ThesisCourse] = []
+        course_table_found = False
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
                 continue
             headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(["td", "th"])]
             if any("code" in h for h in headers) and any("name" in h for h in headers):
+                course_table_found = True
                 for tr in rows[1:]:
                     cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
                     if len(cells) >= 6:
@@ -875,6 +964,8 @@ class SAISClient:
                             )
                         )
 
+        if not course_table_found and not _explicit_empty_result(soup, "course"):
+            raise ValueError("SAIS thesis course table could not be read")
         return courses
 
     # =========================================================================

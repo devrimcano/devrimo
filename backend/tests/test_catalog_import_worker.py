@@ -10,7 +10,13 @@ import pytest
 from sqlalchemy import select
 
 from app.academic_catalog import worker
-from app.academic_catalog.models import CatalogHttpBudget, CatalogImportJob
+from app.academic_catalog.models import (
+    CatalogCourse,
+    CatalogDraft,
+    CatalogHttpBudget,
+    CatalogImportJob,
+    CatalogTerm,
+)
 from app.academic_catalog.source import client_type
 from app.admin.directory import METU_ID, ensure_metu
 from app.db.session import SessionLocal
@@ -31,6 +37,44 @@ async def test_full_school_import_does_not_reuse_directory_only_job():
         assert repeated.id == full.id
         assert not full.payload.get("discovery_only")
         assert worker.initial_steps(full) == [{"tool": "get_departments_and_semesters", "values": {}}]
+
+
+async def test_import_dedup_race_preserves_callers_transaction(monkeypatch):
+    from app.academic_catalog import service
+
+    term = f"txn-{uuid4().hex[:12]}"
+    async with SessionLocal() as competitor:
+        await ensure_metu(competitor)
+        winner = await service.enqueue_import(competitor, METU_ID, term, reason="Winning request")
+        await competitor.commit()
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        prior = CatalogImportJob(
+            organization_id=METU_ID,
+            term=term,
+            status="queued",
+            dedup_key=f"unrelated-{uuid4().hex}",
+            reason="Must survive a dedup race",
+        )
+        db.add(prior)
+        await db.flush()
+
+        original_scalar = db.scalar
+        calls = 0
+
+        async def hide_precheck(statement, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return await original_scalar(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db, "scalar", hide_precheck)
+        reused = await service.enqueue_import(db, METU_ID, term, reason="Losing request")
+        assert reused.id == winner.id
+        await db.commit()
+        assert await db.get(CatalogImportJob, prior.id) is not None
 
 
 async def test_source_gate_counts_redirects_and_refuses_before_network():
@@ -145,3 +189,109 @@ async def test_reclaimed_lease_fences_previous_worker(monkeypatch):
         current = await db.get(CatalogImportJob, job_id)
         assert current.checkpoint == {"offset": 3}
         assert await db.scalar(select(CatalogHttpBudget)) is None
+
+
+def test_catalog_pass_result_keeps_the_legacy_integer_contract():
+    result = worker.CatalogPassResult(0, outcome="deferred", error_code="daily_http_budget_exhausted")
+    assert isinstance(result, int)
+    assert result == 0
+    assert result.outcome == "deferred"
+    assert result.error_code == "daily_http_budget_exhausted"
+
+
+def test_serialize_import_job_uses_scalar_cursor_and_compact_checkpoint():
+    from app.academic_catalog.service import serialize_import_job
+
+    job = CatalogImportJob(
+        organization_id=METU_ID,
+        term="20261",
+        status="running",
+        checkpoint={
+            "steps": [{"tool": "get_course_info", "values": {"course": "2402201"}}],
+            "offset": 9,
+            "retry_at": "2026-09-09T10:00:00Z",
+            "conflicts": ["one"],
+        },
+        checkpoint_offset=0,
+        dedup_key="serialize-cursor-test",
+    )
+
+    payload = serialize_import_job(job)
+
+    assert payload["checkpoint"] == {
+        "offset": 0,
+        "total": 1,
+        "phase": "get_course_info",
+        "retry_at": "2026-09-09T10:00:00Z",
+        "conflicts": ["one"],
+    }
+    assert "steps" not in payload["checkpoint"]
+
+
+async def test_cursor_progress_does_not_rewrite_the_durable_step_plan():
+    from datetime import UTC, timedelta
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        token = uuid4()
+        job = CatalogImportJob(
+            organization_id=METU_ID,
+            term="20261",
+            status="running",
+            lease_token=token,
+            lease_until=datetime.now(UTC) + timedelta(minutes=5),
+            checkpoint={"steps": [{"tool": "get_course_info", "values": {"course": "2402201"}}], "offset": 0},
+            dedup_key="cursor-test",
+        )
+        db.add(job)
+        await db.commit()
+        job_id = job.id
+
+    await worker._save_offset(job_id, token, 1, error_code=None)
+
+    async with SessionLocal() as db:
+        current = await db.get(CatalogImportJob, job_id)
+        assert current.checkpoint["offset"] == 0
+        assert current.checkpoint_offset == 1
+
+
+async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monkeypatch):
+    from app.academic_catalog import worker as catalog_worker
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        terms = [
+            CatalogTerm(organization_id=METU_ID, term_code="20261", is_current=True),
+            CatalogTerm(organization_id=METU_ID, term_code="20252", is_current=True),
+        ]
+        db.add_all(terms)
+        await db.flush()
+        courses = []
+        drafts = []
+        for term, code in zip(terms, ("2402201", "2402202")):
+            course = CatalogCourse(organization_id=METU_ID, course_code=code, department="240")
+            courses.append(course)
+            db.add(course)
+            await db.flush()
+            drafts.append(CatalogDraft(organization_id=METU_ID, term_id=term.id, course_id=course.id, data={}))
+        db.add_all(drafts)
+        await db.commit()
+
+    settings = catalog_worker.get_settings()
+    monkeypatch.setattr(settings, "catalog_warm_courses_per_pass", 1)
+    monkeypatch.setattr(settings, "catalog_warm_discoveries_per_pass", 1)
+    monkeypatch.setattr(catalog_worker, "_wanted_courses", lambda term: _empty_demand(term))
+    scheduled = []
+
+    async def enqueue(*args, **kwargs):
+        scheduled.append((kwargs.get("payload") or {}).get("discovery_only", False))
+        return None
+
+    monkeypatch.setattr(catalog_worker.catalog_service, "enqueue_import", enqueue)
+    assert await catalog_worker.schedule_due() == 2
+    assert sum(not discovery for discovery in scheduled) == 1
+    assert sum(bool(discovery) for discovery in scheduled) == 1
+
+
+async def _empty_demand(_term):
+    return {}

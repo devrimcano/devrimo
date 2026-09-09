@@ -27,6 +27,18 @@ def now():
     return datetime.now(UTC)
 
 
+def _run_telemetry(run: ResearcherImportRun) -> dict[str, str | None]:
+    """Read the queued admin correlation envelope without changing the schema."""
+    metadata = (run.options or {}).get("_telemetry")
+    if not isinstance(metadata, dict):
+        return {"actor_user_id": None, "organization_id": None, "request_id": None}
+    values: dict[str, str | None] = {}
+    for key in ("actor_user_id", "organization_id", "request_id"):
+        value = metadata.get(key)
+        values[key] = str(value).strip()[:128] if value else None
+    return values
+
+
 async def save_section(db, source_id, key, url, content) -> bool:
     content_hash = digest(content)
     previous = await db.scalar(
@@ -225,20 +237,30 @@ async def synchronize(
                 run.discovery = {key: value for key, value in (run.discovery or {}).items() if key != "last_error"}
                 await db.commit()
                 run_id = run.id
+                telemetry = _run_telemetry(run)
+                actor_user_id = telemetry["actor_user_id"]
+                organization_id = telemetry["organization_id"]
+                request_id = telemetry["request_id"]
                 with observed_job(
                     "researcher_import",
                     job_id=str(run_id),
-                    distinct_id="avesis-importer",
+                    distinct_id=actor_user_id or "avesis-importer",
+                    request_id=request_id,
                     source_id="avesis",
                     resumed=bool(resume),
                     language="en",
+                    actor_user_id=actor_user_id,
+                    organization_id=organization_id,
                 ) as observation:
                     capture(
                         "researcher_import_started",
-                        distinct_id="avesis-importer",
+                        distinct_id=actor_user_id or "avesis-importer",
                         job_id=str(run_id),
                         resumed=bool(resume),
                         language="en",
+                        actor_user_id=actor_user_id,
+                        organization_id=organization_id,
+                        request_id=request_id,
                     )
                     progress(f"Import run: {run_id}")
                     try:

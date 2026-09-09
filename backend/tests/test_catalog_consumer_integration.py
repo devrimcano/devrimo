@@ -77,6 +77,7 @@ async def test_import_publish_schedule_read_and_automatic_plan_share_release(cli
     assert result["courses"][0]["course_code"] == COURSE
     assert result["selected_credits"] == 3
     assert result["provenance"]["catalog_release_id"] == release["release_id"]
+    assert result["provenance"]["catalog_course_revision_ids"][COURSE] == course["data"]["_catalog"]["course_revision_id"]
 
 
 async def test_partial_publication_carries_courses_and_rollback_rebases_next_import(client):

@@ -918,7 +918,7 @@ async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRe
             or catalog_metadata.get("release_id")
             or catalog_metadata.get("id")
         ),
-        "catalog_revision_id": catalog_metadata.get("revision_id"),
+        "catalog_course_revision_ids": catalog_metadata.get("course_revision_ids", {}),
         "academic_snapshot_fetched_at": snapshot.fetched_at.isoformat(),
         "academic_snapshot_status": snapshot_status,
     }

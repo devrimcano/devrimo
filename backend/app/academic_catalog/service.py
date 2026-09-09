@@ -24,7 +24,7 @@ from typing import Any, Iterable
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, case, cast, delete, exists, func, literal, or_, select, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -1373,49 +1373,16 @@ async def _revision_data(db: AsyncSession, revision: CatalogCourseRevision) -> d
         "prerequisite_groups": [],
         "replacements": [],
     }
-    sections = (
-        await db.scalars(
-            select(CatalogSection)
-            .where(
-                CatalogSection.organization_id == revision.organization_id,
-                CatalogSection.course_revision_id == revision.id,
-            )
-            .order_by(CatalogSection.section_code)
-        )
-    ).all()
+    # Load the complete immutable revision graph in bounded queries.  The
+    # previous implementation queried meetings, instructors and restrictions
+    # once per section and requirements once per prerequisite group, turning a
+    # course detail page into an N+1 query fan-out.
+    children = await _bulk_revision_components(db, revision.organization_id, [revision])
+    sections = children["sections"].get(revision.id, [])
     for section in sections:
-        meeting_rows = (
-            await db.scalars(
-                select(CatalogMeeting)
-                .where(
-                    CatalogMeeting.organization_id == revision.organization_id,
-                    CatalogMeeting.section_id == section.id,
-                )
-                .order_by(CatalogMeeting.weekday, CatalogMeeting.start_minute, CatalogMeeting.id)
-            )
-        ).all()
-        instructors = (
-            await db.execute(
-                select(CatalogSectionInstructor, CatalogInstructor)
-                .join(CatalogInstructor, CatalogInstructor.id == CatalogSectionInstructor.instructor_id)
-                .where(
-                    CatalogSectionInstructor.organization_id == revision.organization_id,
-                    CatalogSectionInstructor.section_id == section.id,
-                )
-                .order_by(CatalogSectionInstructor.id)
-            )
-        ).all()
-        restrictions = (
-            await db.scalars(
-                select(CatalogRestriction)
-                .where(
-                    CatalogRestriction.organization_id == revision.organization_id,
-                    CatalogRestriction.course_revision_id == revision.id,
-                    CatalogRestriction.section_id == section.id,
-                )
-                .order_by(CatalogRestriction.restriction_group, CatalogRestriction.row_index, CatalogRestriction.id)
-            )
-        ).all()
+        meeting_rows = children["meetings"].get(section.id, [])
+        instructors = children["instructors"].get(section.id, [])
+        restrictions = children["restrictions"].get(section.id, [])
         section_payload = {
                 "section_code": section.section_code,
                 "section": section.section_code,
@@ -1468,16 +1435,7 @@ async def _revision_data(db: AsyncSession, revision: CatalogCourseRevision) -> d
         )
     ).all()
     for group in groups:
-        requirements = (
-            await db.scalars(
-                select(CatalogPrerequisiteRequirement)
-                .where(
-                    CatalogPrerequisiteRequirement.organization_id == revision.organization_id,
-                    CatalogPrerequisiteRequirement.group_id == group.id,
-                )
-                .order_by(CatalogPrerequisiteRequirement.position, CatalogPrerequisiteRequirement.id)
-            )
-        ).all()
+        requirements = children["requirements"].get(group.id, [])
         data["prerequisite_groups"].append(
             {
                 "group_no": group.group_no,
@@ -1499,16 +1457,7 @@ async def _revision_data(db: AsyncSession, revision: CatalogCourseRevision) -> d
                 ],
             }
         )
-    replacements = (
-        await db.scalars(
-            select(CatalogCourseReplacement)
-            .where(
-                CatalogCourseReplacement.organization_id == revision.organization_id,
-                CatalogCourseReplacement.course_revision_id == revision.id,
-            )
-            .order_by(CatalogCourseReplacement.related_course_code, CatalogCourseReplacement.id)
-        )
-    ).all()
+    replacements = children["replacements"].get(revision.id, [])
     data["replacements"] = [
         {
             "relationship_type": row.relationship_type,
@@ -1580,9 +1529,20 @@ def _component_status(data: dict[str, Any]) -> dict[str, Any]:
 async def _latest_source_observation(
     db: AsyncSession, organization_id: UUID, data: dict[str, Any]
 ) -> CatalogSourceObservation | None:
+    observations = [
+        row
+        for row in await _source_observations(db, organization_id, data)
+        if row.status in {"success", "empty"}
+    ]
+    return observations[0] if observations else None
+
+
+async def _source_observations(
+    db: AsyncSession, organization_id: UUID, data: dict[str, Any]
+) -> list[CatalogSourceObservation]:
     ids = data.get("_source_observation_ids")
     if not isinstance(ids, list):
-        return None
+        return []
     valid: list[UUID] = []
     for value in reversed(ids):
         try:
@@ -1590,16 +1550,15 @@ async def _latest_source_observation(
         except (TypeError, ValueError):
             continue
     if not valid:
-        return None
-    return await db.scalar(
+        return []
+    return list((await db.scalars(
         select(CatalogSourceObservation)
         .where(
             CatalogSourceObservation.organization_id == organization_id,
             CatalogSourceObservation.id.in_(valid),
         )
-        .order_by(CatalogSourceObservation.created_at.desc())
-        .limit(1)
-    )
+        .order_by(CatalogSourceObservation.created_at.desc(), CatalogSourceObservation.id.desc())
+    )).all())
 
 
 def _valid_researcher_id(value: Any) -> int | None:
@@ -1665,7 +1624,34 @@ async def _materialize_revision(
     course = await db.get(CatalogCourse, draft.course_id)
     if course is None or course.organization_id != draft.organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Draft course not found")
-    observation = await _latest_source_observation(db, draft.organization_id, data)
+    observations = await _source_observations(db, draft.organization_id, data)
+    source_observations = [
+        row for row in observations if row.status in {"success", "empty"}
+    ]
+    observation = source_observations[0] if source_observations else None
+
+    def source_for(
+        tools: tuple[str, ...],
+        *,
+        section_code: str | None = None,
+    ) -> CatalogSourceObservation | None:
+        candidates = [row for row in source_observations if row.tool in tools]
+        if section_code is not None:
+            exact = [
+                row for row in candidates
+                if str(row.section_code or "").strip() == section_code
+            ]
+            if exact:
+                return exact[0]
+            # Course-info responses are course-scoped and may contain the
+            # complete section roster. They are safe fallbacks for the
+            # section identity, while a differently scoped constraints call
+            # must never be attached to an unrelated section. Listing rows
+            # carry course metadata only, so they are not section evidence.
+            if not set(tools).issubset({"get_course_info"}):
+                return None
+            candidates = [row for row in candidates if row.section_code in (None, "")]
+        return candidates[0] if candidates else None
     latest = await db.scalar(
         select(func.coalesce(func.max(CatalogCourseRevision.revision), 0)).where(
             CatalogCourseRevision.organization_id == draft.organization_id,
@@ -1727,6 +1713,8 @@ async def _materialize_revision(
         if not isinstance(raw_section, dict):
             continue
         section_code = str(raw_section.get("section_code") or raw_section.get("section") or index + 1).strip()
+        section_observation = source_for(("get_course_info",), section_code=section_code)
+        constraints_observation = source_for(("get_section_constraints",), section_code=section_code)
         parsed_meetings, meeting_field_present = _meeting_rows(raw_section)
         section = CatalogSection(
             organization_id=draft.organization_id,
@@ -1742,7 +1730,10 @@ async def _materialize_revision(
             restrictions_source_fetched_at=_parse_datetime_value(
                 raw_section.get("restrictions_source_fetched_at")
             ),
-            source_observation_id=observation.id if observation else None,
+            # Section fields come from the course-info response.  A
+            # section-scoped constraints observation is reserved for the
+            # restriction rows below and must not be attributed to meetings.
+            source_observation_id=section_observation.id if section_observation is not None else None,
         )
         db.add(section)
         await db.flush()
@@ -1827,11 +1818,12 @@ async def _materialize_revision(
                         raw_text=raw_restriction.get("raw_text"),
                         verified=bool(raw_restriction.get("verified", False)),
                         status=str(raw_restriction.get("status") or "unknown"),
-                        source_observation_id=observation.id if observation else None,
+                        source_observation_id=constraints_observation.id if constraints_observation else None,
                     )
                 )
     groups = data.get("prerequisite_groups")
     if isinstance(groups, list):
+        prerequisite_observation = source_for(("get_course_prerequisites",))
         for raw_group in groups:
             if not isinstance(raw_group, dict):
                 continue
@@ -1845,7 +1837,7 @@ async def _materialize_revision(
                 applicability=raw_group.get("applicability") or {},
                 verified=bool(raw_group.get("verified", False)),
                 raw_text=raw_group.get("raw_text"),
-                source_observation_id=observation.id if observation else None,
+                source_observation_id=prerequisite_observation.id if prerequisite_observation else None,
             )
             db.add(group)
             await db.flush()
@@ -1870,6 +1862,7 @@ async def _materialize_revision(
                     )
     replacements = data.get("replacements")
     if isinstance(replacements, list):
+        replacement_observation = source_for(("get_course_replacements",))
         for raw_replacement in replacements:
             if not isinstance(raw_replacement, dict):
                 continue
@@ -1886,7 +1879,7 @@ async def _materialize_revision(
                     curriculum_version=raw_replacement.get("curriculum_version"),
                     verified=bool(raw_replacement.get("verified", False)),
                     raw_text=raw_replacement.get("raw_text"),
-                    source_observation_id=observation.id if observation else None,
+                    source_observation_id=replacement_observation.id if replacement_observation else None,
                 )
             )
     await db.flush()
@@ -1947,39 +1940,67 @@ async def enqueue_import(
     )
     if existing is not None:
         return existing
-    job = CatalogImportJob(
-        organization_id=organization_id,
-        term=term,
-        department=department,
-        course_codes=codes or None,
-        payload=_jsonable(payload or {}),
-        status="queued",
-        checkpoint={},
-        attempts=0,
-        lease_until=None,
-        dedup_key=dedup_key,
-        reason=reason,
-        requested_by=requested_by,
-        priority=priority,
-    )
-    db.add(job)
-    try:
-        await db.flush()
-    except IntegrityError:
-        # A competing request won the partial unique active-dedup index.  The
-        # current transaction must be rolled back before reading its row.
-        await db.rollback()
-        existing = await db.scalar(
-            select(CatalogImportJob).where(
-                CatalogImportJob.organization_id == organization_id,
-                CatalogImportJob.dedup_key == dedup_key,
-                CatalogImportJob.status.in_(("queued", "running")),
-            )
+    def new_job() -> CatalogImportJob:
+        return CatalogImportJob(
+            organization_id=organization_id,
+            term=term,
+            department=department,
+            course_codes=codes or None,
+            payload=_jsonable(payload or {}),
+            status="queued",
+            checkpoint={},
+            attempts=0,
+            lease_until=None,
+            dedup_key=dedup_key,
+            reason=reason,
+            requested_by=requested_by,
+            priority=priority,
         )
-        if existing is None:
+
+    def is_active_dedup_conflict(exc: IntegrityError) -> bool:
+        # Restrict the retry to the partial unique index.  Check/check-FK
+        # violations must still surface to the caller instead of being
+        # mistaken for a concurrent duplicate request.
+        original = getattr(exc, "orig", None)
+        diagnostic = getattr(original, "diag", None)
+        if getattr(diagnostic, "constraint_name", None) == "uq_catalog_import_jobs_active_dedup":
+            return True
+        # asyncpg exposes the SQLSTATE and constraint in its translated error
+        # text rather than a psycopg-style ``diag`` object.
+        return (
+            getattr(original, "sqlstate", None) == "23505"
+            and "uq_catalog_import_jobs_active_dedup" in str(original)
+        )
+
+    # The active-dedup index is the concurrency boundary.  Keep each insert
+    # inside a savepoint so a duplicate request does not erase unrelated work
+    # already staged in the caller's transaction.  If the winner completes
+    # between the failed insert and the fallback SELECT, one retry can create
+    # the now-valid next job; a second conflict is resolved by the SELECT.
+    job = new_job()
+    for attempt in range(2):
+        try:
+            async with db.begin_nested():
+                db.add(job)
+                await db.flush()
+            return job
+        except IntegrityError as exc:
+            if not is_active_dedup_conflict(exc):
+                raise
+            existing = await db.scalar(
+                select(CatalogImportJob).where(
+                    CatalogImportJob.organization_id == organization_id,
+                    CatalogImportJob.dedup_key == dedup_key,
+                    CatalogImportJob.status.in_(("queued", "running")),
+                )
+            )
+            if existing is not None:
+                return existing
+            if attempt == 0:
+                job = new_job()
+                continue
             raise
-        return existing
-    return job
+    raise RuntimeError("catalog import enqueue retry exhausted")
 
 
 async def get_draft(
@@ -2453,8 +2474,13 @@ def _catalog_metadata(revision: CatalogCourseRevision, release: CatalogRelease |
     }
 
 
-def serialize_draft(draft: CatalogDraft) -> dict[str, Any]:
-    return {
+def serialize_draft(
+    draft: CatalogDraft,
+    *,
+    course_code: str | None = None,
+    term: str | None = None,
+) -> dict[str, Any]:
+    payload = {
         "id": str(draft.id),
         "revision": int(draft.revision),
         "state": draft.state,
@@ -2471,9 +2497,41 @@ def serialize_draft(draft: CatalogDraft) -> dict[str, Any]:
         "created_at": _iso(draft.created_at),
         "updated_at": _iso(draft.updated_at),
     }
+    if course_code is not None:
+        payload["course_code"] = course_code
+    if term is not None:
+        payload["term"] = term
+    return payload
 
 
 def serialize_import_job(job: CatalogImportJob) -> dict[str, Any]:
+    raw_checkpoint = dict(job.checkpoint or {})
+    steps = raw_checkpoint.get("steps")
+    # The operation plan can contain thousands of source calls.  The admin
+    # list only needs a bounded progress summary; the full plan stays private
+    # to the worker and is never copied into every polling response.
+    try:
+        offset = int(getattr(job, "checkpoint_offset", 0) or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    total = len(steps) if isinstance(steps, list) else raw_checkpoint.get("total", 0)
+    try:
+        total = max(0, int(total or 0))
+    except (TypeError, ValueError):
+        total = 0
+    phase = raw_checkpoint.get("phase")
+    if not phase and isinstance(steps, list) and 0 <= offset < len(steps):
+        next_step = steps[offset]
+        if isinstance(next_step, dict):
+            phase = next_step.get("tool")
+    progress_checkpoint: dict[str, Any] = {
+        "offset": offset,
+        "total": total,
+        "phase": str(phase or job.status),
+    }
+    for key in ("retry_at", "conflicts"):
+        if key in raw_checkpoint:
+            progress_checkpoint[key] = _jsonable(raw_checkpoint[key])
     return {
         "id": str(job.id),
         "organization_id": str(job.organization_id),
@@ -2482,7 +2540,7 @@ def serialize_import_job(job: CatalogImportJob) -> dict[str, Any]:
         "course_codes": _jsonable(job.course_codes or []),
         "payload": _jsonable(job.payload or {}),
         "status": job.status,
-        "checkpoint": _jsonable(job.checkpoint or {}),
+        "checkpoint": progress_checkpoint,
         "attempts": job.attempts,
         "lease_until": _iso(job.lease_until),
         "error_code": job.error_code,
@@ -2604,90 +2662,342 @@ async def list_course_rows(
 ) -> dict[str, Any]:
     term = await _term_for_read(db, organization_id, term_code)
     if term is None:
-        return {"courses": [], "total": 0, "release_id": None, "counts": {"total": 0}}
-    release = await _release_for_term(db, organization_id, term, required=False)
-    pairs = await _admin_course_pairs(db, organization_id, term, release)
-    draft_pairs = list((await db.execute(
-        select(CatalogCourse, CatalogDraft)
-        .join(CatalogDraft, CatalogDraft.course_id == CatalogCourse.id)
-        .where(CatalogCourse.organization_id == organization_id,
-               CatalogDraft.organization_id == organization_id,
-               CatalogDraft.term_id == term.id, CatalogDraft.state == "draft")
-        .order_by(CatalogCourse.course_code)
-    )).all())
-    drafts_by_course = {course.id: draft for course, draft in draft_pairs}
-    revision_ids = [revision.id for _, revision in pairs]
-    section_counts = dict((await db.execute(
-        select(CatalogSection.course_revision_id, func.count(CatalogSection.id))
-        .where(CatalogSection.organization_id == organization_id,
-               CatalogSection.course_revision_id.in_(revision_ids))
-        .group_by(CatalogSection.course_revision_id)
-    )).all()) if revision_ids else {}
-    department_query = str(department or "").strip().casefold()
-    text_query = str(query or "").strip().casefold()
-    rows: list[dict[str, Any]] = []
-    for course, revision in pairs:
-        summary = _course_summary(course, revision, release, draft=drafts_by_course.get(course.id),
-                                  section_count=section_counts.get(revision.id, 0))
-        if department_query and department_query not in course.department.casefold():
-            continue
-        if state and summary["state"] != state:
-            continue
-        if text_query and text_query not in " ".join(str(summary.get(key) or "") for key in ("course_code", "title", "department")).casefold():
-            continue
-        rows.append(summary)
-    published_or_revised = {course.id for course, _ in pairs}
-    for course, draft in draft_pairs:
-        if course.id in published_or_revised:
-            continue
-        data = dict(draft.data or {})
-        candidate = {
-            "course_code": course.course_code,
-            "department": course.department,
-            "title": data.get("title"),
-            "local_credits": _number(data.get("local_credits")),
-            "ects": _number(data.get("ects")),
-            "level": data.get("level"),
-            "availability": data.get("availability"),
-            "campus": data.get("campus"),
-            "state": "draft",
-            "completeness": _jsonable(data.get("completeness") or {}),
-            "freshness": "unknown",
-            "source_conflicts": _has_conflicts(draft.issues),
-            "draft_id": str(draft.id),
-            "course_revision_id": None,
-            "section_count": len(data.get("sections") or []) if isinstance(data.get("sections"), list) else 0,
-            "_catalog": {
-                "release_id": None,
-                "course_revision_id": None,
-                "components": _jsonable(data.get("component_status") or {}),
+        return {
+            "courses": [],
+            "total": 0,
+            "release_id": None,
+            "counts": {
+                "total": 0,
+                "listed": 0,
+                "detailed": 0,
+                "schedulable": 0,
+                "restrictions_verified": 0,
+                "prerequisites_verified": 0,
+                "source_conflicts": 0,
             },
         }
-        if department_query and department_query not in course.department.casefold():
+    release = await _release_for_term(db, organization_id, term, required=False)
+
+    def _text_match(course_code: Any, title: Any, department_value: Any, value: str | None) -> Any:
+        if not value:
+            return literal(True)
+        haystack = func.lower(func.concat_ws(" ", course_code, title, department_value))
+        return func.strpos(haystack, literal(value)) > 0
+
+    def _filters(stmt: Any, *, course_code: Any, title: Any, department_value: Any, state_value: Any) -> Any:
+        department_query = str(department or "").strip().casefold()
+        text_query = str(query or "").strip().casefold()
+        if department_query:
+            stmt = stmt.where(func.strpos(func.lower(department_value), literal(department_query)) > 0)
+        if text_query:
+            stmt = stmt.where(_text_match(course_code, title, department_value, text_query))
+        if state:
+            stmt = stmt.where(state_value == literal(state))
+        return stmt
+
+    # Build the published side directly in SQL.  Filtering happens before the
+    # count and page queries so a large release does not become a Python list
+    # just to return 50 rows.
+    if release is not None:
+        published_from = (
+            select(
+                CatalogCourse.id.label("course_id"),
+                CatalogCourseRevision.id.label("revision_id"),
+                CatalogCourse.course_code.label("course_code"),
+                CatalogCourse.department.label("department"),
+                CatalogCourseRevision.title.label("title"),
+                CatalogCourseRevision.local_credits.label("local_credits"),
+                CatalogCourseRevision.ects.label("ects"),
+                CatalogCourseRevision.level.label("level"),
+                CatalogCourseRevision.availability.label("availability"),
+                CatalogCourseRevision.campus.label("campus"),
+                CatalogCourseRevision.is_thesis.label("is_thesis"),
+                CatalogCourseRevision.state.label("state"),
+                CatalogCourseRevision.completeness.label("completeness"),
+                CatalogCourseRevision.issues.label("issues"),
+            )
+            .join(CatalogReleaseItem, CatalogReleaseItem.course_id == CatalogCourse.id)
+            .join(CatalogCourseRevision, CatalogCourseRevision.id == CatalogReleaseItem.course_revision_id)
+            .where(
+                CatalogReleaseItem.release_id == release.id,
+                CatalogReleaseItem.organization_id == organization_id,
+                CatalogCourse.organization_id == organization_id,
+                CatalogCourseRevision.organization_id == organization_id,
+            )
+        ).subquery("catalog_release_courses")
+        course_id = published_from.c.course_id
+        revision_id = published_from.c.revision_id
+        course_code = published_from.c.course_code
+        department_value = published_from.c.department
+        revision_title = published_from.c.title
+        revision_local_credits = published_from.c.local_credits
+        revision_ects = published_from.c.ects
+        revision_level = published_from.c.level
+        revision_availability = published_from.c.availability
+        revision_campus = published_from.c.campus
+        revision_state = published_from.c.state
+        revision_completeness = published_from.c.completeness
+        revision_is_thesis = published_from.c.is_thesis
+        revision_issues = published_from.c.issues
+        published_join = published_from
+        published_revision_id = revision_id
+    else:
+        latest = (
+            select(
+                CatalogCourseRevision.id.label("revision_id"),
+                CatalogCourseRevision.course_id.label("course_id"),
+                func.row_number()
+                .over(
+                    partition_by=CatalogCourseRevision.course_id,
+                    order_by=(CatalogCourseRevision.revision.desc(), CatalogCourseRevision.id.desc()),
+                )
+                .label("row_number"),
+            )
+            .where(
+                CatalogCourseRevision.organization_id == organization_id,
+                CatalogCourseRevision.term_id == term.id,
+            )
+            .subquery("catalog_latest_revisions")
+        )
+        published_join = (
+            select(
+                CatalogCourse.id.label("course_id"),
+                CatalogCourseRevision.id.label("revision_id"),
+                CatalogCourse.course_code.label("course_code"),
+                CatalogCourse.department.label("department"),
+                CatalogCourseRevision.title.label("title"),
+                CatalogCourseRevision.local_credits.label("local_credits"),
+                CatalogCourseRevision.ects.label("ects"),
+                CatalogCourseRevision.level.label("level"),
+                CatalogCourseRevision.availability.label("availability"),
+                CatalogCourseRevision.campus.label("campus"),
+                CatalogCourseRevision.is_thesis.label("is_thesis"),
+                CatalogCourseRevision.state.label("state"),
+                CatalogCourseRevision.completeness.label("completeness"),
+                CatalogCourseRevision.issues.label("issues"),
+            )
+            .join(latest, and_(latest.c.course_id == CatalogCourse.id, latest.c.row_number == 1))
+            .join(CatalogCourseRevision, CatalogCourseRevision.id == latest.c.revision_id)
+            .where(CatalogCourse.organization_id == organization_id)
+        ).subquery("catalog_latest_courses")
+        course_id = published_join.c.course_id
+        revision_id = published_join.c.revision_id
+        course_code = published_join.c.course_code
+        department_value = published_join.c.department
+        revision_title = published_join.c.title
+        revision_local_credits = published_join.c.local_credits
+        revision_ects = published_join.c.ects
+        revision_level = published_join.c.level
+        revision_availability = published_join.c.availability
+        revision_campus = published_join.c.campus
+        revision_state = published_join.c.state
+        revision_completeness = published_join.c.completeness
+        revision_is_thesis = published_join.c.is_thesis
+        revision_issues = published_join.c.issues
+        published_revision_id = revision_id
+
+    section_count = (
+        select(func.count(CatalogSection.id))
+        .where(
+            CatalogSection.organization_id == organization_id,
+            CatalogSection.course_revision_id == published_revision_id,
+        )
+        .correlate(published_join)
+        .scalar_subquery()
+    )
+    draft_join = and_(
+        CatalogDraft.organization_id == organization_id,
+        CatalogDraft.term_id == term.id,
+        CatalogDraft.course_id == course_id,
+        CatalogDraft.state == "draft",
+    )
+    published_state = case(
+        (CatalogDraft.id.is_not(None), literal("draft")),
+        else_=revision_state,
+    )
+    published_stmt = select(
+        course_id.label("course_id"),
+        published_revision_id.label("revision_id"),
+        CatalogDraft.id.label("draft_id"),
+        course_code.label("course_code"),
+        department_value.label("department"),
+        revision_title.label("title"),
+        revision_local_credits.label("local_credits"),
+        revision_ects.label("ects"),
+        revision_level.label("level"),
+        revision_availability.label("availability"),
+        revision_campus.label("campus"),
+        revision_is_thesis.label("is_thesis"),
+        published_state.label("state"),
+        revision_completeness.label("completeness"),
+        case((CatalogDraft.id.is_not(None), CatalogDraft.issues), else_=revision_issues).label("issues"),
+        section_count.label("section_count"),
+        literal(False).label("draft_only"),
+    ).select_from(published_join).outerjoin(CatalogDraft, draft_join)
+    published_stmt = _filters(
+        published_stmt,
+        course_code=course_code,
+        title=revision_title,
+        department_value=department_value,
+        state_value=published_state,
+    )
+
+    # A draft-only course is part of the admin review surface even if no
+    # revision has ever been published.  Keep that branch in the same SQL
+    # union so it participates in filtering, counts and pagination.
+    if release is not None:
+        published_identity_exists = exists(
+            select(literal(1)).select_from(CatalogReleaseItem).where(
+                CatalogReleaseItem.organization_id == organization_id,
+                CatalogReleaseItem.release_id == release.id,
+                CatalogReleaseItem.course_id == CatalogCourse.id,
+            )
+        )
+    else:
+        published_identity_exists = exists(
+            select(literal(1)).select_from(CatalogCourseRevision).where(
+                CatalogCourseRevision.organization_id == organization_id,
+                CatalogCourseRevision.term_id == term.id,
+                CatalogCourseRevision.course_id == CatalogCourse.id,
+            )
+        )
+    draft_sections = CatalogDraft.data["sections"]
+    draft_section_count = case(
+        (func.jsonb_typeof(draft_sections) == literal("array"), func.jsonb_array_length(draft_sections)),
+        else_=literal(0),
+    )
+    draft_stmt = select(
+        CatalogCourse.id.label("course_id"),
+        cast(literal(None), CatalogCourseRevision.id.type).label("revision_id"),
+        CatalogDraft.id.label("draft_id"),
+        CatalogCourse.course_code.label("course_code"),
+        CatalogCourse.department.label("department"),
+        CatalogDraft.data["title"].as_string().label("title"),
+        CatalogDraft.data["local_credits"].as_float().label("local_credits"),
+        CatalogDraft.data["ects"].as_float().label("ects"),
+        CatalogDraft.data["level"].as_string().label("level"),
+        CatalogDraft.data["availability"].as_string().label("availability"),
+        CatalogDraft.data["campus"].as_string().label("campus"),
+        CatalogDraft.data["is_thesis"].as_boolean().label("is_thesis"),
+        literal("draft").label("state"),
+        CatalogDraft.data["completeness"].label("completeness"),
+        CatalogDraft.issues.label("issues"),
+        draft_section_count.label("section_count"),
+        literal(True).label("draft_only"),
+    ).select_from(CatalogCourse).join(
+        CatalogDraft,
+        and_(
+            CatalogDraft.organization_id == organization_id,
+            CatalogDraft.term_id == term.id,
+            CatalogDraft.course_id == CatalogCourse.id,
+            CatalogDraft.state == "draft",
+        ),
+    ).where(
+        CatalogCourse.organization_id == organization_id,
+        ~published_identity_exists,
+    )
+    draft_stmt = _filters(
+        draft_stmt,
+        course_code=CatalogCourse.course_code,
+        title=CatalogDraft.data["title"].as_string(),
+        department_value=CatalogCourse.department,
+        state_value=literal("draft"),
+    )
+
+    candidates = union_all(published_stmt, draft_stmt).subquery("catalog_admin_candidates")
+    truthy = lambda key: candidates.c.completeness.contains({key: True})
+    aggregate_stmt = select(
+        func.count(candidates.c.course_id),
+        func.coalesce(func.sum(case((truthy("listing"), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((truthy("details"), 1), else_=0)), 0),
+        func.coalesce(
+            func.sum(case((and_(truthy("sections"), candidates.c.section_count > 0), 1), else_=0)),
+            0,
+        ),
+        func.coalesce(func.sum(case((truthy("constraints"), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((truthy("prerequisites"), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((candidates.c.issues.contains([{"code": "source_conflict"}]), 1), else_=0)), 0),
+    )
+    totals = tuple((await db.execute(aggregate_stmt)).one())
+    page_stmt = (
+        select(candidates)
+        .order_by(candidates.c.course_code)
+        .offset(max(0, int(offset)))
+        .limit(max(1, min(int(limit), 500)))
+    )
+    page_rows = (await db.execute(page_stmt)).mappings().all()
+    course_ids = {row["course_id"] for row in page_rows}
+    revision_ids = {row["revision_id"] for row in page_rows if row["revision_id"] is not None}
+    draft_ids = {row["draft_id"] for row in page_rows if row["draft_id"] is not None}
+    courses = {
+        row.id: row
+        for row in (await db.scalars(select(CatalogCourse).where(CatalogCourse.id.in_(course_ids)))).all()
+    } if course_ids else {}
+    revisions = {
+        row.id: row
+        for row in (await db.scalars(select(CatalogCourseRevision).where(CatalogCourseRevision.id.in_(revision_ids)))).all()
+    } if revision_ids else {}
+    drafts = {
+        row.id: row
+        for row in (await db.scalars(select(CatalogDraft).where(CatalogDraft.id.in_(draft_ids)))).all()
+    } if draft_ids else {}
+    rows: list[dict[str, Any]] = []
+    for row in page_rows:
+        if not row["draft_only"]:
+            course = courses.get(row["course_id"])
+            revision = revisions.get(row["revision_id"])
+            if course is None or revision is None:
+                continue
+            rows.append(
+                _course_summary(
+                    course,
+                    revision,
+                    release,
+                    draft=drafts.get(row["draft_id"]),
+                    section_count=int(row["section_count"] or 0),
+                )
+            )
             continue
-        if state and state != "draft":
-            continue
-        if text_query and text_query not in " ".join(
-            str(candidate.get(key) or "")
-            for key in ("course_code", "title", "department")
-        ).casefold():
-            continue
-        rows.append(candidate)
-    rows.sort(key=lambda row: row["course_code"])
-    counts = {
-        "total": len(rows),
-        "listed": sum(bool(row["completeness"].get("listing")) for row in rows),
-        "detailed": sum(bool(row["completeness"].get("details")) for row in rows),
-        "schedulable": sum(bool(row["completeness"].get("sections")) and row["section_count"] > 0 for row in rows),
-        "restrictions_verified": sum(bool(row["completeness"].get("constraints")) for row in rows),
-        "prerequisites_verified": sum(bool(row["completeness"].get("prerequisites")) for row in rows),
-        "source_conflicts": sum(bool(row["source_conflicts"]) for row in rows),
-    }
+        completeness = _jsonable(row["completeness"] or {})
+        rows.append(
+            {
+                "course_code": row["course_code"],
+                "department": row["department"],
+                "title": row["title"],
+                "local_credits": _number(row["local_credits"]),
+                "ects": _number(row["ects"]),
+                "level": row["level"],
+                "availability": row["availability"],
+                "campus": row["campus"],
+                "state": "draft",
+                "completeness": completeness,
+                "freshness": "unknown",
+                "source_conflicts": _has_conflicts(row["issues"] or []),
+                "draft_id": str(row["draft_id"]),
+                "course_revision_id": None,
+                "section_count": int(row["section_count"] or 0),
+                "_catalog": {
+                    "release_id": None,
+                    "course_revision_id": None,
+                    "components": _jsonable((drafts[row["draft_id"]].data or {}).get("component_status") or {})
+                    if row["draft_id"] in drafts
+                    else {},
+                },
+            }
+        )
     return {
-        "courses": rows[offset : offset + limit],
-        "total": len(rows),
+        "courses": rows,
+        "total": int(totals[0] or 0),
         "release_id": str(release.id) if release else None,
-        "counts": counts,
+        "counts": {
+            "total": int(totals[0] or 0),
+            "listed": int(totals[1] or 0),
+            "detailed": int(totals[2] or 0),
+            "schedulable": int(totals[3] or 0),
+            "restrictions_verified": int(totals[4] or 0),
+            "prerequisites_verified": int(totals[5] or 0),
+            "source_conflicts": int(totals[6] or 0),
+        },
     }
 
 
@@ -3797,7 +4107,34 @@ async def _published_summary_rows(
     department: str | None = None,
     query: str | None = None,
 ) -> list[dict[str, Any]]:
-    pairs = await _release_revisions(db, organization_id, release)
+    # Apply the public search predicates in SQL so a whole release is not
+    # hydrated before the Course Info adapter can discard most rows.  The
+    # public contract intentionally returns every matching course; callers do
+    # not request a page, so only filtering moves across the boundary here.
+    stmt = (
+        select(CatalogCourse, CatalogCourseRevision)
+        .join(CatalogReleaseItem, CatalogReleaseItem.course_id == CatalogCourse.id)
+        .join(CatalogCourseRevision, CatalogCourseRevision.id == CatalogReleaseItem.course_revision_id)
+        .where(
+            CatalogReleaseItem.release_id == release.id,
+            CatalogReleaseItem.organization_id == organization_id,
+            CatalogCourse.organization_id == organization_id,
+            CatalogCourseRevision.organization_id == organization_id,
+        )
+        .order_by(CatalogCourse.course_code)
+    )
+    department_query = str(department or "").strip().casefold()
+    text_query = str(query or "").strip().casefold()
+    if department_query:
+        stmt = stmt.where(func.strpos(func.lower(CatalogCourse.department), literal(department_query)) > 0)
+    if text_query:
+        stmt = stmt.where(
+            func.strpos(
+                func.lower(func.concat_ws(" ", CatalogCourse.course_code, CatalogCourseRevision.title, CatalogCourse.department)),
+                literal(text_query),
+            ) > 0
+        )
+    pairs = list((await db.execute(stmt)).all())
     revision_ids = [revision.id for _, revision in pairs]
     section_counts: dict[UUID, int] = {}
     if revision_ids:
@@ -3810,12 +4147,8 @@ async def _published_summary_rows(
             .group_by(CatalogSection.course_revision_id)
         )
         section_counts = {key: int(value) for key, value in counts.all()}
-    department_query = str(department or "").strip().casefold()
-    text_query = str(query or "").strip().casefold()
     rows: list[dict[str, Any]] = []
     for course, revision in pairs:
-        if department_query and department_query not in course.department.casefold():
-            continue
         row = {
             "course_code": course.course_code,
             "department": course.department,
@@ -3835,10 +4168,6 @@ async def _published_summary_rows(
             "section_count": section_counts.get(revision.id, 0),
             "_catalog": _catalog_metadata(revision, release),
         }
-        if text_query and text_query not in " ".join(
-            str(row.get(key) or "") for key in ("course_code", "title", "department")
-        ).casefold():
-            continue
         rows.append(row)
     return rows
 
@@ -4105,6 +4434,14 @@ async def published_plan_inputs(
         course_count=len(pairs),
     )
     metadata["catalog_release_id"] = str(release.id)
+    # Keep the release-level provenance useful for a multi-course plan.  The
+    # per-offering field remains the authoritative value for a single course;
+    # this mapping lets consumers retain the exact revision identity without
+    # guessing from a release-wide timestamp or a mutable course row.
+    metadata["course_revision_ids"] = {
+        course.course_code: str(revision.id)
+        for course, revision in pairs
+    }
     return offerings, rules, metadata
 
 

@@ -12,11 +12,21 @@ from app.admin.audit import record_event
 from app.admin.auth import AdminPermission, AdminPrincipal, require
 from app.config import get_settings
 from app.db.session import get_db
+from app.observability.context import current_request_id
 from app.researchers.models import Researcher, ResearcherImportItem, ResearcherImportRun, ResearcherSection
 from app.researchers.service import LOCK_ID
 
 router = APIRouter(prefix="/researchers")
 CONTROL_LOCK = LOCK_ID + 1
+
+
+def _import_telemetry(principal: AdminPrincipal) -> dict[str, str | None]:
+    """Carry only safe correlation identifiers into the queued import run."""
+    return {
+        "actor_user_id": str(principal.user.id),
+        "organization_id": str(principal.organization_id) if principal.organization_id else None,
+        "request_id": current_request_id.get(),
+    }
 
 
 class RunView(BaseModel):
@@ -247,7 +257,10 @@ async def start_import(
     db: AsyncSession = Depends(get_db),
 ):
     await ensure_idle(db)
-    run = ResearcherImportRun(status="queued", options={"language": "en", "limit": body.limit})
+    run = ResearcherImportRun(
+        status="queued",
+        options={"language": "en", "limit": body.limit, "_telemetry": _import_telemetry(principal)},
+    )
     db.add(run)
     await db.flush()
     await record_event(
@@ -255,6 +268,7 @@ async def start_import(
         actor_user_id=principal.user.id,
         action="researchers.import.start",
         result="success",
+        organization_id=principal.organization_id,
         after={"run_id": str(run.id), "limit": body.limit},
     )
     return (await views(db, [run], False))[0]
@@ -273,11 +287,13 @@ async def resume_import(
     if run.status == "completed":
         raise HTTPException(409, "This import is already complete; start a new refresh instead")
     run.status, run.finished_at = "queued", None
+    run.options = {**(run.options or {}), "_telemetry": _import_telemetry(principal)}
     await record_event(
         db,
         actor_user_id=principal.user.id,
         action="researchers.import.resume",
         result="success",
+        organization_id=principal.organization_id,
         after={"run_id": str(run.id)},
     )
     return (await views(db, [run], False))[0]

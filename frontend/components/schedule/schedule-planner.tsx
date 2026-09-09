@@ -1267,7 +1267,7 @@ export function SchedulePlanner() {
     // tool per department with a model turn between each. It now reads the
     // curriculum directly and answers in about two.
     const startedAt = Date.now();
-    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; partial?: boolean; stale?: boolean; read_at?: string | null; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
+    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; partial?: boolean; stale?: boolean; read_at?: string | null; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number; catalog_release_id?: string | null };
     let response: CurriculumResponse;
     try {
       response = await jsonFetch<CurriculumResponse>("/api/schedule/curriculum", {
@@ -1275,12 +1275,16 @@ export function SchedulePlanner() {
         body: { semester: term, courses: courses.map((course) => ({ code: course.rawCode })) },
       });
     } catch (error) {
-      captureProductEvent("schedule_plan_completed", {
+      captureProductEvent("schedule_curriculum_loaded", {
         result: "error",
         requested_courses: courses.length,
         returned_courses: 0,
         warnings: 0,
+        prerequisite_rejections: 0,
         duration_seconds: (Date.now() - startedAt) / 1000,
+        curriculum_unavailable: true,
+        partial: false,
+        catalog_release_id: catalogReleaseId,
       });
       throw error;
     }
@@ -1298,14 +1302,21 @@ export function SchedulePlanner() {
     });
     setSectionsByCourse((current) => ({ ...current, ...sectionMap }));
     const warnings = (response.warnings ?? []).filter((warning): warning is string => typeof warning === "string");
-    captureProductEvent("schedule_plan_completed", {
-      result: "success",
+    const prerequisiteRejections = response.prerequisite_rejections ?? [];
+    const unavailable = response.curriculum_unavailable === true;
+    const partial = response.partial === true;
+    captureProductEvent("schedule_curriculum_loaded", {
+      result: unavailable ? "error" : partial || warnings.length ? "partial" : "success",
       requested_courses: courses.length,
       returned_courses: verified.length,
       warnings: warnings.length,
+      prerequisite_rejections: prerequisiteRejections.length,
       duration_seconds: (Date.now() - startedAt) / 1000,
+      curriculum_unavailable: unavailable,
+      partial,
+      catalog_release_id: response.catalog_release_id ?? catalogReleaseId,
     });
-    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, partial: response.partial === true, stale: response.stale === true, readAt: response.read_at ?? null, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
+    return { courses: verified, warnings, unavailable, partial, stale: response.stale === true, readAt: response.read_at ?? null, prerequisiteRejections, cacheHit: response.cache_hit, durationMs: response.duration_ms, catalogReleaseId: response.catalog_release_id ?? catalogReleaseId };
   }
 
   async function loadRequiredCourses() {
@@ -1394,14 +1405,49 @@ export function SchedulePlanner() {
    * student to do completely different things.
    */
   async function generateSchedule() {
-    if (!catalogCourses.length) return toast.error(t("Önce dönem derslerini getir.", "Load semester courses first."));
-    if (!planning.ready) return toast.error(t("Program sunucusu henüz hazır değil.", "The planner server is still loading."));
-    if (planning.saving || planning.retryable || planning.conflict) return toast.error(t("Önce bekleyen program kaydını tamamla.", "Finish the pending schedule save first."));
+    const startedAt = Date.now();
+    const requestedCourses = catalogCourses.length;
+    const unavailable: string[] = [];
+    const unpublished: string[] = [];
+    const needsVerification: string[] = [];
+    let scheduledCourses = 0;
+    let alternativeCount = 0;
+    let restrictedCourses = 0;
+    let unplacedCourses = 0;
+    let releaseId = catalogReleaseId;
+    let needsRevalidation = false;
+    const emitPlanCompleted = (
+      result: "success" | "partial" | "blocked" | "needs_verification" | "error",
+      failureStage: "precondition" | "set_pool" | "solve" | null,
+    ) => captureProductEvent("schedule_plan_completed", {
+      result,
+      requested_courses: requestedCourses,
+      scheduled_courses: scheduledCourses,
+      alternatives: alternativeCount,
+      unavailable_courses: unavailable.length,
+      unpublished_courses: unpublished.length,
+      restricted_courses: restrictedCourses,
+      needs_verification_courses: needsVerification.length,
+      unplaced_courses: unplacedCourses,
+      duration_seconds: (Date.now() - startedAt) / 1000,
+      catalog_release_id: releaseId,
+      needs_revalidation: needsRevalidation,
+      failure_stage: failureStage,
+    });
+    if (!catalogCourses.length) {
+      emitPlanCompleted("error", "precondition");
+      return toast.error(t("Önce dönem derslerini getir.", "Load semester courses first."));
+    }
+    if (!planning.ready) {
+      emitPlanCompleted("error", "precondition");
+      return toast.error(t("Program sunucusu henüz hazır değil.", "The planner server is still loading."));
+    }
+    if (planning.saving || planning.retryable || planning.conflict) {
+      emitPlanCompleted("error", "precondition");
+      return toast.error(t("Önce bekleyen program kaydını tamamla.", "Finish the pending schedule save first."));
+    }
     setGenerateProgress({ done: 0, total: catalogCourses.length });
     try {
-      const unavailable: string[] = [];
-      const unpublished: string[] = [];
-      const needsVerification: string[] = [];
       // One request for everything still missing, rather than one per course
       // inside the loop below. A pool the catalog has already seen this week
       // costs a single call that touches no campus page at all.
@@ -1433,8 +1479,10 @@ export function SchedulePlanner() {
         const timed = sections.filter((section) => section.meetings.length > 0);
         const explicitUntimed = sections.filter((section) => isExplicitlyUntimed(section) && !section.meetings.length);
         if (!timed.length) {
-          if (explicitUntimed.some((section) => sectionNeedsVerification(section, verdicts[section.section]))) {
-            needsVerification.push(course.code);
+          if (explicitUntimed.length) {
+            if (explicitUntimed.some((section) => sectionNeedsVerification(section, verdicts[section.section]))) needsVerification.push(course.code);
+          } else {
+            unpublished.push(course.code);
           }
           continue;
         }
@@ -1459,10 +1507,18 @@ export function SchedulePlanner() {
         })),
         sections: canonicalSectionsFromLocal(known, constraints, catalogCourses),
       });
-      if (!staged) return;
+      if (!staged) {
+        emitPlanCompleted("error", "set_pool");
+        return;
+      }
       const solved = await submitPlanningUpdate({ operation: "solve" });
-      if (!solved) return;
+      if (!solved) {
+        emitPlanCompleted("error", "solve");
+        return;
+      }
       const scheduled = new Set(solved.state.entries.filter((entry) => entry.kind === "course").map((entry) => courseIdentity(entry.code)));
+      scheduledCourses = scheduled.size;
+      alternativeCount = solved.state.alternatives.length;
       const sectionPayload = canonicalSectionsFromLocal(known, constraints, catalogCourses);
       const restricted = catalogCourses
         .filter((course) => {
@@ -1474,18 +1530,31 @@ export function SchedulePlanner() {
         .filter((course) => !scheduled.has(courseIdentity(course.code)))
         .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !needsVerification.includes(course.code) && !restricted.includes(course.code))
         .map((course) => course.code);
+      restrictedCourses = restricted.length;
+      unplacedCourses = unplaced.length;
 
       const metadataNeedsVerification = [...new Set([...unavailable, ...unpublished, ...needsVerification])];
       const blockedCourses = [...new Set([...restricted, ...prerequisiteRejections.map((item) => item.course_code).filter((code): code is string => Boolean(code))])];
-      setCatalogReleaseId(solved.state.catalog_release_id ?? catalogReleaseId);
-      setNeedsRevalidation(solved.state.needs_revalidation === true);
+      releaseId = solved.state.catalog_release_id ?? catalogReleaseId;
+      needsRevalidation = solved.state.needs_revalidation === true;
+      setCatalogReleaseId(releaseId);
+      setNeedsRevalidation(needsRevalidation);
       setPlanningMetadata({
         status: metadataNeedsVerification.length ? "needs_verification" : blockedCourses.length ? "blocked" : unplaced.length || !solved.state.alternatives.length ? "partial" : "complete",
         blockedCourses,
         needsVerification: metadataNeedsVerification,
         curriculumUnread: false,
-        catalogReleaseId: solved.state.catalog_release_id ?? catalogReleaseId,
+        catalogReleaseId: releaseId,
       });
+
+      const planResult = metadataNeedsVerification.length
+        ? "needs_verification"
+        : blockedCourses.length
+        ? "blocked"
+        : unplaced.length || !solved.state.alternatives.length
+        ? "partial"
+        : "success";
+      emitPlanCompleted(planResult, null);
 
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
@@ -1505,6 +1574,7 @@ export function SchedulePlanner() {
         toast.success(t("Tek bir çakışmasız program mümkün.", "Exactly one conflict-free schedule is possible."));
       }
     } catch (error) {
+      emitPlanCompleted("error", "solve");
       toast.error(error instanceof Error ? error.message : t("Program oluşturulamadı.", "The schedule could not be generated."));
     } finally { setGenerateProgress(null); }
   }

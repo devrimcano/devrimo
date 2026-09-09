@@ -94,6 +94,51 @@ async def test_domain_worker_reports_lifecycle_and_safe_pass_failure(captured, m
     assert service_name() == "devrimo-catalog-worker"
 
 
+@pytest.mark.parametrize(
+    ("pass_outcome", "expected_outcome", "expected_reason"),
+    [
+        ("idle", "success", None),
+        ("deferred", "expected_failure", "no_eligible_source_account"),
+        ("lease_lost", "expected_failure", "lease_lost"),
+        ("failed", "unexpected_failure", None),
+        ("completed", "success", None),
+    ],
+)
+async def test_catalog_pass_outcome_is_preserved_by_runtime(
+    captured, monkeypatch, pass_outcome, expected_outcome, expected_reason
+):
+    from app.workers import runtime
+
+    events, _ = captured
+    result = SimpleNamespace(
+        outcome=pass_outcome,
+        job_id="job-1",
+        error_code=(
+            "no_eligible_source_account"
+            if pass_outcome == "deferred"
+            else "ImportFailure"
+            if pass_outcome == "failed"
+            else None
+        ),
+        scheduled_count=2,
+    )
+
+    async def finish_pass(_kind):
+        return result
+
+    monkeypatch.setattr(runtime, "_pass", finish_pass)
+    assert await runtime._run_pass("catalog", attempt=1)
+
+    outcome = _events(events, "background_job_completed")[0]
+    assert outcome["outcome"] == expected_outcome
+    assert outcome.get("reason") == expected_reason
+    assert outcome["pass_outcome"] == pass_outcome
+    assert outcome["job_id"] == "job-1"
+    assert outcome["scheduled_count"] == 2
+    if pass_outcome == "failed":
+        assert outcome["error_type"] == "ImportFailure"
+
+
 async def test_assistant_finalization_failure_is_unknown_and_safe(captured, monkeypatch):
     from app.assistant import worker
     from app.observability import turns
