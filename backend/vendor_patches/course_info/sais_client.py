@@ -65,10 +65,26 @@ from .models import (
 )
 
 
+def _ascii_skeleton(value: str) -> str:
+    """What survives when the same page is decoded two different ways.
+
+    METU serves the department selector and the course list under different
+    encodings: the selector says "Havacılık" and the result page says
+    "Havac?l?k" for the same programme, so comparing them character for
+    character fails on every department whose name is not pure ASCII, and
+    passes on the ones that are. Only the part that decoded identically is
+    compared - which still separates two programmes that share a name, since
+    what distinguishes them (a campus, a degree level) is ASCII too.
+    """
+    kept = [char.casefold() for char in str(value or '') if char.isascii() and not char.isspace()]
+    return "".join(kept)
+
+
 def _verify_course_response_identity(
     soup: BeautifulSoup, course_code: Optional[str], semester_code: str, *, section: Optional[str] = None,
     semester_label: Optional[str] = None,
     department_code: Optional[str] = None,
+    department_label: Optional[str] = None,
 ) -> None:
     """Require identity carried by the returned page, never by our POST data.
 
@@ -110,6 +126,20 @@ def _verify_course_response_identity(
             observed["semester"].add(str(semester_code).strip())
         elif re.search(r"\bSemester\s*:\s*(?!\d{5}\b)\S", text, re.I):
             observed["semester"].add("mismatched_label")
+    # The department course list is the one page that names its department
+    # and never numbers it. Its heading reads "Department :
+    # Mathematics/Matematik", the returned form carries no department control
+    # at all, and the code appears nowhere on it - so demanding the code
+    # rejected every one of METU's 207 departments, and the reviewed catalog
+    # stayed empty because no listing could ever be accepted. The label is
+    # compared, not waived: a page naming a different department is still a
+    # mismatch.
+    if department_label:
+        found = re.search(r"\bDepartment\s*:\s*(.+?)(?=\s+\bSemester\s*:|$)", text, re.I)
+        if found and _ascii_skeleton(found.group(1)) == _ascii_skeleton(department_label):
+            observed["department"].add(str(department_code).strip())
+        elif found:
+            observed["department"].add("mismatched_label")
     for key, label in {
         "course": r"Course\s*(?:Code|No\.?|Number)?",
         "semester": r"Semester(?:\s*Code)?",
@@ -200,6 +230,7 @@ def _explicit_empty_result(soup: BeautifulSoup, subject: str) -> bool:
         "no record",
         "no data",
         "not found",
+        "could not be found",
         "does not have",
         "there is no",
         "bulunmamaktadır",
@@ -583,6 +614,16 @@ class SAISClient:
             str(option.get("value", "")).strip(): clean_text(option.get_text(" ", strip=True))
             for option in soup.select('select[name="select_semester"] option[value]')
         }
+        # And the department names, from the same form, for the same reason
+        # the semester labels are kept: the result page prints "Department :
+        # Mathematics/Matematik" and never the code 236, so the only honest
+        # way to verify which department answered is the name this selector
+        # gives for the code we asked about. Taken from anywhere else it
+        # would not be a check at all.
+        self._course_department_labels = {
+            str(option.get("value", "")).strip(): clean_text(option.get_text(" ", strip=True))
+            for option in soup.select('select[name="select_dept"] option[value]')
+        }
 
         resp = await self._client.post(
             action,
@@ -652,8 +693,16 @@ class SAISClient:
 
         if not course_table_found and not _explicit_empty_result(soup, "course"):
             raise ValueError("SAIS programme course table could not be read")
+        if not course_table_found:
+            # SAIS answers some listed programmes with "Information about the
+            # department could not be found." - no table, and no heading
+            # naming a department either, so the identity below has nothing
+            # to read and would reject the page. There is also nothing to
+            # attribute to the wrong department: the answer is no courses.
+            return courses
         _verify_course_response_identity(soup, None, semester_code, department_code=department_code,
-            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)),
+            department_label=getattr(self, "_course_department_labels", {}).get(str(department_code)))
         return courses
 
     async def get_section_constraints(
@@ -981,7 +1030,8 @@ class SAISClient:
         soup = BeautifulSoup(html, "html.parser")
 
         _verify_course_response_identity(soup, None, semester_code, department_code=department_code,
-            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)),
+            department_label=getattr(self, "_course_department_labels", {}).get(str(department_code)))
         courses: List[ThesisCourse] = []
         course_table_found = False
         for table in soup.find_all("table"):
