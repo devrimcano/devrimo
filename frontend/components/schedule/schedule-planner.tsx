@@ -1810,7 +1810,12 @@ export function SchedulePlanner() {
                   <Input value={catalogSearch} onChange={(e) => setCatalogSearch(e.target.value)} placeholder={t("Eklenen derslerde ara", "Search added courses")} />
                   <Button variant="outline" className="shrink-0 text-destructive" onClick={clearCoursePool}><Trash2Icon />{t("Tümünü sil", "Clear all")}</Button>
                 </div>
-                <div className="space-y-1">
+                {/* The list scrolls inside the card rather than pushing the
+                    card past the column. Measured on the live layout at
+                    1440x860: this card alone was 685px in a 684px column, so
+                    the sidebar scrolled 643px and the primary action sat below
+                    the fold - the button that turns this list into a week. */}
+                <div className="max-h-[min(44vh,26rem)] space-y-1 overflow-y-auto pr-0.5">
                   {visibleCourses.map((course) => {
                     const identity = courseIdentity(course.rawCode);
                     const expanded = expandedCourse === identity;
@@ -1907,7 +1912,7 @@ export function SchedulePlanner() {
               <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
             </CardContent></Card>
 
-            {entries.length || selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="space-y-2">
+            {entries.length || selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Eklenen dersler", "Added courses")}</CardTitle></CardHeader><CardContent className="max-h-[min(32vh,20rem)] space-y-2 overflow-y-auto">
               {selectedUntimedCourses.map((course) => (
                 <div key={`${course.rawCode}-untimed`} className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/35 bg-amber-500/5 px-3 py-2">
                   <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{course.code} · {localizedCourseName(course.name, locale)} <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Saat yok", "Untimed")}</span></p><p className="text-xs text-muted-foreground">{course.credits} {t("kredi", "credits")} · {course.selected_section ? `${t("Şube", "Section")} ${course.selected_section} · ` : ""}{t("Takvim saati yok; kredi planında tutuluyor.", "No calendar time; retained in the credit plan.")}</p></div>
