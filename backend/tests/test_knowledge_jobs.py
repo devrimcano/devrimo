@@ -240,36 +240,55 @@ async def test_current_owner_failure_schedules_retry_and_clears_lease(monkeypatc
             await renew_lease(db, lease)
 
 
-async def test_empty_parsed_records_do_not_overwrite_existing_records(monkeypatch):
-    async def load(_source, _revision):
-        return [], {"etag": "empty-feed"}
+async def _source_with_existing_record(db, *, config):
+    source, revision, job = await _source_and_job(db, kind="curated", config=config)
+    row = CampusKnowledgeRecord(
+        source_id=source.id,
+        source_revision_id=revision.id,
+        external_id="menu",
+        record_type="announcement",
+        title="Existing",
+        content="Still active",
+        content_hash="a" * 64,
+        is_current=True,
+        authority=source.authority,
+        last_seen_at=datetime.now(UTC),
+    )
+    db.add(row)
+    await db.commit()
+    return source, job, row
 
-    monkeypatch.setattr("app.knowledge.ingestion._load_records", load)
+
+async def test_empty_parsed_records_do_not_overwrite_existing_records():
+    # A parse that yields nothing means "nothing to ingest", not "the source is
+    # now empty" — a broken selector or a briefly empty page must not retire
+    # every record we already hold. _load_records reports that as None, so this
+    # must exercise the real loader rather than stubbing it out.
     async with SessionLocal() as db:
-        source, revision, job = await _source_and_job(
-            db, kind="curated", config={"records": [{"external_id": "menu"}]}
-        )
-        row = CampusKnowledgeRecord(
-            source_id=source.id,
-            source_revision_id=revision.id,
-            external_id="menu",
-            record_type="announcement",
-            title="Existing",
-            content="Still active",
-            content_hash="a" * 64,
-            is_current=True,
-            authority=source.authority,
-            last_seen_at=datetime.now(UTC),
-        )
-        db.add(row)
-        await db.commit()
-        await process_job(db, job)
+        source, job, row = await _source_with_existing_record(db, config={"records": []})
+        assert await process_job(db, job) == 0
         await db.refresh(row)
         await db.refresh(source)
         await db.refresh(job)
         assert job.status == "completed"
         assert row.is_current
         assert row.removed_at is None
+        assert source.last_error is None
+
+
+async def test_allow_empty_lets_an_empty_parse_retire_existing_records():
+    # The opt-in half of the same branch: a source that declares allow_empty
+    # means an empty parse is authoritative, so the records it used to own are
+    # retired instead of preserved.
+    async with SessionLocal() as db:
+        source, job, row = await _source_with_existing_record(db, config={"records": [], "allow_empty": True})
+        assert await process_job(db, job) == 0
+        await db.refresh(row)
+        await db.refresh(source)
+        await db.refresh(job)
+        assert job.status == "completed"
+        assert not row.is_current
+        assert row.removed_at is not None
         assert source.last_error is None
 
 
