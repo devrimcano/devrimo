@@ -59,8 +59,19 @@ type SubmittedMutation = { term: string; fingerprint: string; idempotencyKey: st
 type PlanningMetadata = {
   status: "complete" | "blocked" | "needs_verification" | "partial" | "unknown";
   blockedCourses: string[];
-  /** Course codes whose section restrictions METU did not return. Never a token. */
+  /** Course codes whose sections METU did not return at all. Never a token. */
   needsVerification: string[];
+  /**
+   * Course codes whose restriction table arrived and could not be decided.
+   *
+   * A different sentence, because it is a different fact. On 2026-09-09 a
+   * student was told four courses "could not be read from METU" on a day the
+   * API logged 8978 successful catalog reads and not one failed section
+   * restriction call: the tables were read, and a rule inside them was one this
+   * product could not evaluate. Blaming METU for our own gap sends the student
+   * to check the wrong place.
+   */
+  undecided: string[];
   /** The curriculum read itself failed, which is not a course-level problem. */
   curriculumUnread: boolean;
   catalogReleaseId: string | null;
@@ -97,6 +108,7 @@ function curriculumPlanningMetadata({
           : "complete",
     blockedCourses,
     needsVerification: [],
+    undecided: [],
     curriculumUnread: unavailable,
     catalogReleaseId,
   };
@@ -236,6 +248,16 @@ function localizedRestrictionReason(
   if (match) return t(`En fazla ${match[1]}. sınıfta olmalısın`, `You must be in year ${match[1]} or below`);
   match = reason.match(/^for students who have not passed it; you have\s+(.+)$/i);
   if (match) return t(`Bu şube dersi geçmemiş öğrenciler için; mevcut notun ${match[1]}`, `This section is for students who have not passed the course; your grade is ${match[1]}`);
+  // METU also writes the grade column as a range over its own scale, and these
+  // four are what the comparator says about one.
+  match = reason.match(/^grades\s+(\S+)-(\S+)\s+only; you have\s+(\S+)$/i);
+  if (match) return t(`Bu şube ${match[1]}-${match[2]} arası nota açık; senin notun ${match[3]}`, `This section is open to grades ${match[1]}-${match[2]}; yours is ${match[3]}`);
+  match = reason.match(/^for students who already hold\s+(\S+)-(\S+)$/i);
+  if (match) return t(`Bu şube dersten ${match[1]}-${match[2]} arası notu olanlar için`, `This section is for students who already hold ${match[1]}-${match[2]}`);
+  match = reason.match(/^grade rule '(.+)' is not one this reader knows$/i);
+  if (match) return t(`Not kuralını çözemedik: ${match[1]}`, `We could not read the grade rule ${match[1]}`);
+  match = reason.match(/^grade\s+(\S+)\s+is not on the\s+(\S+)-(\S+)\s+scale$/i);
+  if (match) return t(`Notun (${match[1]}) ${match[2]}-${match[3]} ölçeğinde yok`, `Your grade (${match[1]}) is not on the ${match[2]}-${match[3]} scale`);
   return reason;
 }
 
@@ -706,6 +728,7 @@ export function SchedulePlanner() {
     status: "unknown",
     blockedCourses: [],
     needsVerification: [],
+    undecided: [],
     curriculumUnread: false,
     catalogReleaseId: null,
   });
@@ -1520,7 +1543,12 @@ export function SchedulePlanner() {
       restrictedCourses = restricted.length;
       unplacedCourses = unplaced.length;
 
-      const metadataNeedsVerification = [...new Set([...unavailable, ...unpublished, ...needsVerification])];
+      // Read failures and unpublished sections are things METU did not give us.
+      // needsVerification is a table we hold and could not decide. They used to
+      // be concatenated and reported as one.
+      const metadataUnread = [...new Set([...unavailable, ...unpublished])];
+      const metadataUndecided = needsVerification.filter((code) => !metadataUnread.includes(code));
+      const metadataNeedsVerification = [...metadataUnread, ...metadataUndecided];
       const blockedCourses = [...new Set([...restricted, ...prerequisiteRejections.map((item) => item.course_code).filter((code): code is string => Boolean(code))])];
       releaseId = solved.state.catalog_release_id ?? catalogReleaseId;
       needsRevalidation = solved.state.needs_revalidation === true;
@@ -1529,7 +1557,8 @@ export function SchedulePlanner() {
       setPlanningMetadata({
         status: metadataNeedsVerification.length ? "needs_verification" : blockedCourses.length ? "blocked" : unplaced.length || !solved.state.alternatives.length ? "partial" : "complete",
         blockedCourses,
-        needsVerification: metadataNeedsVerification,
+        needsVerification: metadataUnread,
+        undecided: metadataUndecided,
         curriculumUnread: false,
         catalogReleaseId: releaseId,
       });
@@ -1909,7 +1938,9 @@ export function SchedulePlanner() {
                                     {unknown ? <span className="text-warning text-[11px] font-medium">{t("Doğrulama bekliyor", "Verification pending")}</span> : null}
                                   </span>
                                   {closed ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
-                                  {unknown ? <span className="bg-warning/10 text-warning mt-1 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs leading-snug"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin kısıt tablosu ODTÜ'den okunamadı; eklersen taslak olarak işaretlenir.", "This section's restriction table could not be read from METU; adding it marks the course as tentative.")}</span> : null}
+                                  {unknown ? <span className="bg-warning/10 text-warning mt-1 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs leading-snug"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{reason
+                                    ? t(`Bu şubeye karar veremedik: ${reason}. Eklersen taslak olarak işaretlenir.`, `We could not decide this section: ${reason}. Adding it marks the course as tentative.`)
+                                    : t("Bu şubenin kısıt tablosu ODTÜ'den gelmedi; eklersen taslak olarak işaretlenir.", "METU did not return this section's restriction table; adding it marks the course as tentative.")}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
                                   <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : isExplicitlyUntimed(section) ? t("Saat yok; kredi planına eklenebilir", "Untimed; can be added to the credit plan") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
                                   {/* Shown as returned by the server. The
@@ -2215,6 +2246,7 @@ function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: Plann
     metadata.status === "unknown" &&
     !metadata.blockedCourses.length &&
     !metadata.needsVerification.length &&
+    !metadata.undecided.length &&
     !metadata.curriculumUnread &&
     !needsRevalidation
   ) {
@@ -2231,7 +2263,9 @@ function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: Plann
       ? pick({ tr: "Bu dersler programa konulamadı", en: "These courses could not be placed" })
       : metadata.status === "partial"
         ? pick({ tr: "Program kısmen oluşturuldu", en: "The schedule is only partly built" })
-        : pick({ tr: "Bazı bilgiler ODTÜ'den okunamadı", en: "Some information could not be read from METU" });
+        : metadata.needsVerification.length || metadata.curriculumUnread
+          ? pick({ tr: "Bazı bilgiler ODTÜ'den okunamadı", en: "Some information could not be read from METU" })
+          : pick({ tr: "Bazı şubelere karar veremedik", en: "Some sections could not be decided" });
   return (
     <div
       className={cn(
@@ -2244,7 +2278,8 @@ function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: Plann
       <p className="font-medium">{label}</p>
       {metadata.blockedCourses.length ? <p>{pick({ tr: `Engellenen dersler: ${metadata.blockedCourses.join(", ")}`, en: `Blocked courses: ${metadata.blockedCourses.join(", ")}` })}</p> : null}
       {metadata.curriculumUnread ? <p>{pick({ tr: "Müfredatın ODTÜ'den okunamadı, bu yüzden havuz eksik olabilir.", en: "Your curriculum could not be read from METU, so the pool may be incomplete." })}</p> : null}
-      {metadata.needsVerification.length ? <p>{pick({ tr: `Şube kısıtları ODTÜ'den okunamadı: ${metadata.needsVerification.join(", ")}. Bu derslerin şubelerine kayıt olabildiğini kendin kontrol et.`, en: `Section restrictions could not be read from METU for ${metadata.needsVerification.join(", ")}. Check yourself that you can register for those sections.` })}</p> : null}
+      {metadata.needsVerification.length ? <p>{pick({ tr: `Şu derslerin şube bilgisi ODTÜ'den gelmedi: ${metadata.needsVerification.join(", ")}. Bu derslerin şubelerine kayıt olabildiğini kendin kontrol et.`, en: `METU did not return section data for ${metadata.needsVerification.join(", ")}. Check yourself that you can register for those sections.` })}</p> : null}
+      {metadata.undecided.length ? <p>{pick({ tr: `Şu derslerin kısıt tablosu okundu ama bir kuralına karar veremedik: ${metadata.undecided.join(", ")}. Şube listesinde hangi kuralın çözülemediği yazıyor; kayıt olabildiğini kendin kontrol et.`, en: `We read the restriction table for ${metadata.undecided.join(", ")} but could not decide one of its rules. The section list says which rule; check yourself that you can register.` })}</p> : null}
       {needsRevalidation ? <p>{pick({ tr: "Katalog sürümü değişti; programı yeniden doğrulamalısın.", en: "The catalog release changed; revalidate this schedule before relying on it." })}</p> : null}
       {metadata.catalogReleaseId ? <p className="font-mono text-[11px] opacity-80">{pick({ tr: "Katalog sürümü", en: "Catalog release" })}: {metadata.catalogReleaseId}</p> : null}
     </div>
