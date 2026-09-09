@@ -65,6 +65,8 @@ async def test_queue_resume_and_overlap(client, monkeypatch):
         assert item.completed_sections == ["general", "publications"]
         run = await db.get(ResearcherImportRun, UUID(run_id))
         assert run.discovery["complete"] and run.options["limit"] == 10
+        assert run.options["_telemetry"]["actor_user_id"] == str(uid)
+        assert run.options["_telemetry"]["request_id"]
         run.status = "completed"
         await db.commit()
     assert (await client.post(BASE + f"/runs/{run_id}/resume", headers=headers, json={})).status_code == 409
@@ -164,9 +166,22 @@ async def test_import_telemetry_success_resume_and_privacy(monkeypatch):
     async with SessionLocal() as db:
         run = await db.get(ResearcherImportRun, UUID(result["run_id"]))
         run.status = "interrupted"
+        run.options = {
+            **run.options,
+            "_telemetry": {
+                "actor_user_id": "actor-1",
+                "organization_id": "organization-1",
+                "request_id": "request-import-1",
+            },
+        }
         await db.commit()
     await service.synchronize(engine, FakeClient(), resume=UUID(result["run_id"]), progress=lambda _: None)
-    assert events[-1][1]["resumed"] is True
+    terminal = events[-1][1]
+    assert terminal["resumed"] is True
+    assert terminal["distinct_id"] == "actor-1"
+    assert terminal["actor_user_id"] == "actor-1"
+    assert terminal["organization_id"] == "organization-1"
+    assert terminal["request_id"] == "request-import-1"
 
 
 async def test_import_telemetry_failure_classification(monkeypatch):

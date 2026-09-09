@@ -10,7 +10,9 @@ from app.academic_catalog import service
 from app.academic_catalog.models import (
     CatalogCourseRevision,
     CatalogDraft,
+    CatalogRestriction,
     CatalogReleaseItem,
+    CatalogSection,
     CatalogSourceObservation,
 )
 from app.academic_catalog.schemas import DraftCreateIn, DraftPatchIn, MeetingPatch
@@ -341,6 +343,101 @@ async def test_detail_sections_do_not_certify_unfetched_section_constraints():
         assert draft.data["component_status"]["constraints"]["verified"] is True
         assert sections["1"]["restrictions_status"] == "verified"
         assert sections["2"].get("restrictions_status", "unknown") == "unknown"
+
+
+async def test_materialization_keeps_child_observation_scope():
+    """A section-scoped fetch must not become provenance for sibling rows."""
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        now = datetime.now(UTC)
+        detail = await service.ingest_observation(
+            db,
+            METU_ID,
+            "get_course_info",
+            {"semester": TERM, "department": "240", "course": COURSE},
+            {
+                "course_code": COURSE,
+                "title": "Scoped provenance",
+                "local_credits": 3,
+                "sections": [
+                    {"section": "1", "schedule": []},
+                    {"section": "2", "schedule": []},
+                ],
+            },
+            now,
+            source_fetched_at=now,
+        )
+        constraints = await service.ingest_observation(
+            db,
+            METU_ID,
+            "get_section_constraints",
+            {"semester": TERM, "department": "240", "course": COURSE, "section": "2"},
+            {
+                "course_code": COURSE,
+                "section": "2",
+                "constraints": [{"kind": "department", "given_department": "240"}],
+            },
+            now + timedelta(seconds=1),
+            source_fetched_at=now + timedelta(seconds=1),
+        )
+        # A later listing refresh carries course metadata only.  It must not
+        # become provenance for the detail sections.
+        await service.ingest_observation(
+            db,
+            METU_ID,
+            "list_program_courses",
+            {"semester": TERM, "department": "240", "course": COURSE},
+            {"courses": [{"course_code": COURSE, "title": "Listing refresh"}]},
+            now + timedelta(seconds=2),
+            source_fetched_at=now + timedelta(seconds=2),
+        )
+        # Legacy constraint snapshots without a section identity are retained
+        # for review but cannot be attributed to every section.
+        await service.ingest_observation(
+            db,
+            METU_ID,
+            "get_section_constraints",
+            {"semester": TERM, "department": "240", "course": COURSE},
+            {
+                "course_code": COURSE,
+                "constraints": [{"kind": "department", "given_department": "240"}],
+            },
+            now + timedelta(seconds=3),
+            source_fetched_at=now + timedelta(seconds=3),
+        )
+        draft = await db.get(CatalogDraft, constraints["draft_id"])
+        assert draft is not None
+        publication = await service.publish_drafts(
+            db,
+            METU_ID,
+            TERM,
+            [draft.id],
+            expected_release_id=None,
+            idempotency_key=str(uuid4()),
+            reason="Check scoped source provenance",
+        )
+        await db.commit()
+
+        revision = await db.get(CatalogCourseRevision, UUID(publication["course_revision_ids"][0]))
+        assert revision is not None
+        sections = {
+            row.section_code: row
+            for row in (
+                await db.scalars(
+                    select(CatalogSection).where(CatalogSection.course_revision_id == revision.id)
+                )
+            ).all()
+        }
+        restriction = await db.scalar(
+            select(CatalogRestriction).where(CatalogRestriction.course_revision_id == revision.id)
+        )
+        detail_observation = UUID(detail["observation_id"])
+        constraints_observation = UUID(constraints["observation_id"])
+        assert sections["1"].source_observation_id == detail_observation
+        assert sections["2"].source_observation_id == detail_observation
+        assert restriction is not None
+        assert restriction.source_observation_id == constraints_observation
 
 
 async def test_real_source_components_publish_as_verified_plan_inputs():

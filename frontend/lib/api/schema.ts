@@ -1986,6 +1986,367 @@ export interface components {
             /** Detail */
             detail?: string | null;
         };
+        /** CatalogCourseDetailOut */
+        CatalogCourseDetailOut: {
+            /** Course Code */
+            course_code: string;
+            /** Term */
+            term?: string | null;
+            /** Department */
+            department?: string | null;
+            /** Title */
+            title?: string | null;
+            /** Credits */
+            credits?: number | null;
+            /** Local Credits */
+            local_credits?: number | null;
+            /** Ects */
+            ects?: number | null;
+            /** Level */
+            level?: string | null;
+            /** Availability */
+            availability?: string | null;
+            /** Campus */
+            campus?: string | null;
+            /**
+             * Is Thesis
+             * @default false
+             */
+            is_thesis?: boolean;
+            /** State */
+            state: string;
+            /** Completeness */
+            completeness?: {
+                [key: string]: unknown;
+            };
+            /** Component Status */
+            component_status?: {
+                [key: string]: unknown;
+            };
+            /** Sections */
+            sections?: {
+                [key: string]: unknown;
+            }[];
+            /** Prerequisite Groups */
+            prerequisite_groups?: {
+                [key: string]: unknown;
+            }[];
+            /** Replacements */
+            replacements?: {
+                [key: string]: unknown;
+            }[];
+            /** Source Observations */
+            source_observations?: {
+                [key: string]: unknown;
+            }[];
+            /** History */
+            history?: {
+                [key: string]: unknown;
+            }[];
+            /** Catalog */
+            _catalog?: {
+                [key: string]: unknown;
+            };
+            /** Issues */
+            issues?: {
+                [key: string]: unknown;
+            }[];
+            /** Field Overrides */
+            field_overrides?: {
+                [key: string]: unknown;
+            };
+            /** Draft Id */
+            draft_id?: string | null;
+            /** Draft Revision */
+            draft_revision?: number | null;
+            /** Draft */
+            draft?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogCourseListOut */
+        CatalogCourseListOut: {
+            /** Courses */
+            courses?: components["schemas"]["CatalogCourseRowOut"][];
+            /**
+             * Total
+             * @default 0
+             */
+            total?: number;
+            /** Release Id */
+            release_id?: string | null;
+            /** Counts */
+            counts?: {
+                [key: string]: number;
+            };
+            /** Term */
+            term?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogCourseRowOut */
+        CatalogCourseRowOut: {
+            /** Course Code */
+            course_code: string;
+            /** Department */
+            department?: string | null;
+            /** Title */
+            title?: string | null;
+            /** Local Credits */
+            local_credits?: number | null;
+            /** Ects */
+            ects?: number | null;
+            /** Level */
+            level?: string | null;
+            /** Availability */
+            availability?: string | null;
+            /** Campus */
+            campus?: string | null;
+            /** State */
+            state: string;
+            /** Completeness */
+            completeness?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Freshness
+             * @default unknown
+             */
+            freshness?: string;
+            /**
+             * Source Conflicts
+             * @default false
+             */
+            source_conflicts?: boolean | number | {
+                [key: string]: unknown;
+            }[];
+            /** Draft Id */
+            draft_id?: string | null;
+            /** Course Revision Id */
+            course_revision_id?: string | null;
+            /**
+             * Section Count
+             * @default 0
+             */
+            section_count?: number;
+            /** Catalog */
+            _catalog?: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogDraftOut */
+        CatalogDraftOut: {
+            /** Id */
+            id: string;
+            /** Revision */
+            revision: number;
+            /** State */
+            state: string;
+            /** Term */
+            term?: string | null;
+            /** Course Code */
+            course_code?: string | null;
+            /** Term Id */
+            term_id: string;
+            /** Course Id */
+            course_id: string;
+            /** Base Revision Id */
+            base_revision_id?: string | null;
+            /** Published Revision Id */
+            published_revision_id?: string | null;
+            /** Data */
+            data?: {
+                [key: string]: unknown;
+            };
+            /** Issues */
+            issues?: {
+                [key: string]: unknown;
+            }[];
+            /** Field Overrides */
+            field_overrides?: {
+                [key: string]: unknown;
+            };
+            /** Reason */
+            reason?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Updated By */
+            updated_by?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogImportJobOut */
+        CatalogImportJobOut: {
+            /** Id */
+            id: string;
+            /** Organization Id */
+            organization_id: string;
+            /** Term */
+            term: string;
+            /** Department */
+            department?: string | null;
+            /** Course Codes */
+            course_codes?: string[];
+            /** Payload */
+            payload?: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /** Checkpoint */
+            checkpoint?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts?: number;
+            /** Lease Until */
+            lease_until?: string | null;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Detail */
+            error_detail?: string | null;
+            /** Dedup Key */
+            dedup_key: string;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Priority
+             * @default 50
+             */
+            priority?: number;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogImportsOut */
+        CatalogImportsOut: {
+            /** Imports */
+            imports?: components["schemas"]["CatalogImportJobOut"][];
+            /**
+             * Total
+             * @default 0
+             */
+            total?: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogOperationOut */
+        CatalogOperationOut: {
+            /** Operation Id */
+            operation_id: string;
+            /** Operation */
+            operation: string;
+            /** Status */
+            status: string;
+            /** Term */
+            term: string;
+            /** Release Id */
+            release_id?: string | null;
+            /** Target Release Id */
+            target_release_id?: string | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Release Number */
+            release_number?: number | null;
+            /** Published Draft Ids */
+            published_draft_ids?: string[];
+            /** Course Revision Ids */
+            course_revision_ids?: string[];
+            /** Course Count */
+            course_count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogReleaseOut */
+        CatalogReleaseOut: {
+            /** Id */
+            id: string;
+            /** Release Number */
+            release_number?: number | null;
+            /** Operation */
+            operation?: string | null;
+            /** Reason */
+            reason?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Expected Release Id */
+            expected_release_id?: string | null;
+            /** Target Release Id */
+            target_release_id?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Active
+             * @default false
+             */
+            active?: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogReleasesOut */
+        CatalogReleasesOut: {
+            /** Releases */
+            releases?: components["schemas"]["CatalogReleaseOut"][];
+            /** Active Release Id */
+            active_release_id?: string | null;
+            /** Term */
+            term?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CatalogSourceObservationOut */
+        CatalogSourceObservationOut: {
+            /** Id */
+            id: string;
+            /** Tool */
+            tool: string;
+            /** Arguments */
+            arguments?: {
+                [key: string]: unknown;
+            };
+            /** Payload */
+            payload?: unknown;
+            /** Candidate Data */
+            candidate_data?: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /** Observed At */
+            observed_at?: unknown;
+            /** Source Fetched At */
+            source_fetched_at?: unknown;
+            /** Parser Version */
+            parser_version?: string | null;
+            /** Issues */
+            issues?: {
+                [key: string]: unknown;
+            }[];
+        } & {
+            [key: string]: unknown;
+        };
         /** ChatCompletionsRequestIn */
         ChatCompletionsRequestIn: {
             /** Idempotency Key */
@@ -6076,9 +6437,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogCourseListOut"];
                 };
             };
             /** @description Validation Error */
@@ -6111,9 +6470,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogCourseDetailOut"];
                 };
             };
             /** @description Validation Error */
@@ -6146,9 +6503,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogDraftOut"];
                 };
             };
             /** @description Validation Error */
@@ -6183,9 +6538,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogDraftOut"];
                 };
             };
             /** @description Validation Error */
@@ -6218,9 +6571,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogOperationOut"];
                 };
             };
             /** @description Validation Error */
@@ -6253,9 +6604,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogOperationOut"];
                 };
             };
             /** @description Validation Error */
@@ -6288,9 +6637,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogImportsOut"];
                 };
             };
             /** @description Validation Error */
@@ -6323,9 +6670,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogImportJobOut"];
                 };
             };
             /** @description Validation Error */
@@ -6357,9 +6702,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogReleasesOut"];
                 };
             };
             /** @description Validation Error */
@@ -6394,9 +6737,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogDraftOut"];
                 };
             };
             /** @description Validation Error */
@@ -6427,9 +6768,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CatalogSourceObservationOut"];
                 };
             };
             /** @description Validation Error */

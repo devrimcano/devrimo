@@ -345,7 +345,7 @@ function formatMinutes(value: number | null): string {
 
 function formFromDetail(detail: CatalogCourseDetail): CourseForm {
   return {
-    title: detail.title,
+    title: detail.title ?? "",
     department: detail.department ?? "",
     credits: (detail.local_credits ?? detail.credits) === null || (detail.local_credits ?? detail.credits) === undefined ? "" : String(detail.local_credits ?? detail.credits),
     ects: detail.ects === null ? "" : String(detail.ects),
@@ -556,9 +556,13 @@ function importProgress(job: CatalogImportJob): { processed: number; total: numb
   const steps = Array.isArray(checkpoint.steps) ? checkpoint.steps : [];
   const offsetValue = Number(checkpoint.offset ?? 0);
   const processed = Number.isFinite(offsetValue) ? Math.max(0, Math.trunc(offsetValue)) : 0;
-  const total = steps.length || (job.status === "completed" ? processed : 0);
+  const totalValue = Number(checkpoint.total ?? steps.length);
+  const total = Number.isFinite(totalValue) && totalValue > 0
+    ? Math.trunc(totalValue)
+    : job.status === "completed" ? processed : 0;
   const current = steps[processed];
-  const phase = current && typeof current === "object" && typeof (current as Record<string, unknown>).tool === "string"
+  const phase = typeof checkpoint.phase === "string" ? checkpoint.phase
+    : current && typeof current === "object" && typeof (current as Record<string, unknown>).tool === "string"
     ? String((current as Record<string, unknown>).tool)
     : job.status;
   return {

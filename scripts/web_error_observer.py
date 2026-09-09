@@ -26,23 +26,61 @@ def classify(message):
     return None
 
 
-def payload(record, category, description, key):
+def deployed_release():
+    """Return the release marker for the tree that owns the observer.
+
+    The journal observer is outside Next.js, so it cannot import the browser's
+    build-time metadata. Deployment writes the same commit to a marker beside
+    the active frontend and at the deployment root; an explicit environment
+    value remains useful for a staged install.
+    """
+    configured = os.environ.get("RELEASE_SHA", "").strip()
+    candidates = []
+    configured_path = os.environ.get("RELEASE_SHA_FILE", "").strip()
+    if configured_path:
+        candidates.append(Path(configured_path))
+    repository_root = Path(__file__).resolve().parents[1]
+    candidates.extend(
+        [
+            repository_root / "frontend/.release-sha",
+            Path("/opt/devrimo/frontend/.release-sha"),
+            repository_root / ".release-sha",
+            Path("/opt/devrimo/.release-sha"),
+        ]
+    )
+    if configured:
+        return configured[:128]
+    for marker in candidates:
+        try:
+            value = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value[:128]
+    return ""
+
+
+def payload(record, category, description, key, release_sha=None):
     timestamp = datetime.fromtimestamp(int(record["__REALTIME_TIMESTAMP"]) / 1_000_000, UTC).isoformat()
+    properties = {
+        "$exception_list": [{"type": "FrontendInfrastructureError", "value": description}],
+        "$exception_fingerprint": category,
+        "$process_person_profile": False,
+        "service": "devrimo-web-journal",
+        "environment": "production",
+        "source": "systemd_journal",
+        "error_category": category,
+    }
+    release = (release_sha if release_sha is not None else deployed_release()).strip()[:128]
+    if release:
+        properties["release"] = release
     return {
         "api_key": key,
         "event": "$exception",
         "distinct_id": "service:devrimo-web",
         "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, record["__CURSOR"])),
         "timestamp": timestamp,
-        "properties": {
-            "$exception_list": [{"type": "FrontendInfrastructureError", "value": description}],
-            "$exception_fingerprint": category,
-            "$process_person_profile": False,
-            "service": "devrimo-web-journal",
-            "environment": "production",
-            "source": "systemd_journal",
-            "error_category": category,
-        },
+        "properties": properties,
     }
 
 

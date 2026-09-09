@@ -24,6 +24,13 @@ deterministic decisions, and protected data.
 
 ## Source lifecycle
 
+Embedding provider configuration requires a super administrator because it
+selects a destination for server-side requests. Campus administrators can
+reindex and activate their organization's existing index generations, but
+cannot change provider settings. The legacy shared planner-catalog import
+also requires a super administrator; the reviewed catalog supports scoped
+campus administrators.
+
 Administrators create a source and immutable draft revisions, preview the
 parsed records, then publish a reviewed revision. Publication atomically makes
 the revision active and queues ingestion. Previous revisions remain available

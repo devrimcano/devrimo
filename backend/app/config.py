@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEVELOPMENT_ENVIRONMENTS = frozenset({"development", "test"})
@@ -33,6 +33,22 @@ _RUNTIME_COMPONENTS = frozenset(
         "retention",
     }
 )
+
+
+def parse_catalog_warm_hours(value: str) -> tuple[int, int] | None:
+    """Parse a local-hour safety window, returning ``None`` when malformed."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split("-")
+    if len(parts) != 2 or not all(part.strip() for part in parts):
+        return None
+    try:
+        low, high = (int(part.strip()) for part in parts)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= low <= 24 and 0 <= high <= 24):
+        return None
+    return low, high
 
 
 class Settings(BaseSettings):
@@ -133,6 +149,13 @@ class Settings(BaseSettings):
         ):
             raise ValueError("SUPABASE_JWKS_URL must match the configured Supabase project's signing-key endpoint")
         return self
+
+    @field_validator("catalog_warm_hours")
+    @classmethod
+    def validate_catalog_warm_hours(cls, value: str) -> str:
+        if parse_catalog_warm_hours(value) is None:
+            raise ValueError("CATALOG_WARM_HOURS must be two local hours in the form H-H (0 through 24)")
+        return value.strip()
 
     avesis_proxy_url: SecretStr | None = None
 
@@ -244,30 +267,24 @@ class Settings(BaseSettings):
     academic_catalog_max_attempts: int = 3
 
     # --- Catalog pre-warming ----------------------------------------------
-    # Course offerings are published per term and then barely move, so the
-    # cache can be filled before students arrive instead of by whoever opens a
-    # department first. These requests hit METU with a real student's
-    # credentials, so the defaults are deliberately timid: roughly three
-    # requests a minute, only in the small hours, with a daily ceiling well
-    # under the 153 Ankara departments so a full term's warm-up is spread over
-    # several nights rather than done in one visible burst.
+    # Configurable application pacing for authenticated source imports.
+    # These defaults are not a verified limit published by METU.
     catalog_warm_enabled: bool = True
     catalog_warm_interval_seconds: float = 20.0
     catalog_warm_jitter_seconds: float = 10.0
-    # Enough for the whole Ankara catalog in one night. At one request every
-    # twenty seconds that is under an hour of traffic inside a six-hour
-    # window, once per term — gentler than a student clicking through the
-    # catalog by hand, and the interval above is what actually paces it. The
-    # ceiling exists to bound a runaway, not to spread the work over days:
-    # until a department is cached, searching course titles cannot see it.
+    # The new catalog worker counts HTTP attempts, including authentication
+    # and redirects; the legacy warmer counts admitted Course Info calls.
+    # Neither is a course count. At the minimum interval, 200
+    # attempts occupy about 67 minutes inside the six-hour window. The ceiling
+    # bounds a runaway while the interval above supplies the pacing; it does
+    # not claim that one night can enumerate the whole catalog.
     catalog_warm_daily_limit: int = 200
-    # Per pass, so the worker returns to its other duties between batches.
-    # How many *courses* one pass may walk, on top of the department listings.
-    # A course is one page plus one per section, so three of them is roughly
-    # twenty requests — about what a student browsing the catalog would do in
-    # the same six hours. Deliberately small: this shares the daily ceiling with
-    # the department listings and must never crowd them out.
+    # Bound scheduled course refresh jobs per pass across all active terms.
     catalog_warm_courses_per_pass: int = 3
+    # Directory discovery is a separate cheap job allowance. Keeping it
+    # bounded prevents a large set of terms from filling every pass while the
+    # course allowance is reserved for detail freshness.
+    catalog_warm_discoveries_per_pass: int = Field(default=1, ge=0, le=100)
     catalog_warm_batch: int = 15
     # Local hours, as "start-end". Overnight, when METU is quiet.
     catalog_warm_hours: str = "1-7"

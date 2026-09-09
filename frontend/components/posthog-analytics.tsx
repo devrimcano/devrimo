@@ -88,13 +88,34 @@ type ProductEventProperties = {
   auth_signed_out: { result: "success" | "error" };
 
   // --- scheduling ---------------------------------------------------------
-  // The planner runs outside TanStack Query, so nothing it did was countable.
-  schedule_plan_completed: {
-    result: "success" | "error";
+  // Curriculum loading and solving are separate phases. Keeping their
+  // terminal outcomes distinct prevents a successful catalog lookup from
+  // being counted as a completed schedule.
+  schedule_curriculum_loaded: {
+    result: "success" | "partial" | "error";
     requested_courses: number;
     returned_courses: number;
     warnings: number;
+    prerequisite_rejections: number;
     duration_seconds: number;
+    curriculum_unavailable: boolean;
+    partial: boolean;
+    catalog_release_id: string | null;
+  };
+  schedule_plan_completed: {
+    result: "success" | "partial" | "blocked" | "needs_verification" | "error";
+    requested_courses: number;
+    scheduled_courses: number;
+    alternatives: number;
+    unavailable_courses: number;
+    unpublished_courses: number;
+    restricted_courses: number;
+    needs_verification_courses: number;
+    unplaced_courses: number;
+    duration_seconds: number;
+    catalog_release_id: string | null;
+    needs_revalidation: boolean;
+    failure_stage: "precondition" | "set_pool" | "solve" | null;
   };
 
   // --- data fetching ------------------------------------------------------

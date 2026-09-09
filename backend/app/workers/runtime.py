@@ -108,7 +108,37 @@ async def _run_pass(kind: str, *, attempt: int, stop_event: asyncio.Event | None
         details = {"retrying": False}
         if isinstance(result, int) and not isinstance(result, bool):
             details["result_count"] = result
-        observation.succeeded(**details)
+        # The catalog pass keeps its historical integer return value for
+        # callers, but also carries a bounded outcome describing the claimed
+        # job. Without inspecting it, a deferred source account or an import
+        # failure is reported as a successful worker pass merely because the
+        # wrapper did not raise.
+        pass_outcome = getattr(result, "outcome", None)
+        if pass_outcome is None:
+            observation.succeeded(**details)
+        else:
+            pass_outcome = str(pass_outcome)[:64]
+            details["pass_outcome"] = pass_outcome
+            job_id = getattr(result, "job_id", None)
+            if job_id:
+                # The claimed catalog job is the useful join key for this
+                # pass. Store it on the observation's reserved field so the
+                # terminal event does not receive duplicate ``job_id`` keys.
+                observation.job_id = str(job_id)[:128]
+            scheduled_count = getattr(result, "scheduled_count", None)
+            if isinstance(scheduled_count, int) and not isinstance(scheduled_count, bool):
+                details["scheduled_count"] = scheduled_count
+            error_code = getattr(result, "error_code", None)
+            if error_code:
+                details["error_code"] = str(error_code)[:128]
+            if pass_outcome in {"deferred", "lease_lost"}:
+                observation.expected_failure(str(error_code or pass_outcome)[:128], **details)
+            elif pass_outcome == "failed":
+                observation.failed_type(str(error_code or "catalog_worker_failed")[:128], **details)
+            elif pass_outcome in {"idle", "progress", "completed"}:
+                observation.succeeded(**details)
+            else:
+                observation.failed_type("unknown_catalog_pass_outcome", **details)
         return True
 
 

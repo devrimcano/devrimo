@@ -77,8 +77,9 @@ A complete rehearsal in an isolated PostgreSQL database produced 2,222 course
 identities, 2,296 drafts and 946 observations, with zero releases and zero
 claimed new source fetches. The admin list used four SQL queries for a page of
 50 courses in a term containing 2,087 courses. It batches related reads to
-avoid a query per course; filtering and pagination currently operate over the
-term summaries in memory.
+avoid a query per course. Following the audit, admin filtering, counts, and
+pagination now run in SQL before page hydration. Public listing filters also
+run in SQL while retaining the existing full matching-list response contract.
 
 ## Source traffic
 
@@ -100,6 +101,19 @@ Default import hours are 01:00–07:00 Europe/Istanbul with a 20–30 second gap
 retain their remaining operations and resume after pacing/budget deferral.
 Authentication errors stop the job; transient failures have bounded backoff.
 Publication is not available to the catalog worker identity.
+
+Department and thesis listings must identify the department and term.
+Detail and rule pages must identify the requested course and term, and restriction pages
+must also identify the section. Numeric form values and labelled page headers
+are checked; human-readable term labels are matched against SAIS's own semester
+selector. Missing or conflicting identity is a failed read, even when the page
+contains a plausible detail or rule table.
+
+Maintenance removes unreferenced failed observations after 30 days. Successful
+observations are eligible after 90 days only when a newer successful answer for
+the exact source request exists. The latest answer and all draft or relationally
+referenced publication evidence remain available. Drafts also conservatively
+protect matching source scope because older draft reference lists were capped.
 
 Jobs rotate eligible campus accounts and use leases with ownership tokens, so
 an expired worker cannot continue writing after another worker claims its job.

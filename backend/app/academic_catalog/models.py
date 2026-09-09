@@ -438,6 +438,10 @@ class CatalogImportJob(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=_json_object_default, server_default=text("'{}'::jsonb"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="queued", server_default="queued", nullable=False)
     checkpoint: Mapped[dict] = mapped_column(JSONB, default=_json_object_default, server_default=text("'{}'::jsonb"), nullable=False)
+    # The operation plan can grow to thousands of source calls. Keep the hot
+    # resume cursor in a scalar column so advancing one step does not rewrite
+    # the full JSONB plan/TOAST value.
+    checkpoint_offset: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Fencing token assigned whenever a worker claims/reclaims a job.  It is

@@ -17,6 +17,7 @@ from app.db.models import (
     CampusKnowledgeRecord,
     CampusSource,
     CampusSourceRevision,
+    AdminRole,
     CourseGroupLink,
     CourseOffering,
     CourseRule,
@@ -704,6 +705,10 @@ async def update_embedding_settings(
     principal: AdminPrincipal = Depends(require(AdminPermission.knowledge_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    # Endpoint selection grants server-side network access. Scoped content
+    # administration does not include approving infrastructure destinations.
+    if principal.role != AdminRole.super_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a super admin can configure embedding providers")
     organization_id = _org(principal)
     row = await db.scalar(
         select(KnowledgeEmbeddingSettings)
@@ -911,6 +916,8 @@ async def replace_academic_catalog(
 
     if get_settings().academic_catalog_reads_enabled or get_settings().academic_catalog_ingestion_enabled:
         return await _import_reviewed_catalog(body, principal, db)
+    if principal.role != AdminRole.super_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "The legacy shared catalog requires a super admin")
     offerings_written = 0
     for item in body.offerings:
         code = "".join(item.course_code.upper().split())
