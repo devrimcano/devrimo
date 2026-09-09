@@ -17,7 +17,7 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const requestedNext = searchParams.get("next") || "/";
   const next = requestedNext.startsWith("/") && !requestedNext.startsWith("//") ? requestedNext : "/";
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [mode, setMode] = useState<"login" | "signup" | "reset">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(
@@ -56,6 +56,34 @@ export function LoginForm() {
     setPending(true);
 
     const supabase = createClient();
+
+    if (mode === "reset") {
+      captureProductEvent("auth_submitted", { mode: "reset" });
+      try {
+        const origin = getSiteUrl() || window.location.origin;
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+          // The same callback the sign-up confirmation already uses, so no new
+          // redirect has to be allowed in the Supabase project.
+          redirectTo: `${origin}/auth/callback?next=${encodeURIComponent("/auth/new-password")}`,
+        });
+        if (resetError) throw resetError;
+        captureProductEvent("auth_result", { mode: "reset", result: "success", reason: null });
+        // Deliberately the same sentence whether or not that address has an
+        // account: this form must not be a way to find out who is registered.
+        setInfo(pick({
+          tr: "Bu adres kayıtlıysa sıfırlama bağlantısını gönderdik. Gelen kutunu ve spam klasörünü kontrol et.",
+          en: "If that address has an account, the reset link is on its way. Check your inbox and spam folder.",
+        }));
+      } catch (caught) {
+        const message = authErrorMessage(caught);
+        captureProductEvent("auth_result", { mode: "reset", result: "error", reason: message.slice(0, 80) });
+        captureError(caught, { source: "auth_reset_request" });
+        setError(message);
+      } finally {
+        setPending(false);
+      }
+      return;
+    }
 
     const authMode = mode === "login" ? "sign-in" : "sign-up";
     // The denominator. Without an attempt event a student who cannot sign in
@@ -113,11 +141,16 @@ export function LoginForm() {
   return (
     <Card className="min-w-0 w-full max-w-md border-0 bg-transparent py-0 shadow-none">
       <CardHeader>
-        <CardTitle className="text-2xl tracking-[-0.04em] sm:text-3xl">{mode === "login" ? pick({ tr: "Tekrar hoş geldin", en: "Welcome back" }) : pick({ tr: "Aramıza katıl", en: "Join Devrimo" })}</CardTitle>
+        <CardTitle className="text-2xl tracking-[-0.04em] sm:text-3xl">{mode === "login" ? pick({ tr: "Tekrar hoş geldin", en: "Welcome back" }) : mode === "reset" ? pick({ tr: "Şifreni sıfırla", en: "Reset your password" }) : pick({ tr: "Aramıza katıl", en: "Join Devrimo" })}</CardTitle>
         <CardDescription>
           {mode === "login"
             ? pick({ tr: "Kaldığın yerden devam etmek için hesabına giriş yap.", en: "Sign in to continue with your personal METU assistant." })
-            : pick({ tr: "Kişisel kampüs asistanını kullanmaya başla.", en: "Create your personal campus assistant." })}
+            : mode === "reset"
+              ? pick({
+                  tr: "E-posta adresini yaz, yeni şifre belirleyeceğin bağlantıyı gönderelim. ODTÜ şifren değişmez.",
+                  en: "Give us your email and we will send a link for setting a new password. Your METU password is untouched.",
+                })
+              : pick({ tr: "Kişisel kampüs asistanını kullanmaya başla.", en: "Create your personal campus assistant." })}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -140,8 +173,24 @@ export function LoginForm() {
               onChange={(event) => setEmail(event.target.value)}
             />
           </div>
+          {mode === "reset" ? null : (
           <div className="flex flex-col gap-2">
-            <Label htmlFor="password">{pick({ tr: "Şifre", en: "Password" })}</Label>
+            <div className="flex items-baseline justify-between gap-3">
+              <Label htmlFor="password">{pick({ tr: "Şifre", en: "Password" })}</Label>
+              {mode === "login" ? (
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground min-h-11 text-xs underline-offset-4 hover:underline"
+                  onClick={() => {
+                    setMode("reset");
+                    setError(null);
+                    setInfo(null);
+                  }}
+                >
+                  {pick({ tr: "Şifreni mi unuttun?", en: "Forgot your password?" })}
+                </button>
+              ) : null}
+            </div>
             <div className="relative">
               <Input
                 id="password"
@@ -176,15 +225,24 @@ export function LoginForm() {
               </p>
             ) : null}
           </div>
+          )}
           {error ? <p id={errorId} role="alert" className="break-words rounded-xl border border-destructive/35 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">{error}</p> : null}
           {info ? <p id={infoId} role="status" aria-live="polite" className="break-words rounded-xl bg-accent px-3 py-2.5 text-sm leading-5 text-accent-foreground">{info}</p> : null}
           <Button type="submit" disabled={pending} className="h-11 w-full shadow-sm">
             {pending ? <Loader2Icon className="animate-spin" /> : null}
-            {mode === "login" ? pick({ tr: "Giriş yap", en: "Sign in" }) : pick({ tr: "Hesap oluştur", en: "Create account" })}
+            {mode === "login"
+              ? pick({ tr: "Giriş yap", en: "Sign in" })
+              : mode === "reset"
+                ? pick({ tr: "Sıfırlama bağlantısı gönder", en: "Send the reset link" })
+                : pick({ tr: "Hesap oluştur", en: "Create account" })}
           </Button>
         </form>
         <p className="mt-4 text-center text-sm text-muted-foreground [&>button]:min-h-11 [&>button]:px-1 [&>button]:py-2">
-          {mode === "login" ? pick({ tr: "Henüz hesabın yok mu?", en: "New to Devrimo?" }) : pick({ tr: "Zaten hesabın var mı?", en: "Already have an account?" })}{" "}
+          {mode === "login"
+            ? pick({ tr: "Henüz hesabın yok mu?", en: "New to Devrimo?" })
+            : mode === "reset"
+              ? pick({ tr: "Şifreni hatırladın mı?", en: "Remembered it?" })
+              : pick({ tr: "Zaten hesabın var mı?", en: "Already have an account?" })}{" "}
           <button
             type="button"
             className="font-medium text-foreground underline-offset-4 hover:underline"

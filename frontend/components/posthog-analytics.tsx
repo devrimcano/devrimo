@@ -82,8 +82,9 @@ type ProductEventProperties = {
   // --- auth ---------------------------------------------------------------
   // Sign-in and sign-out were instrumented for exceptions only, so a student
   // who could not get in produced an issue and no funnel.
-  auth_submitted: { mode: "sign-in" | "sign-up" };
-  auth_result: { mode: "sign-in" | "sign-up"; result: "success" | "error"; reason: string | null };
+  // "reset" is asking for the link; "new-password" is setting one from it.
+  auth_submitted: { mode: "sign-in" | "sign-up" | "reset" | "new-password" };
+  auth_result: { mode: "sign-in" | "sign-up" | "reset" | "new-password"; result: "success" | "error"; reason: string | null };
   auth_signed_out: { result: "success" | "error" };
 
   // --- scheduling ---------------------------------------------------------
