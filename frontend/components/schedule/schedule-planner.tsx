@@ -287,6 +287,17 @@ function sectionNeedsVerification(section: CatalogSection): boolean {
 // The first three digits of a seven-digit code name the department that owns
 // the course. Anything shorter does not say, and the backend resolves it
 // against the catalog rather than assuming the student's own department.
+/** When METU last answered, in the student's own locale. */
+function formatReadAt(value: string | null, locale: string) {
+  if (!value) return locale === "tr" ? "daha önce" : "earlier";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return locale === "tr" ? "daha önce" : "earlier";
+  return new Intl.DateTimeFormat(locale === "tr" ? "tr-TR" : "en-GB", {
+    dateStyle: "long",
+    timeStyle: "short",
+  }).format(parsed);
+}
+
 function owningDepartment(courseCode: string, fallback: string) {
   const digits = courseCode.replace(/\D/g, "");
   return digits.length === 7 ? digits.slice(0, 3) : fallback;
@@ -1212,7 +1223,7 @@ export function SchedulePlanner() {
     // tool per department with a model turn between each. It now reads the
     // curriculum directly and answers in about two.
     const startedAt = Date.now();
-    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; partial?: boolean; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
+    type CurriculumResponse = { courses?: AiPlanCourse[]; warnings?: string[]; curriculum_unavailable?: boolean; partial?: boolean; stale?: boolean; read_at?: string | null; prerequisite_rejections?: PrerequisiteRejection[]; cache_hit?: boolean; duration_ms?: number };
     let response: CurriculumResponse;
     try {
       response = await jsonFetch<CurriculumResponse>("/api/schedule/curriculum", {
@@ -1250,7 +1261,7 @@ export function SchedulePlanner() {
       warnings: warnings.length,
       duration_seconds: (Date.now() - startedAt) / 1000,
     });
-    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, partial: response.partial === true, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
+    return { courses: verified, warnings, unavailable: response.curriculum_unavailable === true, partial: response.partial === true, stale: response.stale === true, readAt: response.read_at ?? null, prerequisiteRejections: response.prerequisite_rejections ?? [], cacheHit: response.cache_hit, durationMs: response.duration_ms };
   }
 
   async function loadRequiredCourses() {
@@ -1277,8 +1288,13 @@ export function SchedulePlanner() {
       // Three outcomes, not two. "We could not read it" used to be phrased as
       // "there is nothing to take", which tells a student their curriculum is
       // clear when in fact nobody looked at it.
+      // A stale answer is not a failure: METU gave these courses, on a date
+      // this notice names. Marking it red would teach the student to distrust
+      // a pool that is almost always still correct.
       setCurriculumFailed(result.unavailable);
-      setCurriculumNotice(result.unavailable
+      setCurriculumNotice(result.stale
+        ? t(`ODTÜ'ye şu anda ulaşılamıyor. ${formatReadAt(result.readAt, locale)} tarihinde okunan müfredatın gösteriliyor — o gün açılan dersler bunlar.${warningText ? ` ${warningText}` : ""}`, `METU cannot be reached right now. Showing the curriculum read on ${formatReadAt(result.readAt, locale)} — these are the courses offered as of then.${warningText ? ` ${warningText}` : ""}`)
+        : result.unavailable
         ? t(`Müfredatın şu anda ODTÜ sisteminden okunamadı, bu yüzden havuz boş. Birkaç dakika sonra tekrar dene; sürerse dersleri aşağıdaki arama kutusundan elle ekleyebilirsin.${warningText ? ` ${warningText}` : ""}`, `Your curriculum could not be read from METU right now, so the pool is empty. Try again in a few minutes; if it keeps failing, add courses by hand from the search box below.${warningText ? ` ${warningText}` : ""}`)
         : result.partial
         ? t(`ODTÜ'den bazı dersler doğrulanamadı. Doğrulanan ${result.courses.length} ders gösteriliyor; bu eksik sonuç önbelleğe alınmadı. Birkaç dakika sonra tekrar dene.${warningText ? ` ${warningText}` : ""}`, `Some courses could not be verified with METU. ${result.courses.length} verified courses are shown; this partial result was not cached. Try again in a few minutes.${warningText ? ` ${warningText}` : ""}`)
