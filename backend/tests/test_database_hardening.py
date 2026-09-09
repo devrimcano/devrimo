@@ -7,8 +7,10 @@ from pathlib import Path
 
 import jwt
 import pytest
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
@@ -18,6 +20,14 @@ from app.db.engine import database_pool_options, postgres_connect_args
 from app.db.release_roles import provision_release_roles
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_migration_graph_has_one_head_and_revision_ids_fit_version_table():
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    scripts = ScriptDirectory.from_config(config)
+    assert scripts.get_heads() == ["0036_assistant_headroom"]
+    assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 
 def test_public_migration_metadata_is_denied_even_with_supabase_default_grants():
@@ -102,6 +112,31 @@ def test_the_api_login_can_carry_two_generations_of_its_pool():
             granted = conn.scalar(text("SELECT rolconnlimit FROM pg_roles WHERE rolname=:name"), {"name": login})
             pool = database_pool_options(get_settings())
             assert granted >= 2 * (pool["pool_size"] + pool["max_overflow"])
+            transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_the_assistant_login_can_carry_api_and_two_worker_generations():
+    url = make_url(get_settings().database_url).set(drivername="postgresql+psycopg")
+    engine = create_engine(url, connect_args=postgres_connect_args(url))
+    login = "devrimo_assistant_restart_probe"
+    try:
+        with engine.connect() as conn, conn.begin() as transaction:
+            conn.execute(text(
+                f"CREATE ROLE {login} LOGIN PASSWORD 'probe' "
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+            ))
+            conn.execute(text(f"GRANT devrimo_assistant TO {login}"))
+            migration = runpy.run_path(str(ROOT / "alembic/versions/0036_assistant_headroom.py"))
+            with Operations.context(MigrationContext.configure(conn)):
+                migration["upgrade"]()
+            granted = conn.scalar(text("SELECT rolconnlimit FROM pg_roles WHERE rolname=:name"), {"name": login})
+            assistant = Settings(_env_file=None, database_runtime_role="assistant")
+            worker_pool = database_pool_options(assistant)
+            agno_pool = database_pool_options(assistant, agno=True)
+            worker_generation = worker_pool["pool_size"] + worker_pool["max_overflow"] + agno_pool["pool_size"]
+            assert granted >= agno_pool["pool_size"] + 2 * worker_generation
             transaction.rollback()
     finally:
         engine.dispose()
