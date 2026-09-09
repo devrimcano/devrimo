@@ -228,9 +228,12 @@ async def test_an_unreachable_sais_serves_the_last_curriculum_it_gave(monkeypatc
     assert response["stale"] is True
     assert response["curriculum_unavailable"] is False
     assert response["read_at"] == "2026-09-08T19:12:00+00:00"
-    # METU's own sentence still leads the warnings, so the planner can say why
-    # it is showing an older answer.
-    assert "semester form was not found" in response["warnings"][0]
+    # The read-failure sentence leads the warnings, so the planner can say why it
+    # is showing an older answer. It is the sanitized one on purpose: the exact
+    # MCP/parser text stays in the server log, which is what
+    # `_curriculum_read_warning` exists to enforce.
+    assert response["warnings"][0].startswith("Your curriculum could not be read from METU:")
+    assert len(response["warnings"]) == 1
 
 
 async def test_a_complete_curriculum_is_written_to_both_cache_keys(monkeypatch):
