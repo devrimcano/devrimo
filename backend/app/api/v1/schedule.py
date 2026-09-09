@@ -13,7 +13,6 @@ a 409. It now reads the student's own curriculum listing directly.
 import asyncio
 import re
 import time
-from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -110,11 +109,6 @@ class CurriculumPlanResponse(BaseModel):
     # remain useful, but this answer must not look complete or enter the cache.
     partial: bool = False
     prerequisite_rejections: list[PrerequisiteRejectionOut] = Field(default_factory=list)
-    # When METU could not be reached, the last curriculum it did give this
-    # student is served instead of an empty screen. It is real data with a date
-    # on it, so the planner can say which and the student can judge for himself.
-    stale: bool = False
-    read_at: str | None = None
     source: str
     cache_hit: bool
     duration_ms: int
@@ -1082,29 +1076,6 @@ def _curriculum_cache_key(
     return stable_digest(identity), owner_hash
 
 
-# How long the last curriculum METU actually gave this student stays usable when
-# METU cannot be reached. It is not a second copy of the six-hour cache above:
-# that one is keyed by the transcript snapshot, so every academic refresh moves
-# it and the previous answer becomes unreachable. This one is keyed by the
-# student, the department and the term, so it is still there on the evening SAIS
-# is down. A curriculum changes when the registrar republishes a programme, not
-# hourly, so a month is honest as long as the answer carries the date it was read.
-_CURRICULUM_FALLBACK_SECONDS = 30 * 24 * 60 * 60
-
-
-def _curriculum_fallback_key(user_id, department: str, semester: str) -> tuple[str, str]:
-    """The key for the last complete curriculum this student was given."""
-    owner_hash = owner_digest(user_id)
-    identity = {
-        "version": _CURRICULUM_VERSION,
-        "owner": owner_hash,
-        "department": department,
-        "semester": semester.strip(),
-        "fallback": True,
-    }
-    return stable_digest(identity), owner_hash
-
-
 def _curriculum_year(value: Any) -> int:
     """The curriculum year a row is scheduled for; unknown sorts last."""
     digits = re.sub(r"[^0-9]", "", str(value or ""))[:1]
@@ -1295,7 +1266,6 @@ async def curriculum_plan(
     )
     department = await _resolve_department(db, user.id, body.department)
     cache_key, owner_hash = _curriculum_cache_key(user.id, department, body, snapshot)
-    fallback_key, _ = _curriculum_fallback_key(user.id, department, body.semester)
     cached = await _cached_plan(cache_key)
     if cached is not None:
         return {
@@ -1315,24 +1285,6 @@ async def curriculum_plan(
         # to fill the pool, and failing the request takes down a screen where
         # the student could still search for courses by hand.
         logger.info("curriculum_plan_unavailable", user_id=str(user.id), detail=str(exc.detail))
-        # A curriculum this student was already given is a better answer than an
-        # empty screen, and it is not invented data: METU gave it, on a date this
-        # response carries. Returning nothing while holding a good copy is what
-        # made one unreachable SAIS evening look like "you have no courses".
-        stale = await _cached_plan(fallback_key)
-        if stale and stale.get("courses"):
-            logger.info("curriculum_plan_served_stale", user_id=str(user.id))
-            return {
-                **stale,
-                "warnings": [
-                    _curriculum_read_warning(exc.detail),
-                    *[w for w in stale.get("warnings", []) if isinstance(w, str)],
-                ],
-                "curriculum_unavailable": False,
-                "stale": True,
-                "cache_hit": True,
-                "duration_ms": round((time.monotonic() - started_at) * 1000),
-            }
         return {
             "courses": [],
             "warnings": [_curriculum_read_warning(exc.detail)],
@@ -1350,10 +1302,6 @@ async def curriculum_plan(
         "prerequisite_rejections": prerequisite_rejections,
         "partial": not complete,
         "source": "sais_curriculum",
-        # Stamped on the way out so a copy served months later can say when METU
-        # actually answered, rather than implying it answered just now.
-        "read_at": datetime.now(UTC).isoformat(),
-        "stale": False,
         "cache_hit": False,
         "duration_ms": round((time.monotonic() - started_at) * 1000),
     }
@@ -1369,14 +1317,6 @@ async def curriculum_plan(
             response,
             namespace=_CURRICULUM_NAMESPACE,
             ttl_seconds=_PLAN_CACHE_SECONDS,
-            owner_hash=owner_hash,
-        )
-        # The same answer under the key that outlives an academic refresh.
-        await write_cached(
-            fallback_key,
-            response,
-            namespace=_CURRICULUM_NAMESPACE,
-            ttl_seconds=_CURRICULUM_FALLBACK_SECONDS,
             owner_hash=owner_hash,
         )
     return response

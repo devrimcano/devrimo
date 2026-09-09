@@ -2129,13 +2129,6 @@ export interface components {
             partial?: boolean;
             /** Prerequisite Rejections */
             prerequisite_rejections?: components["schemas"]["PrerequisiteRejectionOut"][];
-            /**
-             * Stale
-             * @default false
-             */
-            stale?: boolean;
-            /** Read At */
-            read_at?: string | null;
             /** Source */
             source: string;
             /** Cache Hit */
