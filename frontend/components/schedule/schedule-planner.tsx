@@ -57,21 +57,20 @@ type PrerequisiteRejection = {
 };
 type SubmittedMutation = { term: string; fingerprint: string; idempotencyKey: string };
 type PlanningMetadata = {
-  status: "complete" | "blocked" | "needs_verification" | "partial" | "unknown";
+  status: "complete" | "blocked" | "needs_verification" | "partial";
   blockedCourses: string[];
-  /** Course codes whose section restrictions METU did not return. Never a token. */
   needsVerification: string[];
-  /** The curriculum read itself failed, which is not a course-level problem. */
-  curriculumUnread: boolean;
   catalogReleaseId: string | null;
 };
 
 function curriculumPlanningMetadata({
+  warnings,
   unavailable,
   partial,
   prerequisiteRejections,
   catalogReleaseId,
 }: {
+  warnings: string[];
   unavailable: boolean;
   partial: boolean;
   prerequisiteRejections: PrerequisiteRejection[];
@@ -80,24 +79,11 @@ function curriculumPlanningMetadata({
   const blockedCourses = prerequisiteRejections
     .map((item) => item.course_code?.trim())
     .filter((code): code is string => Boolean(code));
-  // A warning is not a verification failure. The curriculum endpoint returns
-  // notes as well as failures - "kept HIST2201, the variant Turkish citizens
-  // take" is a note - and treating any of them as unverified turned the status
-  // amber on a run where everything worked, with the internal token
-  // "curriculum" printed where a course code goes. Only a failed read
-  // (`unavailable`) or a pool the broker could not finish (`partial`) says
-  // anything about whether the plan can be trusted.
+  const needsVerification = unavailable || partial || warnings.length > 0 ? ["curriculum"] : [];
   return {
-    status: unavailable
-      ? "needs_verification"
-      : blockedCourses.length
-        ? "blocked"
-        : partial
-          ? "partial"
-          : "complete",
+    status: unavailable || warnings.length > 0 ? "needs_verification" : blockedCourses.length ? "blocked" : partial ? "partial" : "complete",
     blockedCourses,
-    needsVerification: [],
-    curriculumUnread: unavailable,
+    needsVerification,
     catalogReleaseId,
   };
 }
@@ -654,14 +640,10 @@ export function SchedulePlanner() {
   const [catalogReleaseId, setCatalogReleaseId] = useState<string | null>(null);
   const [academicSnapshotFetchedAt, setAcademicSnapshotFetchedAt] = useState<string | null>(null);
   const [needsRevalidation, setNeedsRevalidation] = useState(false);
-  // "unknown" until something is actually planned. The initial value was
-  // "needs_verification", so a restored pool put an amber warning on screen
-  // before the planner had done anything at all.
   const [planningMetadata, setPlanningMetadata] = useState<PlanningMetadata>({
-    status: "unknown",
+    status: "needs_verification",
     blockedCourses: [],
     needsVerification: [],
-    curriculumUnread: false,
     catalogReleaseId: null,
   });
   const [mobileDay, setMobileDay] = useState<Day>("Mon");
@@ -935,7 +917,7 @@ export function SchedulePlanner() {
             `Section ${section} does not meet its restrictions; added because restrictions are ignored.`));
           next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
         } else if (!verdict || verdict.eligible === null) {
-          toast.warning(t(`Şube ${section} için kısıt tablosu okunamadı; taslak olarak eklendi.`,
+          toast.warning(t(`Şube ${section} için uygunluk doğrulanamadı; taslak olarak eklendi.`,
             `Eligibility for section ${section} could not be verified; it was added as tentative.`));
           next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
         } else {
@@ -1264,6 +1246,7 @@ export function SchedulePlanner() {
       setCatalogCourses(result.courses);
       setPrerequisiteRejections(result.prerequisiteRejections);
       setPlanningMetadata(curriculumPlanningMetadata({
+        warnings: result.warnings,
         unavailable: result.unavailable,
         partial: result.partial,
         prerequisiteRejections: result.prerequisiteRejections,
@@ -1410,14 +1393,13 @@ export function SchedulePlanner() {
         status: metadataNeedsVerification.length ? "needs_verification" : blockedCourses.length ? "blocked" : unplaced.length || !solved.state.alternatives.length ? "partial" : "complete",
         blockedCourses,
         needsVerification: metadataNeedsVerification,
-        curriculumUnread: false,
         catalogReleaseId: solved.state.catalog_release_id ?? catalogReleaseId,
       });
 
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
       if (restricted.length) toast.warning(t(`${restricted.join(", ")} için soyadına açık şube yok. Kısıtları yok sayarak tekrar dene.`, `No section of ${restricted.join(", ")} is open to your surname. Try again with restrictions ignored.`));
-      if (needsVerification.length) toast.warning(t(`${needsVerification.join(", ")} için şube kısıtlarını ODTÜ'den okuyamadım; kayıt olabildiğini kendin kontrol et.`, `I could not read the section restrictions for ${needsVerification.join(", ")} from METU; check yourself that you can register.`));
+      if (needsVerification.length) toast.warning(t(`${needsVerification.join(", ")} için katalog uygunluğu henüz doğrulanmadı; oluşturulan programı kontrol et.`, `Catalog eligibility for ${needsVerification.join(", ")} is not verified yet; review the generated plan.`));
       if (!solved.state.alternatives.length) {
         toast.error(t(
           "Saat bilgisi olan tüm dersleri içeren bir program bulunamadı. Boş gün veya şube kısıtı tercihlerini değiştirip tekrar dene.",
@@ -1509,7 +1491,7 @@ export function SchedulePlanner() {
     if (check.allowed === false && ignoreConstraints) {
       toast.warning(t(`Şube ${section.section} kısıtları yok sayıldığı için taslak olarak eklendi.`, `Section ${section.section} was added as tentative because its restrictions are being ignored.`));
     } else if (check.allowed === null) {
-      toast.warning(t(`Şube ${section.section} için kısıt tablosu okunamadı; taslak olarak eklendi.`, `The restriction table for section ${section.section} could not be read; it was added as tentative.`));
+      toast.warning(t(`Şube ${section.section} için uygunluk doğrulanamadı; taslak olarak eklendi.`, `Eligibility for section ${section.section} could not be verified; it was added as tentative.`));
     }
     // Eligibility is checked by the canonical owner when this state is saved.
     // The browser may show the catalog verdict, but it cannot make the
@@ -1763,7 +1745,7 @@ export function SchedulePlanner() {
                                     {unknown ? <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{t("Doğrulama bekliyor", "Verification pending")}</span> : null}
                                   </span>
                                   {closed ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
-                                  {unknown ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin kısıt tablosu ODTÜ'den okunamadı; eklersen taslak olarak işaretlenir.", "This section's restriction table could not be read from METU; adding it marks the course as tentative.")}</span> : null}
+                                  {unknown ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin uygunluğu henüz doğrulanmadı; eklenirse taslak olarak işaretlenir.", "This section's eligibility is not verified yet; adding it marks the course as tentative.")}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
                                   <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : isExplicitlyUntimed(section) ? t("Saat yok; kredi planına eklenebilir", "Untimed; can be added to the credit plan") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
                                   {/* Shown as returned by the server. The
@@ -2003,30 +1985,13 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
 
 function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: PlanningMetadata; needsRevalidation: boolean }) {
   const { pick } = useLocale();
-  // Nothing has been planned this session and nothing is outstanding: say
-  // nothing. A status box that appears before the student acts is noise, and an
-  // amber one is a false alarm.
-  if (
-    metadata.status === "unknown" &&
-    !metadata.blockedCourses.length &&
-    !metadata.needsVerification.length &&
-    !metadata.curriculumUnread &&
-    !needsRevalidation
-  ) {
-    return null;
-  }
   const blocked = metadata.status === "blocked";
   const uncertain = metadata.status === "needs_verification" || metadata.status === "partial" || needsRevalidation;
-  // Four states, four sentences. "Planlama doğrulama bekliyor" was the
-  // fallback for everything that was not complete or blocked, so a partial plan
-  // and an unread curriculum arrived under the same vague heading.
   const label = metadata.status === "complete"
     ? pick({ tr: "Planlama tamamlandı", en: "Planning complete" })
     : blocked
-      ? pick({ tr: "Bu dersler programa konulamadı", en: "These courses could not be placed" })
-      : metadata.status === "partial"
-        ? pick({ tr: "Program kısmen oluşturuldu", en: "The schedule is only partly built" })
-        : pick({ tr: "Bazı bilgiler ODTÜ'den okunamadı", en: "Some information could not be read from METU" });
+      ? pick({ tr: "Planlama engellendi", en: "Planning blocked" })
+      : pick({ tr: "Planlama doğrulama bekliyor", en: "Planning needs verification" });
   return (
     <div
       className={cn(
@@ -2038,8 +2003,7 @@ function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: Plann
     >
       <p className="font-medium">{label}</p>
       {metadata.blockedCourses.length ? <p>{pick({ tr: `Engellenen dersler: ${metadata.blockedCourses.join(", ")}`, en: `Blocked courses: ${metadata.blockedCourses.join(", ")}` })}</p> : null}
-      {metadata.curriculumUnread ? <p>{pick({ tr: "Müfredatın ODTÜ'den okunamadı, bu yüzden havuz eksik olabilir.", en: "Your curriculum could not be read from METU, so the pool may be incomplete." })}</p> : null}
-      {metadata.needsVerification.length ? <p>{pick({ tr: `Şube kısıtları ODTÜ'den okunamadı: ${metadata.needsVerification.join(", ")}. Bu derslerin şubelerine kayıt olabildiğini kendin kontrol et.`, en: `Section restrictions could not be read from METU for ${metadata.needsVerification.join(", ")}. Check yourself that you can register for those sections.` })}</p> : null}
+      {metadata.needsVerification.length ? <p>{pick({ tr: `Doğrulanması gerekenler: ${metadata.needsVerification.join(", ")}`, en: `Needs verification: ${metadata.needsVerification.join(", ")}` })}</p> : null}
       {needsRevalidation ? <p>{pick({ tr: "Katalog sürümü değişti; programı yeniden doğrulamalısın.", en: "The catalog release changed; revalidate this schedule before relying on it." })}</p> : null}
       {metadata.catalogReleaseId ? <p className="font-mono text-[11px] opacity-80">{pick({ tr: "Katalog sürümü", en: "Catalog release" })}: {metadata.catalogReleaseId}</p> : null}
     </div>
