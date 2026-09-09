@@ -198,6 +198,32 @@ def _admits_a_pass(row: Any) -> bool:
 
 _OPEN_GRADE_BANDS = ("herkesalabilir", "everyone", "everybody", "all")
 
+# METU's letter scale, best to worst, as the registrar publishes it: AA 4.00
+# down to NA 0.00. The eligibility table writes its grade column two ways. One
+# is Turkish prose ("Hiç almayanlar alabilir"). The other is a pair of letters,
+# and a pair means every grade between them inclusive - "BA" to "NA" is the
+# whole scale except AA. Of the grade columns in the catalog cache, about a
+# third are written the second way, and until now every one of them was read as
+# "unfamiliar label, refuse to decide", which is what put courses like MATH 219
+# in front of students as "restrictions could not be read".
+_GRADE_SCALE = ("AA", "BA", "BB", "CB", "CC", "DC", "DD", "FD", "FF", "NA")
+_GRADE_INDEX = {grade: index for index, grade in enumerate(_GRADE_SCALE)}
+
+
+def _grade_letter(value: Any) -> str:
+    """The bare letter pair a grade column holds, or "" for anything else."""
+    letters = "".join(char for char in tr_upper(str(value or "").strip()) if char.isalpha())
+    return letters if letters in _GRADE_INDEX else ""
+
+
+def _grade_range(row: Any) -> tuple[str, str] | None:
+    """The two ends of a letter-range grade column, best end first."""
+    start = _grade_letter(_row_value(row, "start_grade", "startGrade"))
+    end = _grade_letter(_row_value(row, "end_grade", "endGrade"))
+    if not start or not end:
+        return None
+    return tuple(sorted((start, end), key=_GRADE_INDEX.__getitem__))
+
 
 def _grade_band_state(row: Any) -> bool | None:
     """Return open/closed/unknown for a registrar grade-band label."""
@@ -377,9 +403,30 @@ def _admits(
         if max_year is not None and max_year < 95 and year > max_year:
             return Verdict(False, f"year {int(max_year)} and below", wanted)
 
+    # A letter range names the grades a student may already hold. It is not the
+    # same statement as "Hiç almayanlar alabilir", which names people who hold
+    # none - and tables carry both kinds of row side by side, one per case, so a
+    # student who has never taken the course is admitted by the *other* row
+    # rather than by this one. Reading a range as "everyone" would hand a
+    # student a section the registrar wrote for repeats.
+    letter_range = _grade_range(match)
+    if letter_range is not None:
+        best, worst = letter_range
+        held = grade_token(prior_grade)
+        if not held:
+            return Verdict(False, f"for students who already hold {best}-{worst}", wanted)
+        if held not in _GRADE_INDEX:
+            return Verdict(None, f"grade {held} is not on the {best}-{worst} scale", wanted)
+        if not _GRADE_INDEX[best] <= _GRADE_INDEX[held] <= _GRADE_INDEX[worst]:
+            return Verdict(False, f"grades {best}-{worst} only; you have {held}", wanted)
+        return Verdict(True, "", wanted)
+
     grade_band = _grade_band_state(match)
     if grade_band is None:
-        return Verdict(None, "grade restriction could not be verified", wanted)
+        start = _row_value(match, "start_grade", "startGrade")
+        end = _row_value(match, "end_grade", "endGrade")
+        label = f"{start}-{end}".strip("-")
+        return Verdict(None, f"grade rule {label!r} is not one this reader knows", wanted)
     if not grade_band:
         # The SAIS transcript is the source of truth for this dimension. A
         # missing row means the student has not taken the course; only an

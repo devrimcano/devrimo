@@ -62,8 +62,16 @@ def test_a_second_row_can_admit_where_the_first_refuses():
 
 
 def test_an_unrecognised_grade_band_is_unknown():
-    """An unfamiliar registrar label cannot certify a section."""
-    rows = [{"given_dept": "EE", "start_grade": "AA", "end_grade": "CC"}]
+    """An unfamiliar registrar label still cannot certify a section.
+
+    This used to assert the same of "AA"-"CC", on the grounds that a pair of
+    letters was not a label this reader knew. It is: METU publishes the scale
+    AA, BA, BB, CB, CC, DC, DD, FD, FF, NA, and a pair names every grade
+    between its ends. That case is now covered by
+    test_a_letter_range_grade_band_is_read_as_a_range; what remains unknown is
+    a token that is not on the scale at all.
+    """
+    rows = [{"given_dept": "EE", "start_grade": "U", "end_grade": "NA"}]
     assert evaluate(rows, department="EE", prior_grade="BB").eligible is None
 
 
@@ -163,3 +171,72 @@ def test_a_wildcard_row_still_applies_its_other_bands():
     rows = [{"given_dept": "ALL", "start_char": "AA", "end_char": "DZ"}]
     assert evaluate(rows, department="EE", surname="BA").eligible
     assert not evaluate(rows, department="EE", surname="TA").eligible
+
+
+# MATH 219 section 9, exactly as SAIS returned it on 2026-09-09. Three
+# departments, three different ways of writing the grade column, in one table.
+MATH219_SECTION_9 = [
+    {
+        "given_dept": "AEE", "start_char": "AA", "end_char": "ZZ",
+        "min_cgpa": "0.00", "max_cgpa": "4.00", "min_year": "0", "max_year": "95",
+        "start_grade": "BA", "end_grade": "NA",
+    },
+    {
+        "given_dept": "BME", "start_char": "AA", "end_char": "ZZ",
+        "min_cgpa": "0.00", "max_cgpa": "4.00", "min_year": "0", "max_year": "95",
+        "start_grade": "Hic almayanlar veya Basarisizlar (FD ve alti)",
+        "end_grade": "Hic almayanlar veya Basarisizlar (FD ve alti)",
+    },
+    {
+        "given_dept": "EE", "start_char": "DA", "end_char": "KV",
+        "min_cgpa": "0.00", "max_cgpa": "4.00", "min_year": "0", "max_year": "95",
+        "start_grade": "Herkes alabilir", "end_grade": "Herkes alabilir",
+    },
+]
+
+
+def verdict_for(rows, dept, **kwargs):
+    return evaluate(rows, department=dept, surname=kwargs.pop("surname", "AA"),
+                    cgpa=kwargs.pop("cgpa", 3.0), year=kwargs.pop("year", 3), **kwargs)
+
+
+@pytest.mark.parametrize(
+    "held,expected",
+    [
+        # BA-NA is every grade from BA down to NA: the registrar's way of
+        # saying "unless you already have AA".
+        ("BB", True),
+        ("NA", True),
+        ("FF", True),
+        ("AA", False),
+        # Nobody's grade at all is not a grade inside the range. This row is
+        # written for students repeating the course; the ones who have never
+        # taken it are admitted by a different row, where the table has one.
+        (None, False),
+    ],
+)
+def test_a_letter_range_grade_band_is_read_as_a_range(held, expected):
+    assert verdict_for(MATH219_SECTION_9, "AEE", prior_grade=held).eligible is expected
+
+
+def test_a_letter_range_no_longer_reports_the_table_as_unreadable():
+    """This is what put MATH 219 in front of students as "could not be read"."""
+    verdict = verdict_for(MATH219_SECTION_9, "AEE", prior_grade="CC")
+    assert verdict.eligible is not None
+    assert "could not" not in verdict.reason
+
+
+def test_the_other_two_spellings_still_mean_what_they_meant():
+    # "Never taken or failed" admits someone who has never taken it.
+    assert verdict_for(MATH219_SECTION_9, "BME", prior_grade=None).eligible is True
+    assert verdict_for(MATH219_SECTION_9, "BME", prior_grade="BB").eligible is False
+    # "Everyone may take it" still admits everyone in the surname range.
+    assert verdict_for(MATH219_SECTION_9, "EE", surname="EM", prior_grade="AA").eligible is True
+
+
+def test_a_grade_label_outside_the_scale_stays_undecided_and_names_itself():
+    """'U' is not on the AA-NA scale, and guessing at it is not allowed."""
+    rows = [dict(MATH219_SECTION_9[0], start_grade="U", end_grade="U")]
+    verdict = verdict_for(rows, "AEE", prior_grade="CC")
+    assert verdict.eligible is None
+    assert "U-U" in verdict.reason

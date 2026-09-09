@@ -206,6 +206,26 @@ def _find_value(value: Any, keys: set[str], exact_only: set[str] = frozenset()) 
     return _match_value(value, wanted, exact=False) if wanted else None
 
 
+def _label_names(value: Any, depth: int = 0) -> set[str]:
+    """Every label a payload carries, and never a value it carries.
+
+    Diagnostics for a lookup that found nothing. A transcript is the student's
+    own record, so what gets logged is the shape of the answer - the words SAIS
+    uses for its columns - and nothing that was written under them.
+    """
+    names: set[str] = set()
+    if depth > 4:
+        return names
+    if isinstance(value, dict):
+        for key, child in value.items():
+            names.add(str(key))
+            names |= _label_names(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value[:3]:
+            names |= _label_names(child, depth + 1)
+    return names
+
+
 # The weekly schedule packs the course code, the section and the room into a
 # single cell — "2360130 - 1 - P1" — and none of the keys the transcript uses
 # appear on those rows. Every enrolled course was therefore fetched from SAIS
@@ -623,6 +643,21 @@ async def refresh_from_sais(
         _find_value(transcript, {"total_credits", "completed_credits", "credits_completed", "toplam_kredi"})
     )
     cgpa = _number(_find_value(transcript, {"cgpa", "cumulative_gpa", "gpa", "genel_not_ortalamasi"}))
+    # Every stored snapshot on production carries zero credits, which means
+    # neither label above has ever matched and the CGPA the eligibility
+    # comparator asks for - points divided by credits - has never existed. A
+    # section restricted to a real CGPA band is therefore undecidable for every
+    # student, and that is one of the ways a course reaches them as "restriction
+    # could not be read". The labels SAIS actually uses are reported here, names
+    # only, so the next refresh names the one to add rather than leaving the
+    # miss silent behind a column default of zero.
+    if not credits or not cgpa:
+        logger.warning(
+            "sais_transcript_totals_missing",
+            found_credits=bool(credits),
+            found_cgpa=bool(cgpa),
+            labels=sorted(_label_names(transcript))[:40],
+        )
     async with SessionLocal() as db:
         if not await lock_current_academic_data_fence(db, user_id, expected_fence):
             await db.rollback()
