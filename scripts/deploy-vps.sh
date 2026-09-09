@@ -327,13 +327,22 @@ fi
 python3 "$frontend_tool" switch --current "$DEPLOY_DIR/frontend" --release "$frontend_release"
 sudo /usr/bin/systemctl start devrimo-web.service
 
-for attempt in {1..30}; do
+# Ninety seconds, not sixty: the API now refuses to start rather than hang on a
+# slow database, so this window has to cover one crash and one systemd restart.
+unhealthy=""
+for attempt in {1..45}; do
   api_ok=false
   web_ok=false
   worker_ok=false
   curl -fsS http://127.0.0.1:8000/health >/dev/null && api_ok=true
   python3 "$frontend_tool" check-http && web_ok=true
   systemctl is-active --quiet "${worker_units[@]}" && worker_ok=true
+  # Which check is failing, so the log says "the API never came up" instead of
+  # rolling the frontend back and leaving the reason to be guessed at.
+  unhealthy=""
+  "$api_ok" || unhealthy="$unhealthy api"
+  "$web_ok" || unhealthy="$unhealthy web"
+  "$worker_ok" || unhealthy="$unhealthy workers"
   if "$api_ok" && "$web_ok" && "$worker_ok"; then
     trap - ERR
     printf '%s\n' "$DEPLOY_SHA" > "$DEPLOY_DIR/.deployed-sha"
@@ -352,6 +361,7 @@ for attempt in {1..30}; do
   sleep 2
 done
 
+echo "::error::deployment never became healthy; still failing:$unhealthy"
 sudo /usr/bin/systemctl status devrimo-api.service --no-pager || true
 sudo /usr/bin/systemctl status devrimo-web.service --no-pager || true
 sudo /usr/bin/systemctl status "${worker_units[@]}" --no-pager || true

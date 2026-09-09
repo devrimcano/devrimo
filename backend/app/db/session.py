@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
@@ -28,6 +29,16 @@ def get_session_factory(owner: str):
     return SessionLocal
 
 
+# A deploy restarts the API and seven workers within seconds of one another,
+# and they all reach for the same pooled database. On 2026-09-09 one of those
+# connections was accepted and then never answered: the API sat in this
+# validation for twelve minutes, alive but not listening, while systemd - which
+# only watches for a process that exits - saw nothing wrong. A bounded wait
+# turns that hang into a crash, and Restart=always turns the crash into a
+# retry five seconds later.
+STARTUP_VALIDATION_TIMEOUT_SECONDS = 30
+
+
 async def validate_runtime_database(expected_role: str | None = None) -> None:
     """Fail startup on excessive privileges, including inherited column grants."""
     role = settings.database_runtime_role
@@ -37,8 +48,15 @@ async def validate_runtime_database(expected_role: str | None = None) -> None:
     # points always validate, including local development.
     if expected_role is None and settings.environment not in {"production", "staging"}:
         return
-    async with engine.connect() as conn:
-        await conn.run_sync(lambda connection: _validate_connection(connection, role))
+    try:
+        async with asyncio.timeout(STARTUP_VALIDATION_TIMEOUT_SECONDS):
+            async with engine.connect() as conn:
+                await conn.run_sync(lambda connection: _validate_connection(connection, role))
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Database identity validation did not finish in "
+            f"{STARTUP_VALIDATION_TIMEOUT_SECONDS}s; refusing to start"
+        ) from exc
 
 
 def validate_sync_database_identity(db_engine, role: str) -> None:
