@@ -290,6 +290,15 @@ if [ -d "$patch_src" ]; then
   fi
 fi
 
+# Catalog imports are an active production capability. Both the admin API that
+# accepts import requests and the catalog worker that executes them must see
+# the same value. Runtime environment files survive source deployments, so set
+# the flag explicitly before either service is restarted.
+sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
+  /etc/devrimo/api.env ACADEMIC_CATALOG_INGESTION_ENABLED true
+sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
+  /etc/devrimo/catalog.env ACADEMIC_CATALOG_INGESTION_ENABLED true
+
 # Keep the migration/restart window short. Alembic migrations in this project
 # may change ownership and remove retired columns; keep the recovery snapshot.
 sudo /usr/bin/systemctl stop devrimo-api.service
