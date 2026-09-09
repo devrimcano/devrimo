@@ -128,16 +128,9 @@ const CONSTRAINT_CHUNK = 6;
 // which is the whole job of the colour. The solid left edge is what the eye
 // actually tracks down a column, and it stays legible where the fill does
 // not — a narrow lane, a dark theme, a phone in sunlight.
-const COLORS = [
-  "bg-rose-500/20 border-rose-500/45 border-l-rose-500 text-rose-950 dark:bg-rose-500/25 dark:text-rose-50",
-  "bg-sky-500/20 border-sky-500/45 border-l-sky-500 text-sky-950 dark:bg-sky-500/25 dark:text-sky-50",
-  "bg-amber-500/22 border-amber-500/50 border-l-amber-500 text-amber-950 dark:bg-amber-500/25 dark:text-amber-50",
-  "bg-emerald-500/20 border-emerald-500/45 border-l-emerald-500 text-emerald-950 dark:bg-emerald-500/25 dark:text-emerald-50",
-  "bg-violet-500/20 border-violet-500/45 border-l-violet-500 text-violet-950 dark:bg-violet-500/25 dark:text-violet-50",
-  "bg-orange-500/20 border-orange-500/45 border-l-orange-500 text-orange-950 dark:bg-orange-500/25 dark:text-orange-50",
-  "bg-teal-500/20 border-teal-500/45 border-l-teal-500 text-teal-950 dark:bg-teal-500/25 dark:text-teal-50",
-  "bg-fuchsia-500/20 border-fuchsia-500/45 border-l-fuchsia-500 text-fuchsia-950 dark:bg-fuchsia-500/25 dark:text-fuchsia-50",
-];
+// Defined in globals.css as tokens, so a course keeps its colour in both
+// themes and the set stays a set rather than eight opinions.
+const COLORS = ["course-1", "course-2", "course-3", "course-4", "course-5", "course-6", "course-7", "course-8"];
 // METU term codes are a four-digit year plus a part number, where the year is
 // the one the academic year starts in: 20261 is 2026-2027 Fall, and 20253 is
 // the summer school that runs during calendar 2026. There is exactly one term
@@ -1644,7 +1637,7 @@ export function SchedulePlanner() {
       const y = 330 + (itemStartMinute(e) - baseMinute) * pixelsPerMinute;
       const height = Math.max(72, itemDurationMinutes(e) * pixelsPerMinute);
       const labelY = y + Math.min(60, Math.max(34, height - 18));
-      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#e31837" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
+      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#d81438" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
     }).join("");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#171312"/><text x="180" y="170" fill="white" font-size="72" font-family="Arial" font-weight="700">Devrimo · ${termLabel(term, t).replace(/[<>&]/g, "")}</text>${DAYS.map((d, i) => `<text x="${500 + i * 650}" y="285" fill="#aaa" font-size="36" font-family="Arial">${dayLabel(d)}</text>`).join("")}${cells}</svg>`;
     downloadFile("devrimo-schedule-4k.svg", new Blob([svg], { type: "image/svg+xml" }));
@@ -1700,13 +1693,13 @@ export function SchedulePlanner() {
         <PlannerIntro className="sm:mb-4" />
 
         {planning.legacyDraft ? (
-          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm" role="status">
+          <div className="border-info/40 bg-info/10 text-info flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm" role="status">
             <span className="min-w-0 flex-1">{t("Bu tarayıcıda eski bir program taslağı bulundu. Hesabına aktarmak ister misin?", "An older schedule draft was found in this browser. Import it into this account?")}</span>
             <Button size="sm" variant="outline" onClick={() => void handleImportLegacy()} disabled={planning.saving || planning.retryable || Boolean(planning.conflict)}>{t("Taslağı içe aktar", "Import draft")}</Button>
           </div>
         ) : null}
         {planning.recoveryDraft ? (
-          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm" role="status">
+          <div className="border-info/40 bg-info/10 text-info flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm" role="status">
             <span className="min-w-0 flex-1">{t("Bu hesap için sunucu dışında kaydedilmiş bir program bulundu. Geri yüklemek ister misin?", "A confirmed recovery copy for this account was found outside the server. Restore it?")}</span>
             <Button size="sm" variant="outline" onClick={() => void handleRestoreRecovery()} disabled={planning.saving || planning.retryable || Boolean(planning.conflict)}>{t("Geri yükle", "Restore")}</Button>
           </div>
@@ -1850,11 +1843,11 @@ export function SchedulePlanner() {
                                 >
                                   <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                     <span className="font-semibold">{t("Şube", "Section")} {section.section}</span>
-                                    {eligible === true ? <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-300">{t("Uygunluğu doğrulandı", "Eligibility verified")}</span> : null}
-                                    {unknown ? <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">{t("Doğrulama bekliyor", "Verification pending")}</span> : null}
+                                    {eligible === true ? <span className="text-success text-[11px] font-medium">{t("Uygunluğu doğrulandı", "Eligibility verified")}</span> : null}
+                                    {unknown ? <span className="text-warning text-[11px] font-medium">{t("Doğrulama bekliyor", "Verification pending")}</span> : null}
                                   </span>
                                   {closed ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-snug text-destructive"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{closedLabel}</span> : null}
-                                  {unknown ? <span className="mt-1 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs leading-snug text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin kısıt tablosu ODTÜ'den okunamadı; eklersen taslak olarak işaretlenir.", "This section's restriction table could not be read from METU; adding it marks the course as tentative.")}</span> : null}
+                                  {unknown ? <span className="bg-warning/10 text-warning mt-1 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs leading-snug"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />{t("Bu şubenin kısıt tablosu ODTÜ'den okunamadı; eklersen taslak olarak işaretlenir.", "This section's restriction table could not be read from METU; adding it marks the course as tentative.")}</span> : null}
                                   {section.instructor ? <span className="mt-0.5 block break-words text-xs font-medium text-foreground/80">{section.instructor}</span> : null}
                                   <span className="mt-1 block break-words text-xs text-muted-foreground">{section.meetings.length ? section.meetings.map((meeting) => `${dayLabel(meeting.day)} ${formatItemRange(meeting)} · ${meeting.room?.trim() || "TBA"}`).join(" / ") : isExplicitlyUntimed(section) ? t("Saat yok; kredi planına eklenebilir", "Untimed; can be added to the credit plan") : t("Gün ve saat henüz yayımlanmadı", "Day and time not published yet")}</span>
                                   {/* Shown as returned by the server. The
@@ -2021,7 +2014,7 @@ export function SchedulePlanner() {
                           entry.kind === "block"
                             ? item.id !== entry.id
                             : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
-                        className={cn("flex w-full items-start gap-3 rounded-xl border-l-4 p-3 text-left", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "ring-2 ring-destructive")}
+                        className={cn("course-block flex w-full items-start gap-3 rounded-xl border p-3 text-left", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "ring-2 ring-destructive")}
                         aria-label={t(`${entry.code} dersini programdan kaldır`, `Remove ${entry.code} from the schedule`)}
                       >
                         <span className="w-24 shrink-0 text-sm font-semibold tabular-nums">
@@ -2113,7 +2106,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                                 width: `calc(100% / ${lanes})`,
                                 left: `calc(${lane} * 100% / ${lanes})`,
                               }}
-                              className={cn("absolute top-0 z-10 overflow-hidden border-b border-l-4 border-r px-1.5 py-1 text-left leading-tight transition hover:brightness-110", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "z-20 ring-2 ring-inset ring-destructive")}
+                              className={cn("course-block absolute top-0 z-10 overflow-hidden rounded-sm border px-1.5 py-1 text-left leading-tight transition", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "z-20 ring-2 ring-inset ring-destructive")}
                             >
                               {/* The room shares the first line rather than
                                   taking a third one. A one-hour block is two
@@ -2178,7 +2171,7 @@ function PlanningStatusNotice({ metadata, needsRevalidation }: { metadata: Plann
     <div
       className={cn(
         "rounded-lg border p-2 text-xs leading-5",
-        blocked ? "border-destructive/40 bg-destructive/10 text-destructive" : uncertain ? "border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-100" : "border-emerald-500/35 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100",
+        blocked ? "border-destructive/40 bg-destructive/10 text-destructive" : uncertain ? "border-warning/40 bg-warning/10 text-warning" : "border-success/35 bg-success/10 text-success",
       )}
       data-planning-status={metadata.status}
       role={blocked ? "alert" : "status"}

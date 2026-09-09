@@ -37,6 +37,14 @@
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
   --color-on-primary-tint: var(--on-primary-tint);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
   --color-popover-foreground: var(--popover-foreground);
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
@@ -68,41 +76,78 @@
 
 :root {
   color-scheme: light;
-  /* Refined METU identity: warm paper, oxblood, graphite. */
-  --background: #f6f3ed;
-  --foreground: #1e1a18;
-  --card: #fffefa;
-  --card-foreground: #1e1a18;
-  --popover: #fffefa;
-  --popover-foreground: #1e1a18;
-  --primary: #d7193f;
-  /* Text on a primary/10 tint. 5.14:1, still oxblood. */
+  /* METU identity: warm paper, oxblood, graphite - with the paper and the card
+   * pulled apart. They used to be #f6f3ed and #fffefa, a luminance step of
+   * 0.09, so every card floated on a ground almost exactly as bright as itself
+   * and the whole screen read as one dusty beige field. The card is now white
+   * and the paper carries the warmth: 0.14, half again as much separation,
+   * measured. */
+  --background: #f2eee7;
+  --foreground: #191512;
+  --card: #ffffff;
+  --card-foreground: #191512;
+  --popover: #ffffff;
+  --popover-foreground: #191512;
+  --primary: #d81438;
+  /* Text on a primary/10 tint. 5.18:1 - the brand red itself is 4.38 there and
+   * fails, which is why this exists rather than a lighter opacity. */
   --on-primary-tint: #c2152f;
   --primary-foreground: #ffffff;
-  --secondary: #ece7de;
+  --secondary: #e9e3da;
   --secondary-foreground: #26211f;
-  --muted: #efebe4;
-  --muted-foreground: #6f6862;
-  --accent: #f7e2e6;
+  --muted: #efeae2;
+  /* 5.09:1 on the paper, 5.89:1 on a card. */
+  --muted-foreground: #6b635c;
+  --accent: #f9e3e7;
   --accent-foreground: #8f1730;
   --destructive: #c81e3a;
-  --border: #ded8cf;
-  --input: #d9d2c8;
-  --ring: #d7193f;
-  --chart-1: #d7193f;
-  --chart-2: #a52840;
-  --chart-3: #756d66;
-  --chart-4: #b88a4a;
-  --chart-5: #3e7065;
+  --border: #dcd5ca;
+  --input: #cfc7ba;
+  --ring: #d81438;
+  /* State colours, because a product that reads campus systems has four
+   * things to say and only had one colour to say them in. Every one of these
+   * was previously an ad-hoc Tailwind palette step written into a component -
+   * amber-500, emerald-500, red-200 - so they never moved with the theme and
+   * never matched each other. Each is legible as text on its own 10% tint over
+   * a card, which is how they are actually used: info 5.12, success 4.68,
+   * warning 5.13, danger 4.81. */
+  --info: #1f6a97;
+  --info-foreground: #ffffff;
+  --success: #15795e;
+  --success-foreground: #ffffff;
+  --warning: #8a5a00;
+  --warning-foreground: #ffffff;
+  --danger: #c81e3a;
+  --danger-foreground: #ffffff;
+  --chart-1: #d81438;
+  --chart-2: #1f6a97;
+  --chart-3: #15795e;
+  --chart-4: #8a5a00;
+  --chart-5: #756d66;
+
+  /* Eight course colours for the timetable. Chosen as a set rather than picked
+   * one at a time: no red, because red already means "you cannot register for
+   * this section", and every hue carries its own 1px border and a 16% tint of
+   * itself while the text stays the ordinary foreground - a coloured word on a
+   * coloured tint was the muddiest thing on the screen and, at these tints,
+   * several of them could not reach 4.5:1 anyway. */
+  --course-1: #b8451f;
+  --course-2: #2563a8;
+  --course-3: #15795e;
+  --course-4: #8a5a00;
+  --course-5: #6b3fa0;
+  --course-6: #0f7b8a;
+  --course-7: #a83262;
+  --course-8: #4f5f27;
   --radius: 0.875rem;
-  --sidebar: #eeeae3;
+  --sidebar: #ece7df;
   --sidebar-foreground: #27211f;
-  --sidebar-primary: #d7193f;
+  --sidebar-primary: #d81438;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f7e2e6;
+  --sidebar-accent: #f9e3e7;
   --sidebar-accent-foreground: #8f1730;
-  --sidebar-border: #dcd5cb;
-  --sidebar-ring: #d7193f;
+  --sidebar-border: #dbd4c9;
+  --sidebar-ring: #d81438;
 }
 
 .dark {
@@ -127,11 +172,30 @@
   --border: #403a36;
   --input: #4b433e;
   --ring: #ff5872;
+  /* The same four states, tuned for the dark ground: measured on their own
+   * 12% tint over a card at info 6.43, success 7.31, warning 7.43, danger 5.13.
+   * The foreground is dark here because these hues are the light ones. */
+  --info: #6fb6e8;
+  --info-foreground: #12100f;
+  --success: #5fd0a4;
+  --success-foreground: #12100f;
+  --warning: #f0b45c;
+  --warning-foreground: #12100f;
+  --danger: #ff617a;
+  --danger-foreground: #12100f;
+  --course-1: #f0906a;
+  --course-2: #79b4e8;
+  --course-3: #5fd0a4;
+  --course-4: #f0b45c;
+  --course-5: #b79bea;
+  --course-6: #5fc9d6;
+  --course-7: #f08bb4;
+  --course-8: #b5c46e;
   --chart-1: #ff5872;
-  --chart-2: #db6e83;
-  --chart-3: #aaa09a;
-  --chart-4: #ddb06b;
-  --chart-5: #6ab09d;
+  --chart-2: #6fb6e8;
+  --chart-3: #5fd0a4;
+  --chart-4: #f0b45c;
+  --chart-5: #aaa09a;
   --sidebar: #191716;
   --sidebar-foreground: #f3eee8;
   --sidebar-primary: #ee3154;
@@ -362,6 +426,28 @@ input,
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* A timetable entry wears its course colour as a tint and a hairline, not as a
+ * four-pixel bar down one side: that bar is the most recognisable tell of a
+ * generated interface, and it was doing a job a 1px border does. */
+.course-block {
+  background-color: color-mix(in oklab, var(--course) 16%, var(--card));
+  border-color: color-mix(in oklab, var(--course) 42%, transparent);
+  color: var(--card-foreground);
+}
+
+.course-block:hover {
+  background-color: color-mix(in oklab, var(--course) 24%, var(--card));
+}
+
+.course-1 { --course: var(--course-1); }
+.course-2 { --course: var(--course-2); }
+.course-3 { --course: var(--course-3); }
+.course-4 { --course: var(--course-4); }
+.course-5 { --course: var(--course-5); }
+.course-6 { --course: var(--course-6); }
+.course-7 { --course: var(--course-7); }
+.course-8 { --course: var(--course-8); }
 
 @media (pointer: coarse) {
   .aui-composer-send,

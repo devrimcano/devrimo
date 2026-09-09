@@ -394,7 +394,7 @@ export function OnboardingFlow({ onDone }: { onDone?: () => void }) {
           </p>
 
           {warning ? (
-            <p className="mt-4 flex items-start gap-2 rounded-xl bg-amber-500/10 p-3 text-xs leading-5 text-amber-700 dark:text-amber-400">
+            <p className="bg-warning/10 text-warning mt-4 flex items-start gap-2 rounded-xl p-3 text-xs leading-5">
               <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
               <span className="min-w-0 break-words">{warning}</span>
             </p>

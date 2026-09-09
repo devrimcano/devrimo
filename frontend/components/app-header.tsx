@@ -24,7 +24,7 @@ export function AppHeader({ email }: { email?: string | null }) {
   return (
     <header className="motion-header relative z-30 flex h-16 shrink-0 items-center justify-between gap-3 border-b bg-card/82 px-3 backdrop-blur-xl after:absolute after:inset-x-0 after:bottom-[-1px] after:h-px after:bg-gradient-to-r after:from-transparent after:via-primary/30 after:to-transparent sm:px-4">
       <Link href="/" className="group flex min-w-0 items-center gap-2 font-semibold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <BrandMark className="size-8 rounded-lg shadow-[0_3px_0_#901129] transition-transform duration-200 group-hover:scale-105" />
+        <BrandMark className="size-8 rounded-lg shadow-[0_3px_0_color-mix(in_oklab,var(--primary)_70%,black)] transition-transform duration-200 group-hover:scale-105" />
         <span className="truncate">devrimo</span>
       </Link>
 
