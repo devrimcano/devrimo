@@ -276,10 +276,51 @@ function localizedCurriculumWarning(
   );
 }
 
-const UNKNOWN_SECTION_STATUSES = new Set(["unknown", "unavailable", "unverified", "stale", "failed", "invalid"]);
+// Statuses that mean a read went wrong. "unknown" is deliberately not among
+// them: PlanSection defaults all three status fields to "unknown" and only the
+// published-catalog path ever fills them, so on a deployment that reads the live
+// catalog every section carried "unknown" and every plan warned that METU's
+// restrictions could not be read - while the restriction tables were in fact
+// read, cached and correct.
+const UNKNOWN_SECTION_STATUSES = new Set(["unavailable", "unverified", "stale", "failed", "invalid"]);
 
-function sectionNeedsVerification(section: CatalogSection): boolean {
-  if (section.eligible === null) return true;
+/**
+ * Whether this section's registration restrictions are genuinely unread.
+ *
+ * The verdict from `/constraints` is the authority: it is the one thing that
+ * actually looked at METU's restriction table. A section is unverified when that
+ * verdict is missing or undecided - not when a status field the live catalog
+ * never fills happens to say "unknown".
+ */
+/**
+ * Fold one `/constraints` answer into the verdicts already held.
+ *
+ * Two rules, both learned the hard way: a course dropped from the pool while the
+ * request was open is ignored, and an empty answer never replaces verdicts we
+ * already have - that overwrite silently turned every red flag back into
+ * "unrestricted".
+ */
+function mergeVerdicts(
+  base: ConstraintMap,
+  answered: Record<string, { sections?: Record<string, SectionVerdict> }>,
+  pool: CatalogCourse[],
+): ConstraintMap {
+  const next = { ...base };
+  for (const [rawCode, payload] of Object.entries(answered)) {
+    const identity = courseIdentity(rawCode);
+    if (!pool.some((course) => courseIdentity(course.rawCode) === identity)) continue;
+    const sections = payload?.sections ?? {};
+    if (!Object.keys(sections).length && next[identity] && Object.keys(next[identity]).length) continue;
+    next[identity] = sections;
+  }
+  return next;
+}
+
+function sectionNeedsVerification(section: CatalogSection, verdict?: SectionVerdict): boolean {
+  const decided = verdict
+    ? verdict.eligible === true || verdict.eligible === false
+    : typeof section.eligible === "boolean";
+  if (!decided) return true;
   return [section.eligibility_status, section.data_status, section.meetings_status]
     .some((status) => status !== undefined && UNKNOWN_SECTION_STATUSES.has(status.toLowerCase()));
 }
@@ -690,9 +731,11 @@ export function SchedulePlanner() {
   const saveTracker = useRef(new PlanSaveTracker());
   const localFingerprintRef = useRef("");
   const initialConstraintsFetched = useRef(false);
-  const constraintFlights = useRef(new Map<string, Promise<void>>());
+  const constraintFlights = useRef(new Map<string, Promise<ConstraintMap>>());
   const poolRef = useRef<CatalogCourse[]>([]);
   useEffect(() => { poolRef.current = catalogCourses; }, [catalogCourses]);
+  const constraintsRef = useRef<ConstraintMap>({});
+  useEffect(() => { constraintsRef.current = constraints; }, [constraints]);
   useEffect(() => {
     saveTracker.current.reset(term);
     serverStateFingerprint.current = "";
@@ -1117,9 +1160,9 @@ export function SchedulePlanner() {
    * course from here meant one request each; the broker does them together
    * over a single catalog connection instead.
    */
-  const fetchAllConstraints = useCallback((courses: CatalogCourse[]): Promise<void> => {
+  const fetchAllConstraints = useCallback((courses: CatalogCourse[]): Promise<ConstraintMap> => {
     const wanted = courses.map((course) => course.rawCode).filter(Boolean);
-    if (!wanted.length) return Promise.resolve();
+    if (!wanted.length) return Promise.resolve(constraintsRef.current);
     const flightKey = `${term}:${[...new Set(wanted)].sort().join(",")}`;
     const active = constraintFlights.current.get(flightKey);
     if (active) return active;
@@ -1129,7 +1172,11 @@ export function SchedulePlanner() {
     // one call would run for minutes and show nothing until it finished.
     // Chunked, the red flags appear as they are decided, and no single
     // request is long enough to be cut off.
-    const request = (async () => {
+    // Also returned, not only stored: generation has to decide from the
+    // verdicts this run actually obtained, and React state is not readable
+    // synchronously after the request that filled it.
+    const request = (async (): Promise<ConstraintMap> => {
+      let collected = constraintsRef.current;
       try {
         for (let index = 0; index < wanted.length; index += CONSTRAINT_CHUNK) {
           const chunk = wanted.slice(index, index + CONSTRAINT_CHUNK);
@@ -1138,19 +1185,9 @@ export function SchedulePlanner() {
               "/api/schedule/constraints",
               { method: "POST", body: { semester: term, department: department.trim() || undefined, courses: chunk } },
             );
-            setConstraints((current) => {
-              const updated = { ...current };
-              for (const [rawCode, payload] of Object.entries(response.courses ?? {})) {
-                const identity = courseIdentity(rawCode);
-                // Ignore if the course was removed from the pool during the request
-                if (!poolRef.current.some((c) => courseIdentity(c.rawCode) === identity)) continue;
-                const sections = payload?.sections ?? {};
-                // Never replace verdicts we already hold with an empty answer
-                if (!Object.keys(sections).length && current[identity] && Object.keys(current[identity]).length) continue;
-                updated[identity] = sections;
-              }
-              return updated;
-            });
+            const answered = response.courses ?? {};
+            collected = mergeVerdicts(collected, answered, poolRef.current);
+            setConstraints((current) => mergeVerdicts(current, answered, poolRef.current));
           } catch {
             // One failed group must not cost the rest their verdicts. A course
             // with none stays unknown. Missing evidence cannot be presented as
@@ -1161,6 +1198,7 @@ export function SchedulePlanner() {
         constraintFlights.current.delete(flightKey);
         if (!constraintFlights.current.size) setConstraintsBusy(false);
       }
+      return collected;
     })();
     constraintFlights.current.set(flightKey, request);
     return request;
@@ -1361,6 +1399,14 @@ export function SchedulePlanner() {
       // One request for everything still missing, rather than one per course
       // inside the loop below. A pool the catalog has already seen this week
       // costs a single call that touches no campus page at all.
+      // The verdicts this run can actually rely on. Generation used to read the
+      // React state, which is a snapshot from before the fetch it just made.
+      let liveVerdicts = constraintsRef.current;
+      try {
+        liveVerdicts = await fetchAllConstraints(catalogCourses);
+      } catch (error) {
+        captureRequestFailure(error, { operation: "schedule.constraints", kind: "query" });
+      }
       let known = sectionsByCourse;
       try {
         known = await fetchPoolSections(catalogCourses, known);
@@ -1377,13 +1423,18 @@ export function SchedulePlanner() {
           known = { ...known, [courseIdentity(course.rawCode)]: sections };
         } catch { unavailable.push(course.code); continue; }
         if (!sections.length) { unavailable.push(course.code); continue; }
+        const verdicts = liveVerdicts[courseIdentity(course.rawCode)] ?? {};
         const timed = sections.filter((section) => section.meetings.length > 0);
         const explicitUntimed = sections.filter((section) => isExplicitlyUntimed(section) && !section.meetings.length);
         if (!timed.length) {
-          if (explicitUntimed.some((section) => section.eligible !== true)) needsVerification.push(course.code);
+          if (explicitUntimed.some((section) => sectionNeedsVerification(section, verdicts[section.section]))) {
+            needsVerification.push(course.code);
+          }
           continue;
         }
-        if (timed.some(sectionNeedsVerification)) needsVerification.push(course.code);
+        if (timed.some((section) => sectionNeedsVerification(section, verdicts[section.section]))) {
+          needsVerification.push(course.code);
+        }
       }
 
       // The fetched sections and server generated eligibility verdicts are
