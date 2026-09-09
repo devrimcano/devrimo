@@ -259,11 +259,12 @@ async def _source_with_existing_record(db, *, config):
     return source, job, row
 
 
-async def test_empty_parsed_records_do_not_overwrite_existing_records():
-    # A parse that yields nothing means "nothing to ingest", not "the source is
-    # now empty" — a broken selector or a briefly empty page must not retire
-    # every record we already hold. _load_records reports that as None, so this
-    # must exercise the real loader rather than stubbing it out.
+async def test_empty_parsed_records_are_preserved_and_reported():
+    # A parse that yields nothing must not retire every record we already hold,
+    # but it is not a success either — it is usually a selector that stopped
+    # matching. The rows survive and the job completes, while the source keeps
+    # the only health an admin can see pointed at the problem. The real loader
+    # has to run here: stubbing it replaces the behaviour under test.
     async with SessionLocal() as db:
         source, job, row = await _source_with_existing_record(db, config={"records": []})
         assert await process_job(db, job) == 0
@@ -273,7 +274,11 @@ async def test_empty_parsed_records_do_not_overwrite_existing_records():
         assert job.status == "completed"
         assert row.is_current
         assert row.removed_at is None
-        assert source.last_error is None
+        assert source.last_error == "Parse produced no records; 1 existing record preserved"
+        # Never recorded as a successful run, so "last fetched" and "last
+        # succeeded" drift apart while the source is broken.
+        assert source.last_success_at is None
+        assert source.last_fetched_at is not None
 
 
 async def test_allow_empty_lets_an_empty_parse_retire_existing_records():
@@ -289,7 +294,32 @@ async def test_allow_empty_lets_an_empty_parse_retire_existing_records():
         assert job.status == "completed"
         assert not row.is_current
         assert row.removed_at is not None
+        # An authorised empty parse is a real success, unlike the case above.
         assert source.last_error is None
+        assert source.last_success_at is not None
+
+
+async def test_unchanged_page_is_a_quiet_success_not_an_empty_parse(monkeypatch):
+    # A 304 and a parse that produced nothing both reach the caller with no
+    # records. Only the second is a problem, and this pins the difference: an
+    # unchanged page records a success and leaves no warning behind.
+    async with SessionLocal() as db:
+        source, job, row = await _source_with_existing_record(db, config={})
+        source.kind = "html_page"
+        await db.commit()
+
+        async def fetch(*args, **kwargs):
+            return FetchedDocument(source.url, b"", "text/html", etag="same", not_modified=True)
+
+        monkeypatch.setattr("app.knowledge.ingestion.fetch_document", fetch)
+        assert await process_job(db, job) == 0
+        await db.refresh(row)
+        await db.refresh(source)
+        await db.refresh(job)
+        assert job.status == "completed"
+        assert row.is_current and row.removed_at is None
+        assert source.last_error is None
+        assert source.last_success_at is not None
 
 
 @pytest.mark.parametrize("kind", ["ingest", "not_modified"])

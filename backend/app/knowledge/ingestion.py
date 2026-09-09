@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -17,6 +17,24 @@ from app.knowledge.fetcher import FetchPolicy, fetch_document
 from app.knowledge.indexes import lock_index_publication
 from app.knowledge.registry import REMOTE_KINDS
 from app.knowledge.types import ParsedRecord
+
+
+@dataclass(frozen=True, slots=True)
+class LoadResult:
+    """What a fetch-and-parse produced, and why it produced nothing.
+
+    "The server said nothing changed" and "we fetched the page and parsed no
+    records out of it" both end with no records to store, but they are
+    different events. The first is a healthy no-op. The second is almost
+    always a selector that stopped matching after the site was redesigned,
+    and it has to stay visible to an admin instead of reporting success.
+    """
+
+    records: list[ParsedRecord] | None
+    headers: dict
+    # True only for the second case above, so the caller can tell them apart
+    # without inspecting the records list, which is None for both.
+    empty_parse: bool = False
 
 
 class JobLeaseLost(RuntimeError):
@@ -219,7 +237,7 @@ async def _set_progress(db: AsyncSession, job: CampusIngestionJob, phase: str, *
     await db.commit()
 
 
-async def _load_records(source: CampusSource, revision: CampusSourceRevision) -> tuple[list[ParsedRecord] | None, dict]:
+async def _load_records(source: CampusSource, revision: CampusSourceRevision) -> LoadResult:
     document = None
     headers: dict = {}
     if source.kind in REMOTE_KINDS:
@@ -236,7 +254,7 @@ async def _load_records(source: CampusSource, revision: CampusSourceRevision) ->
         )
         headers = {"etag": document.etag, "last_modified": document.last_modified}
         if document.not_modified:
-            return None, headers
+            return LoadResult(None, headers)
     config = {
         **revision.config,
         "defaults": {
@@ -251,12 +269,14 @@ async def _load_records(source: CampusSource, revision: CampusSourceRevision) ->
     # rows, before chunking so differing copies cannot leave mixed chunk sets.
     unique_records = {record.external_id: record for record in parsed}
     records = chunk_records(list(unique_records.values()), config)
-    # No records from a successful parse means "nothing to ingest".
-    # Preserve existing source rows and keep the job in a completed state unless
-    # the source explicitly opts into empty replacement.
+    # A parse that yields nothing is not authority to delete everything this
+    # source owns, so the rows are preserved and the job still completes. It is
+    # not a success either: it is reported as an empty parse so the caller can
+    # leave a trail an admin can act on. A source that declares allow_empty has
+    # said an empty parse is authoritative, and falls through to replacement.
     if not records and not revision.config.get("allow_empty", False):
-        return None, headers
-    return records, headers
+        return LoadResult(None, headers, empty_parse=True)
+    return LoadResult(records, headers)
 
 
 async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLease | None = None) -> int:
@@ -276,13 +296,33 @@ async def process_job(db: AsyncSession, job: CampusIngestionJob, *, lease: JobLe
     # for the duration of a remote ingestion.
     await db.commit()
     await _set_progress(db, job, "fetching" if source.kind in REMOTE_KINDS else "parsing", lease=lease)
-    records, headers = await _load_records(source, revision)
+    loaded = await _load_records(source, revision)
+    records, headers = loaded.records, loaded.headers
     if records is None:
         source = await _lock_source_for_store(db, job, lease)
         now = datetime.now(UTC)
         source.last_fetched_at = now
-        source.last_success_at = now
-        source.last_error = None
+        if loaded.empty_parse:
+            # last_error and last_success_at are the only health an admin can
+            # see, so an empty parse says so and leaves last_success_at at the
+            # last run that actually produced records: "fetched a minute ago,
+            # last succeeded nine days ago" is the shape of a dead selector.
+            # The fetch headers are deliberately not stored either. Keeping the
+            # old etag means the next run re-fetches the changed page in full
+            # and re-reports, instead of a 304 quietly clearing this.
+            preserved = await db.scalar(
+                select(func.count())
+                .select_from(CampusKnowledgeRecord)
+                .where(
+                    CampusKnowledgeRecord.source_id == source.id,
+                    CampusKnowledgeRecord.is_current.is_(True),
+                )
+            )
+            plural = "" if preserved == 1 else "s"
+            source.last_error = f"Parse produced no records; {preserved} existing record{plural} preserved"
+        else:
+            source.last_success_at = now
+            source.last_error = None
         _complete_job(job, now)
         await db.commit()
         return 0
