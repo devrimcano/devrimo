@@ -209,11 +209,23 @@ _OPEN_GRADE_BANDS = ("herkesalabilir", "everyone", "everybody", "all")
 _GRADE_SCALE = ("AA", "BA", "BB", "CB", "CC", "DC", "DD", "FD", "FF", "NA")
 _GRADE_INDEX = {grade: index for index, grade in enumerate(_GRADE_SCALE)}
 
+# The outcomes METU records outside that scale, from the registrar's own table:
+# S başarılı, P gelişmekte, U başarısız, EX muaf, I eksik, W dersten çekilme.
+# They carry no grade point, so they cannot be ordered against AA-NA and a range
+# spanning them is not a range this reader will place. What can be said about
+# them is whether they are a pass, which PASSING_GRADES above already answers.
+_STATUS_GRADES = frozenset({"S", "P", "U", "EX", "I", "W"})
+
+
+def _grade_token_in(value: Any, allowed: frozenset[str] | dict) -> str:
+    """The bare grade code a column holds, when it is one this reader knows."""
+    letters = "".join(char for char in tr_upper(str(value or "").strip()) if char.isalpha())
+    return letters if letters in allowed else ""
+
 
 def _grade_letter(value: Any) -> str:
     """The bare letter pair a grade column holds, or "" for anything else."""
-    letters = "".join(char for char in tr_upper(str(value or "").strip()) if char.isalpha())
-    return letters if letters in _GRADE_INDEX else ""
+    return _grade_token_in(value, _GRADE_INDEX)
 
 
 def _grade_range(row: Any) -> tuple[str, str] | None:
@@ -409,6 +421,35 @@ def _admits(
     # student who has never taken the course is admitted by the *other* row
     # rather than by this one. Reading a range as "everyone" would hand a
     # student a section the registrar wrote for repeats.
+    # A band written entirely in outcomes that are not passes - "U" to "NA",
+    # "U" to "U" - is the same statement the Turkish prose makes: this section
+    # is for students who have not passed it. Both ends have to be recognised
+    # and neither may be a pass, so a mixed or unfamiliar pair still refuses to
+    # decide rather than guessing at an order these codes do not have.
+    start_code = _grade_token_in(_row_value(match, "start_grade", "startGrade"), _STATUS_GRADES)
+    end_code = _grade_token_in(_row_value(match, "end_grade", "endGrade"), _STATUS_GRADES)
+    ends = [code for code in (start_code, end_code) if code]
+    if ends:
+        other = (
+            _grade_letter(_row_value(match, "start_grade", "startGrade"))
+            or _grade_letter(_row_value(match, "end_grade", "endGrade"))
+        )
+        known = len(ends) + (1 if other else 0)
+        failing = all(code not in PASSING_GRADES for code in ends) and (
+            not other or other not in PASSING_GRADES
+        )
+        if known == 2 and failing:
+            held = grade_token(prior_grade)
+            label = "-".join(filter(None, [
+                _row_value(match, "start_grade", "startGrade"),
+                _row_value(match, "end_grade", "endGrade"),
+            ]))
+            if not held:
+                return Verdict(False, f"for students who already hold {label}", wanted)
+            if has_passed(held):
+                return Verdict(False, f"for students who have not passed it; you have {held}", wanted)
+            return Verdict(True, "", wanted)
+
     letter_range = _grade_range(match)
     if letter_range is not None:
         best, worst = letter_range

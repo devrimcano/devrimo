@@ -64,14 +64,12 @@ def test_a_second_row_can_admit_where_the_first_refuses():
 def test_an_unrecognised_grade_band_is_unknown():
     """An unfamiliar registrar label still cannot certify a section.
 
-    This used to assert the same of "AA"-"CC", on the grounds that a pair of
-    letters was not a label this reader knew. It is: METU publishes the scale
-    AA, BA, BB, CB, CC, DC, DD, FD, FF, NA, and a pair names every grade
-    between its ends. That case is now covered by
-    test_a_letter_range_grade_band_is_read_as_a_range; what remains unknown is
-    a token that is not on the scale at all.
+    This has twice asserted the unknown of something later learned. "AA"-"CC"
+    is a range over the published scale, and "U"-"NA" is a pair of outcomes
+    that are both failures; each is decided now, by its own test above. What
+    stays unknown is a code from neither list.
     """
-    rows = [{"given_dept": "EE", "start_grade": "U", "end_grade": "NA"}]
+    rows = [{"given_dept": "EE", "start_grade": "XQ", "end_grade": "NA"}]
     assert evaluate(rows, department="EE", prior_grade="BB").eligible is None
 
 
@@ -235,8 +233,56 @@ def test_the_other_two_spellings_still_mean_what_they_meant():
 
 
 def test_a_grade_label_outside_the_scale_stays_undecided_and_names_itself():
-    """'U' is not on the AA-NA scale, and guessing at it is not allowed."""
-    rows = [dict(MATH219_SECTION_9[0], start_grade="U", end_grade="U")]
+    """A code on neither list is not guessed at, and the message says which."""
+    rows = [dict(MATH219_SECTION_9[0], start_grade="XQ", end_grade="XQ")]
     verdict = verdict_for(rows, "AEE", prior_grade="CC")
     assert verdict.eligible is None
-    assert "U-U" in verdict.reason
+    assert "XQ-XQ" in verdict.reason
+
+
+# Course 9010100 as SAIS returned it: the same table gives one department the
+# Turkish sentence and another the outcome codes, for the same section.
+STATUS_BAND_SECTION = [
+    {
+        "given_dept": "EE", "start_char": "AA", "end_char": "ZZ",
+        "min_cgpa": "0.00", "max_cgpa": "4.00", "min_year": "3", "max_year": "5",
+        "start_grade": "U", "end_grade": "NA",
+    },
+    {
+        "given_dept": "ECON", "start_char": "AA", "end_char": "ZZ",
+        "min_cgpa": "0.00", "max_cgpa": "4.00", "min_year": "3", "max_year": "5",
+        "start_grade": "Herkes alabilir", "end_grade": "Herkes alabilir",
+    },
+]
+
+
+@pytest.mark.parametrize(
+    "held,expected",
+    [
+        # U is başarısız and NA carries no points either: a band with both ends
+        # outside a pass says the same thing the prose row says.
+        ("U", True),
+        ("NA", True),
+        ("FF", True),
+        ("S", False),
+        ("BB", False),
+        ("EX", False),
+        # Written for students who hold one of those outcomes, so not for one
+        # who holds nothing. Another row admits them where a table has one.
+        (None, False),
+    ],
+)
+def test_an_outcome_band_reads_as_have_not_passed(held, expected):
+    assert verdict_for(STATUS_BAND_SECTION, "EE", prior_grade=held).eligible is expected
+
+
+def test_the_prose_row_beside_it_is_unchanged():
+    assert verdict_for(STATUS_BAND_SECTION, "ECON", prior_grade="AA").eligible is True
+
+
+def test_a_band_mixing_a_pass_with_a_failure_stays_undecided():
+    """S is a pass and U is not; no order over these codes places that span."""
+    rows = [dict(STATUS_BAND_SECTION[0], start_grade="S", end_grade="U")]
+    verdict = verdict_for(rows, "EE", prior_grade="U")
+    assert verdict.eligible is None
+    assert "S-U" in verdict.reason
