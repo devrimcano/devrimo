@@ -296,6 +296,63 @@ async def test_catalog_import_failed_job_stores_value_error_detail(monkeypatch):
         assert updated.error_detail == "Bad response payload from source"
 
 
+async def test_a_failed_import_with_progress_is_resumed_rather_than_restarted():
+    """Twenty-four hours of answered pages are not thrown away by asking again.
+
+    Only queued and running jobs were reused, so a failed one took its progress
+    with it: the checkpoint recorded exactly which of 10048 steps it reached,
+    and nothing could reach it. Asking for the same scope again built a fresh
+    job that would re-walk every step METU had already answered.
+    """
+    from app.academic_catalog.service import enqueue_import
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        first = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        first_id = first.id
+
+    async with SessionLocal() as db:
+        job = await db.get(CatalogImportJob, first_id)
+        job.status = "failed"
+        job.attempts = 3
+        job.checkpoint_offset = 4817
+        job.error_detail = "SAIS section restriction table could not be read"
+        await db.commit()
+
+    async with SessionLocal() as db:
+        again = await enqueue_import(db, METU_ID, "20261", department="240", requested_by=uuid4())
+        await db.commit()
+        assert again.id == first_id, "a new job was created and 4817 answered steps were abandoned"
+        assert again.status == "queued"
+        assert again.checkpoint_offset == 4817, "the resumed job lost its place"
+        assert again.attempts == 0, "the failed run's attempts were carried into the new one"
+        assert again.error_detail is None
+
+
+async def test_a_failed_import_that_never_started_is_built_again():
+    """Nothing to resume, and a scope that is simply broken must not loop."""
+    from app.academic_catalog.service import enqueue_import
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        first = await enqueue_import(db, METU_ID, "20261", department="241", requested_by=uuid4())
+        await db.commit()
+        first_id = first.id
+
+    async with SessionLocal() as db:
+        job = await db.get(CatalogImportJob, first_id)
+        job.status = "failed"
+        job.attempts = 3
+        job.checkpoint_offset = 0
+        await db.commit()
+
+    async with SessionLocal() as db:
+        again = await enqueue_import(db, METU_ID, "20261", department="241", requested_by=uuid4())
+        await db.commit()
+        assert again.id != first_id, "a job that never got anywhere was resumed instead of rebuilt"
+
+
 async def test_refusals_do_not_discard_an_import_that_has_already_answered(monkeypatch):
     """Fifteen unreadable pages must not throw away a day of work.
 

@@ -1949,6 +1949,36 @@ async def enqueue_import(
     )
     if existing is not None:
         return reuse(existing)
+    # A failed import that got somewhere is resumed, not started again.
+    #
+    # Only queued and running jobs were ever reused, so a job that failed took
+    # its progress with it: the checkpoint was still there, recording exactly
+    # which step it reached, and nothing could reach it. Measured on this
+    # deployment - a whole-term import stopped at 4817 of 10048 steps after
+    # about twenty-four hours, and the only way forward was a fresh job that
+    # would re-walk all 10048, costing another day and ten thousand requests
+    # METU has already answered.
+    #
+    # Guarded on real progress: a job that failed at the very first step has
+    # nothing to resume and every reason to be built again from scratch, which
+    # also keeps a permanently broken scope from being retried for ever off its
+    # own checkpoint.
+    resumable = await db.scalar(
+        select(CatalogImportJob).where(
+            CatalogImportJob.organization_id == organization_id,
+            CatalogImportJob.dedup_key == dedup_key,
+            CatalogImportJob.status == "failed",
+            CatalogImportJob.checkpoint_offset > 0,
+        ).order_by(CatalogImportJob.updated_at.desc())
+    )
+    if resumable is not None:
+        resumable.status = "queued"
+        # The attempt counter belongs to the run that failed, not to the work.
+        resumable.attempts = 0
+        resumable.lease_until = None
+        resumable.error_code = None
+        resumable.error_detail = None
+        return reuse(resumable)
     def new_job() -> CatalogImportJob:
         return CatalogImportJob(
             organization_id=organization_id,
