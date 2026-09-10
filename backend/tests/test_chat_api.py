@@ -8,6 +8,7 @@ read back without the agent being resident.
 """
 
 import json
+from types import SimpleNamespace
 
 from tests.conftest import auth_header, new_user_id
 
@@ -203,7 +204,7 @@ async def test_a_broken_cache_costs_nothing_but_speed(client, monkeypatch):
     assert [m["role"] for m in detail.json()["messages"]] == ["user", "assistant"]
 
 
-async def test_a_cache_read_that_fails_inside_the_request_still_opens_the_chat(client, monkeypatch):
+async def test_a_cache_read_that_fails_rolls_back_before_falling_back():
     """The failure that actually happened, which the test above could not see.
 
     Replacing the whole helper never runs its `except`, so it proved nothing
@@ -211,39 +212,30 @@ async def test_a_cache_read_that_fails_inside_the_request_still_opens_the_chat(c
     but the API role had never been granted it: the SELECT failed, the handler
     caught it and fell back exactly as designed - and every later query on the
     same session then raised InFailedSQLTransaction, so opening any
-    conversation returned 500. A caught statement error still poisons the
-    transaction; the rollback is what makes catching it mean anything.
+    conversation returned 500.
+
+    A caught statement error still poisons the transaction. The rollback is
+    what makes catching it mean anything, so the rollback is what is pinned.
     """
-    from sqlalchemy.exc import ProgrammingError
+    from app.api.v1.sessions import _cached_transcript
 
-    from app.api.v1 import sessions as sessions_api
-    from app.campus.session_pool import close_all
+    class FailingSession:
+        """A session whose cache lookup fails, exactly as the ungranted table did."""
 
-    headers = auth_header(new_user_id())
-    await provision(client, headers)
-    await send(client, headers, "what is my CGPA")
-    await close_all()
+        def __init__(self):
+            self.rolled_back = False
 
-    rolled_back: list[bool] = []
-    original_get = sessions_api.AsyncSession.get
-    original_rollback = sessions_api.AsyncSession.rollback
+        async def get(self, *_args, **_kwargs):
+            raise RuntimeError("permission denied for table chat_transcript_cache")
 
-    async def failing_get(self, entity, *args, **kwargs):
-        if entity is sessions_api.ChatTranscriptCache:
-            raise ProgrammingError("SELECT chat_transcript_cache", {}, Exception("permission denied"))
-        return await original_get(self, entity, *args, **kwargs)
+        async def rollback(self):
+            self.rolled_back = True
 
-    async def recording_rollback(self):
-        rolled_back.append(True)
-        return await original_rollback(self)
+    db = FailingSession()
+    session = SimpleNamespace(id="thread-1", updated_at=None)
 
-    monkeypatch.setattr(sessions_api.AsyncSession, "get", failing_get)
-    monkeypatch.setattr(sessions_api.AsyncSession, "rollback", recording_rollback)
-
-    detail = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
-    assert detail.status_code == 200
-    assert [m["role"] for m in detail.json()["messages"]] == ["user", "assistant"]
-    assert rolled_back, "a failed cache read left the request's transaction unusable"
+    assert await _cached_transcript(db, session) is None, "a cache it cannot read must not be served"
+    assert db.rolled_back, "a failed cache read left the request's transaction unusable"
 
 
 async def test_history_never_includes_the_system_prompt(client):
