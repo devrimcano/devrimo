@@ -214,13 +214,16 @@ class LeaseKeeper:
 class SourceFleet:
     """One or more independent clients on the same account.
 
-    A client is a portal session, and a portal session serves one page at a
-    time: SAIS keeps a single app-proxy session per cookie jar, so two
-    overlapping calls on one client would read each other's pages. That is what
-    the client's own lock is for, and it is why fetching two courses at once
-    needs two clients rather than two calls.
+    Keep this at one. The note here used to reason that a portal session is per
+    cookie jar, so a second client would get a second session and two courses
+    could be read at once. That is wrong, and production said so: three clients
+    on one account measured 10s per step against 1.02s with one - eight times
+    slower, not three times faster - and METU eventually answered
+    `RemoteProtocolError: Server disconnected without sending a response`.
 
-    A fleet of one is exactly the previous behaviour, one page after another.
+    SAIS keeps the app-proxy session against the *account*. Three clients
+    therefore knock each other's session out, and every read pays to re-open
+    one. Reading two courses at once needs two accounts, not two clients.
     """
 
     def __init__(self, sources):
@@ -298,6 +301,22 @@ async def _claim(*, manual_only: bool = False):
 
 
 async def _account(organization_id: UUID):
+    """The student whose SAIS session the catalog is read through.
+
+    A whole-term import is about eleven thousand page loads behind one
+    student's login. Which student was previously decided by the calendar:
+    every active account with Course Info connected was eligible, and the
+    rotation below picked one by the day of the year. Nobody chose it, it
+    changed overnight, and the owner of the deployment could not tell whose
+    account was carrying it without reading this function.
+
+    `catalog_source_metu_username` names one account instead. When it is set
+    and that account is not usable this returns None rather than quietly
+    falling back to somebody else - a silent substitution is exactly the
+    surprise the setting exists to remove, and the job reports
+    `no_eligible_source_account` where an admin can see it.
+    """
+    pinned = (get_settings().catalog_source_metu_username or "").strip().casefold()
     async with SessionLocal() as db:
         candidates = await campus_service.users_with_tool(db, "course_info")
         permitted = set((await db.scalars(select(AccountDirectory.user_id).where(
@@ -311,8 +330,11 @@ async def _account(organization_id: UUID):
         start = datetime.now(ISTANBUL).toordinal() % len(ordered)
         for user_id in ordered[start:] + ordered[:start]:
             secret = secrets_for(await campus_service.get_credential(db, user_id))
-            if secret and secret.has("metu_password"):
-                return user_id, secret
+            if not (secret and secret.has("metu_password")):
+                continue
+            if pinned and (secret.metu_username or "").strip().casefold() != pinned:
+                continue
+            return user_id, secret
     return None
 
 
