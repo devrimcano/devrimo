@@ -715,6 +715,7 @@ export function SchedulePlanner() {
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
   const department = studentDepartment?.code ?? "";
@@ -976,6 +977,15 @@ export function SchedulePlanner() {
     () => entries.length > 0 && favorites.some((saved) => scheduleKey(saved) === scheduleKey(entries)),
     [entries, favorites],
   );
+  // What the folded preferences card says about itself, so folding it hides
+  // no decision the student has made.
+  const preferenceSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (emptyDays.length) parts.push(t(`Boş: ${emptyDays.map((day) => dayLabel(day)).join(", ")}`, `Free: ${emptyDays.map((day) => dayLabel(day)).join(", ")}`));
+    if (!avoidConflicts) parts.push(t("Çakışmalara izin ver", "Conflicts allowed"));
+    if (ignoreConstraints) parts.push(t("Kısıtlar yok sayılıyor", "Restrictions ignored"));
+    return parts.length ? parts.join(" · ") : t("Boş gün yok · çakışmalar engelli", "No free day · conflicts prevented");
+  }, [emptyDays, avoidConflicts, ignoreConstraints, dayLabel, t]);
   const currentShape = useMemo(() => (entries.length ? scheduleShape(entries) : null), [entries]);
   // Recomputed only when the timetable changes, not per cell: the grid has
   // fifty cells and this is a whole-week assignment.
@@ -2176,12 +2186,15 @@ export function SchedulePlanner() {
                   <Input value={catalogSearch} onChange={(e) => setCatalogSearch(e.target.value)} placeholder={t("Eklenen derslerde ara", "Search added courses")} />
                   <Button variant="outline" className="shrink-0 text-destructive" onClick={clearCoursePool}><Trash2Icon />{t("Tümünü sil", "Clear all")}</Button>
                 </div>
-                {/* The list scrolls inside the card rather than pushing the
-                    card past the column. Measured on the live layout at
-                    1440x860: this card alone was 685px in a 684px column, so
-                    the sidebar scrolled 643px and the primary action sat below
-                    the fold - the button that turns this list into a week. */}
-                <div className="max-h-[min(44vh,26rem)] space-y-1 overflow-y-auto pr-0.5">
+                {/* Capped only where the page itself scrolls. From xl up the
+                    column is its own scroller, and capping the list inside it
+                    put a scrollbar inside a scrollbar: measured at 1440x900,
+                    a list 396px tall holding 1598px of courses, inside a
+                    column already hiding 391px. One scroller reads as one
+                    list. Below xl the cap stays, because there the page
+                    scrolls and an uncapped list would push the button that
+                    turns it into a week past the fold. */}
+                <div className="max-h-[min(44vh,26rem)] space-y-1 overflow-y-auto pr-0.5 xl:max-h-none xl:overflow-visible">
                   {visibleCourses.map((course) => {
                     const identity = courseIdentity(course.rawCode);
                     const expanded = expandedCourse === identity;
@@ -2249,7 +2262,23 @@ export function SchedulePlanner() {
                 </p>
               </div>
             </CardContent></Card>
-            <Card><CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 p-4">
+            {/* Folded by default, with what it is set to on the button. It
+                is a card of defaults - most students set an empty day once, if
+                ever - and open it held 274px of a 724px column for ever. */}
+            <Card>
+              <button
+                type="button"
+                onClick={() => setPreferencesOpen((open) => !open)}
+                aria-expanded={preferencesOpen}
+                className="flex w-full items-center gap-2 px-4 py-3 text-left"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-semibold">{t("Tercihler", "Preferences")}</span>
+                  <span className="text-muted-foreground block truncate text-xs">{preferenceSummary}</span>
+                </span>
+                <ChevronDownIcon className={cn("size-4 shrink-0 text-muted-foreground transition-transform", preferencesOpen && "rotate-180")} />
+              </button>
+              {preferencesOpen ? <CardContent className="grid grid-cols-[minmax(0,1fr)] gap-3 border-t p-4">
               <p className="text-muted-foreground text-xs leading-5">{t("Program oluşturulurken bu tercihler uygulanır.", "These preferences apply when a schedule is generated.")}</p>
               <Field id="planner-empty-days" label={t("Boş günler", "Empty days")}>
                 {/* Five fixed options, so toggles rather than a multi-select:
@@ -2278,7 +2307,8 @@ export function SchedulePlanner() {
               </Field>
               <Toggle label={t("Çakışmaları engelle", "Prevent conflicts")} checked={avoidConflicts} onChange={setAvoidConflicts} />
               <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
-            </CardContent></Card>
+              </CardContent> : null}
+            </Card>
 
             {/* Only the courses the timetable cannot show. The rest of what
                 this card used to list - every scheduled course, with a trash
