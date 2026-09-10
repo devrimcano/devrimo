@@ -801,7 +801,27 @@ export function SchedulePlanner() {
     }));
     const nextSections = fromCanonicalSections(state.sections);
     const nextAlternatives = state.alternatives.map((alternative) => alternative.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })));
-    const nextFavorites = state.favorites.map((favorite) => favorite.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })));
+    // Collapse weeks that are the same week.
+    //
+    // The heart used to only ever add, so pressing it twice on one schedule
+    // stored it twice. Toggling fixed that going forward, but it cannot undo
+    // what the old behaviour already saved: measured on a live account, nine
+    // favourites, eight of them byte-identical to the first, all rendering as
+    // the same "2 ders · 7 kredi · boş: Pzt" with no way to tell them apart
+    // except deleting them one at a time.
+    //
+    // Deduplicated on the way in, so the list repairs itself the next time
+    // anyone opens the planner, and the cleaned list is what the next save
+    // persists. First occurrence wins, order preserved.
+    const seenFavorites = new Set<string>();
+    const nextFavorites = state.favorites
+      .map((favorite) => favorite.map((entry) => ({ ...fromCanonicalEntry(entry), code: formatMetuCourseCode(entry.code) })))
+      .filter((favorite) => {
+        const key = scheduleKey(favorite);
+        if (seenFavorites.has(key)) return false;
+        seenFavorites.add(key);
+        return true;
+      });
     setEntries(nextEntries);
     setCatalogCourses(nextPool);
     setSectionsByCourse(nextSections);
@@ -811,7 +831,9 @@ export function SchedulePlanner() {
     setAlternatives(nextAlternatives);
     setAlternativeIndex(state.alternative_index);
     setFavorites(nextFavorites);
-    setFavoriteIndex(state.favorite_index);
+    // Clamped, because the stored index counted the duplicates that were just
+    // removed and would otherwise point past the end of the list.
+    setFavoriteIndex(nextFavorites.length ? Math.min(state.favorite_index, nextFavorites.length - 1) : -1);
     setCatalogReleaseId(state.catalog_release_id ?? null);
     setAcademicSnapshotFetchedAt(state.academic_snapshot_fetched_at ?? null);
     setNeedsRevalidation(state.needs_revalidation === true);
