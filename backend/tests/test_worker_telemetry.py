@@ -171,7 +171,7 @@ async def test_assistant_finalization_failure_is_unknown_and_safe(captured, monk
         "get_runtime_config",
         AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
     )
-    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+    monkeypatch.setattr(worker, "build_agent", lambda *_args, **_kwargs: SimpleNamespace(model=SimpleNamespace()))
 
     async def stream(*_args):
         yield b"data: {}\n\n"
@@ -240,7 +240,7 @@ async def test_assistant_lease_loss_is_interrupted_without_finalization(captured
         "get_runtime_config",
         AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
     )
-    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+    monkeypatch.setattr(worker, "build_agent", lambda *_args, **_kwargs: SimpleNamespace(model=SimpleNamespace()))
 
     async def stream(*_args):
         yield b"data: {}\n\n"
@@ -309,7 +309,7 @@ async def test_assistant_error_event_append_failure_still_finalizes(captured, mo
         "get_runtime_config",
         AsyncMock(return_value=SimpleNamespace(model_id="test-model")),
     )
-    monkeypatch.setattr(worker, "build_agent", lambda *_args: SimpleNamespace(model=SimpleNamespace()))
+    monkeypatch.setattr(worker, "build_agent", lambda *_args, **_kwargs: SimpleNamespace(model=SimpleNamespace()))
 
     async def stream(*_args):
         raise RuntimeError("model execution failed")

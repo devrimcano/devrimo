@@ -266,7 +266,7 @@ async def test_inactive_account_never_starts_model(monkeypatch, status):
         account = await db.get(AccountDirectory, user)
         account.status = AccountStatus(status)
         await db.commit()
-    monkeypatch.setattr("app.assistant.worker.build_agent", lambda *a: pytest.fail("Inactive account started model"))
+    monkeypatch.setattr("app.assistant.worker.build_agent", lambda *a, **kw: pytest.fail("Inactive account started model"))
     assert await run_one("worker")
     async with SessionLocal() as db:
         run = await db.get(AssistantRun, run_id)
@@ -420,7 +420,7 @@ async def test_heartbeat_interrupts_inflight_model_after_suspension(monkeypatch)
     close_client = AsyncMock()
     monkeypatch.setattr(
         "app.assistant.worker.build_agent",
-        lambda *a: SimpleNamespace(model=SimpleNamespace(async_client=SimpleNamespace(close=close_client))),
+        lambda *a, **kw: SimpleNamespace(model=SimpleNamespace(async_client=SimpleNamespace(close=close_client))),
     )
 
     async def blocked_stream(*args):
