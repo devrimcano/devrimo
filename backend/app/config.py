@@ -265,6 +265,18 @@ class Settings(BaseSettings):
     academic_catalog_registration_end: str = ""
     academic_catalog_job_lease_seconds: int = 900
     academic_catalog_max_attempts: int = 3
+    # --- Development campus fixtures ---------------------------------------
+    # Swaps the four campus MCP servers for synthetic ones
+    # (app/campus/fixtures/server.py) that answer the same tool names from
+    # seeded data. Everything between the model and the campus stays real: the
+    # allowlist, the confirmation policy for writes, the queue, the gateway,
+    # and the consent copy. Only what is on the other end of the socket changes.
+    #
+    # Rejected outside development and test by the validator below. A staging
+    # or production deployment that set this would answer students with invented
+    # course data while looking entirely healthy, which is the worst shape a
+    # failure can take here.
+    campus_fixture_mode: bool = False
 
     # --- Catalog pre-warming ----------------------------------------------
     # Automatic refresh scheduling; manual catalog imports ignore the window.
@@ -281,6 +293,33 @@ class Settings(BaseSettings):
     # course allowance is reserved for detail freshness.
     catalog_warm_discoveries_per_pass: int = Field(default=1, ge=0, le=100)
     catalog_warm_batch: int = 15
+    # How many plan steps one import pass walks before checkpointing and
+    # handing control back. This is the import job's own batch, deliberately
+    # separate from catalog_warm_batch above, which paces the legacy warmer
+    # against a daily HTTP budget and must stay small.
+    #
+    # At fifteen, a 10,048-step term needed 670 passes and the five seconds
+    # between them added an hour of doing nothing. A pass is also bounded by
+    # the wall clock below, so a larger batch cannot outlive its lease.
+    catalog_import_batch: int = Field(default=200, ge=1, le=5000)
+    # A pass stops at this fraction of the job lease regardless of the batch,
+    # so a slow source can never let a pass write past its own lease.
+    catalog_import_pass_lease_fraction: float = Field(default=0.5, gt=0.0, le=0.9)
+    # How often a running pass moves `lease_until`. The lease is fifteen
+    # minutes; touching it every three is ample. It used to be touched once per
+    # HTTP request, which is four round trips for a timestamp nothing was
+    # waiting on.
+    catalog_import_lease_touch_seconds: float = Field(default=180.0, ge=1.0)
+    # Steps between durable checkpoints. Between them only observations are
+    # written; the cursor and the operation plan move together, so an
+    # interrupted pass re-reads at most this many pages and never loses the
+    # courses those pages discovered.
+    catalog_import_checkpoint_steps: int = Field(default=25, ge=1, le=1000)
+    # How many source pages may be in flight at once. Each one needs its own
+    # client, because a portal session serves one page at a time. One is the
+    # long-standing behaviour; raise it only against a source that tolerates
+    # more than one session for the same account.
+    catalog_import_concurrency: int = Field(default=1, ge=1, le=8)
     # Local hours for automatic refreshes, as "start-end".
     catalog_warm_hours: str = "1-7"
     catalog_warm_poll_seconds: int = 900  # Enabled catalog imports cap polling at 5s.
@@ -316,6 +355,22 @@ class Settings(BaseSettings):
     agentos_jwt_audience: str = "devrimo"
     agentos_admin_scope: str = "agentos:admin"
     agentos_cors_origins: str = "https://os.agno.com"
+
+    @model_validator(mode="after")
+    def _fixtures_are_development_only(self) -> "Settings":
+        """Fixture mode outside development or test is a configuration error.
+
+        Fails at construction — which is import time for the app — so a
+        misconfigured deployment refuses to start instead of serving invented
+        course data under a real student's name.
+        """
+        if self.campus_fixture_mode and self.environment not in ("development", "test"):
+            raise ValueError(
+                "CAMPUS_FIXTURE_MODE is only valid when ENVIRONMENT is 'development' or 'test'; "
+                f"this process has ENVIRONMENT={self.environment!r}. Synthetic campus data must "
+                "never be served to real students."
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

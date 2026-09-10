@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import random
+import time
 import traceback
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -170,6 +171,96 @@ async def admit_request(organization_id: UUID, job_id: UUID | None, lease_token:
                 return
             await db.commit()
         await asyncio.sleep(min(wait, 30))
+
+
+class LeaseKeeper:
+    """Keeps a running job's lease alive without a transaction per request.
+
+    The gate this replaces is an httpx request hook: it fires once for every
+    HTTP request the source client makes, redirects included. It opened a
+    session, took a row lock on the job, moved `lease_until` and committed -
+    four round trips to a database in another country, four or five times per
+    course, for a timestamp with fifteen minutes of headroom on it. Against the
+    10,048-step whole-term plan that is close to two of its eight hours.
+
+    So the touch is rate-limited in memory. The fence it also provided is
+    unchanged in strength: every write a pass makes still goes through
+    _owned_job, so a worker whose lease was taken over still cannot write. It
+    only learns about it later, and the writes it would have made are the ones
+    already fenced.
+    """
+
+    def __init__(self, organization_id: UUID, job_id: UUID | None, lease_token: UUID | None):
+        self.organization_id = organization_id
+        self.job_id = job_id
+        self.lease_token = lease_token
+        self._next_touch = 0.0
+
+    async def __call__(self) -> None:
+        if self.job_id is None:
+            # The legacy warmer's gate, which really does have to run per
+            # request: it is a daily HTTP budget, not a lease.
+            await admit_request(self.organization_id, None, self.lease_token)
+            return
+        now = time.monotonic()
+        if now < self._next_touch:
+            return
+        # Claim the window before awaiting, so a burst of concurrent requests
+        # cannot all decide to touch the same row at the same moment.
+        self._next_touch = now + max(1.0, get_settings().catalog_import_lease_touch_seconds)
+        await admit_request(self.organization_id, self.job_id, self.lease_token)
+
+
+class SourceFleet:
+    """One or more independent clients on the same account.
+
+    A client is a portal session, and a portal session serves one page at a
+    time: SAIS keeps a single app-proxy session per cookie jar, so two
+    overlapping calls on one client would read each other's pages. That is what
+    the client's own lock is for, and it is why fetching two courses at once
+    needs two clients rather than two calls.
+
+    A fleet of one is exactly the previous behaviour, one page after another.
+    """
+
+    def __init__(self, sources):
+        self.sources = list(sources)
+        self._idle: asyncio.Queue = asyncio.Queue()
+        for source in self.sources:
+            self._idle.put_nowait(source)
+
+    @property
+    def size(self) -> int:
+        return len(self.sources)
+
+    async def _read(self, step: dict):
+        source = await self._idle.get()
+        try:
+            return step, await source.read(step["tool"], step["values"]), None
+        except Exception as exc:
+            # Returned rather than raised, so one unreadable page cannot
+            # discard the pages fetched alongside it. The caller decides which
+            # failures belong to a page and which end the pass.
+            return step, None, exc
+        finally:
+            self._idle.put_nowait(source)
+
+    async def read_all(self, window: list[dict]):
+        """Every step in the window, in plan order, each with its outcome."""
+        if len(window) == 1:
+            return [await self._read(window[0])]
+        return list(await asyncio.gather(*(self._read(step) for step in window)))
+
+    async def aclose(self) -> None:
+        for source in self.sources:
+            try:
+                await source.aclose()
+            except Exception:
+                logger.warning("catalog_source_close_failed")
+
+
+def _step_key(step: dict) -> str:
+    return str((step["tool"], sorted(step["values"].items())))
 
 
 async def _claim(*, manual_only: bool = False):
@@ -511,7 +602,11 @@ async def run_once() -> CatalogPassResult:
             )
         source = None
         try:
-            source = CatalogSource(secret, lambda: admit_request(job.organization_id, job.id, job.lease_token))
+            # One keeper for the whole pass: `lease_until` moves on a timer
+            # rather than once per HTTP request. See LeaseKeeper.
+            keeper = LeaseKeeper(job.organization_id, job.id, job.lease_token)
+            concurrency = max(1, int(settings.catalog_import_concurrency))
+            source = SourceFleet(CatalogSource(secret, keeper) for _ in range(concurrency))
             # Skipping one department is not the same as a source answering
             # nothing at all. These two tell those apart.
             succeeded = 0
@@ -521,70 +616,29 @@ async def run_once() -> CatalogPassResult:
             started_offset = offset
             listing_refusal: ValueError | None = None
             listing_refusal_step: dict | None = None
-            while offset < len(steps) and fetched < settings.catalog_warm_batch:
-                step = steps[offset]
-                # A page METU will not give us is one page, not a broken
-                # import. The parser is right to refuse what it cannot read or
-                # identify; what was wrong is that the refusal ended the pass.
-                # Twice now that has cost a whole school: a programme with no
-                # course list sorts first among 207 departments, and later a
-                # single section's restriction table stopped an import 429 steps
-                # in, with 2467 courses already read. The failure is recorded
-                # against its own step - it shows on that course in the panel -
-                # and the plan moves on. Only a parse refusal: a lost lease, an
-                # authentication failure and a deferral still belong to the
-                # caller below, because those are not about one page.
-                try:
-                    payload = await source.read(step["tool"], step["values"])
-                except ValueError as exc:
-                    logger.warning(
-                        "catalog_step_skipped",
-                        job_id=str(job.id),
-                        step_tool=step["tool"],
-                        step_values=step["values"],
-                        detail=_safe_error_detail(str(exc)),
-                    )
-                    async with SessionLocal() as db:
-                        await _owned_job(db, job.id, job.lease_token)
-                        await catalog_service.ingest_observation(
-                            db, job.organization_id, step["tool"], step["values"], None,
-                            datetime.now(UTC), source_fetched_at=None, job_id=job.id,
-                        )
-                        await db.commit()
-                    # The first one, which is the one that says what went wrong;
-                    # the ones after it are usually the same thing again.
-                    listing_refusal = listing_refusal or exc
-                    listing_refusal_step = listing_refusal_step or step
-                    offset += 1
-                    fetched += 1
-                    # Cleared like any other step that finished: a page METU
-                    # would not give us is recorded on its own observation, and
-                    # leaving it in the job's error left the admin panel showing
-                    # a red line on a job that was walking along fine. A pass
-                    # where nothing answered still fails, below.
-                    await _save_offset(job.id, job.lease_token, offset, error_code=None, error_detail=None)
-                    continue
-                observed = datetime.now(UTC)
-                async with SessionLocal() as db:
-                    await _owned_job(db, job.id, job.lease_token)
-                    await catalog_service.ingest_observation(db, job.organization_id, step["tool"], step["values"], payload,
-                                             observed, source_fetched_at=observed, job_id=job.id)
-                    await db.commit()
-                added = expand_steps(step, payload, job.term)
-                if (job.payload or {}).get("discovery_only") and step["tool"] in {"list_program_courses", "get_thesis_courses"}:
-                    added = []
-                # Restrictions for this course precede the next expensive detail fetch.
-                if step["tool"] == "get_course_info":
-                    steps[offset + 1:offset + 1] = added
-                else:
-                    existing = {str((s["tool"], sorted(s["values"].items()))) for s in steps}
-                    steps.extend(s for s in added if str((s["tool"], sorted(s["values"].items()))) not in existing)
-                offset += 1
-                fetched += 1
-                succeeded += 1
-                if added:
-                    # Persist a changed operation plan in full. The common
-                    # case after that is a cursor-only update below.
+            # Plan expansions that have not been written yet. The cursor is only
+            # ever persisted together with the plan the steps behind it grew, so
+            # an interrupted pass re-reads a few pages rather than skipping the
+            # courses those pages discovered. See _checkpoint below.
+            plan_pending = False
+            since_checkpoint = 0
+            checkpoint_every = max(1, int(settings.catalog_import_checkpoint_steps))
+            # A pass may not outlive its own lease. The batch is a step count
+            # and a step's cost depends on METU, so the wall clock is what
+            # actually bounds this.
+            pass_deadline = time.monotonic() + max(
+                30.0,
+                settings.academic_catalog_job_lease_seconds * settings.catalog_import_pass_lease_fraction,
+            )
+
+            async def _checkpoint(**values):
+                """Write the cursor, and the operation plan when it has grown.
+
+                One transaction, not two, and the 1.1 MB whole-term plan is
+                written when it changes rather than after every fourth step.
+                """
+                nonlocal plan_pending, since_checkpoint, retry_pending
+                if plan_pending:
                     await _save(
                         job.id,
                         job.lease_token,
@@ -592,8 +646,8 @@ async def run_once() -> CatalogPassResult:
                         error_code=None,
                         error_detail=None,
                         attempts=0,
+                        **values,
                     )
-                    retry_pending = False
                 else:
                     await _save_offset(
                         job.id,
@@ -603,8 +657,105 @@ async def run_once() -> CatalogPassResult:
                         error_code=None,
                         error_detail=None,
                         attempts=0,
+                        **values,
                     )
-                    retry_pending = False
+                plan_pending = False
+                since_checkpoint = 0
+                retry_pending = False
+
+            while offset < len(steps) and fetched < settings.catalog_import_batch:
+                if time.monotonic() > pass_deadline:
+                    break
+                # As many pages as there are clients to read them with, never
+                # more than the batch still allows.
+                window = steps[offset:offset + min(source.size, settings.catalog_import_batch - fetched)]
+                results = await source.read_all(window)
+                # A failure that is not about one page - a lost lease, an
+                # authentication failure, a deferral - ends the pass, but only
+                # after the pages fetched alongside it have been kept.
+                stop: BaseException | None = None
+                # Expansions are applied after the whole window rather than
+                # immediately, because the rest of the window has already been
+                # read and inserting ahead of it would move it under the cursor.
+                inserts: list[dict] = []
+                appends: list[dict] = []
+                for step, payload, failure in results:
+                    if failure is not None and not isinstance(failure, ValueError):
+                        stop = failure
+                        break
+                    if isinstance(failure, ValueError):
+                        # A page METU will not give us is one page, not a broken
+                        # import. The parser is right to refuse what it cannot
+                        # read or identify; what was wrong is that the refusal
+                        # ended the pass. Twice that has cost a whole school: a
+                        # programme with no course list sorts first among 207
+                        # departments, and later a single section's restriction
+                        # table stopped an import 429 steps in with 2467 courses
+                        # already read. It is recorded against its own step - it
+                        # shows on that course in the panel - and the plan moves
+                        # on. A pass where nothing answered still fails, below.
+                        logger.warning(
+                            "catalog_step_skipped",
+                            job_id=str(job.id),
+                            step_tool=step["tool"],
+                            step_values=step["values"],
+                            detail=_safe_error_detail(str(failure)),
+                        )
+                        async with SessionLocal() as db:
+                            await _owned_job(db, job.id, job.lease_token)
+                            await catalog_service.ingest_observation(
+                                db, job.organization_id, step["tool"], step["values"], None,
+                                datetime.now(UTC), source_fetched_at=None, job_id=job.id,
+                            )
+                            await db.commit()
+                        # The first one, which is the one that says what went
+                        # wrong; the ones after it are usually the same again.
+                        listing_refusal = listing_refusal or failure
+                        listing_refusal_step = listing_refusal_step or step
+                        offset += 1
+                        fetched += 1
+                        since_checkpoint += 1
+                        continue
+                    observed = datetime.now(UTC)
+                    async with SessionLocal() as db:
+                        # The fence stays on the cheap path: a worker whose
+                        # lease was replaced must not write an observation.
+                        await _owned_job(db, job.id, job.lease_token)
+                        await catalog_service.ingest_observation(
+                            db, job.organization_id, step["tool"], step["values"], payload,
+                            observed, source_fetched_at=observed, job_id=job.id,
+                        )
+                        await db.commit()
+                    added = expand_steps(step, payload, job.term)
+                    discovery_only = (job.payload or {}).get("discovery_only")
+                    if discovery_only and step["tool"] in {"list_program_courses", "get_thesis_courses"}:
+                        added = []
+                    if added:
+                        # Restrictions for this course precede the next
+                        # expensive detail fetch; a listing's courses go on the
+                        # end. Applied after the window, below.
+                        (inserts if step["tool"] == "get_course_info" else appends).extend(added)
+                    offset += 1
+                    fetched += 1
+                    succeeded += 1
+                    since_checkpoint += 1
+                if inserts:
+                    steps[offset:offset] = inserts
+                    plan_pending = True
+                if appends:
+                    existing = {_step_key(s) for s in steps}
+                    fresh = [s for s in appends if _step_key(s) not in existing]
+                    if fresh:
+                        steps.extend(fresh)
+                        plan_pending = True
+                if stop is not None:
+                    # The cursor points at the step that was not read, and the
+                    # plan the read pages grew is kept, so the retry resumes
+                    # here rather than re-walking the window.
+                    await _checkpoint()
+                    raise stop
+                if since_checkpoint >= checkpoint_every:
+                    await _checkpoint()
             if succeeded == 0 and listing_refusal is not None and started_offset == 0:
                 # A source that never answered at all belongs in the job's
                 # error, rather than in an import that reports success and
@@ -632,12 +783,7 @@ async def run_once() -> CatalogPassResult:
                 # types and still end the pass above.
                 raise listing_refusal
             done = offset >= len(steps)
-            await _save_offset(
-                job.id,
-                job.lease_token,
-                offset,
-                clear_retry_at=retry_pending,
-                error_detail=None,
+            await _checkpoint(
                 status="completed" if done else "queued",
                 lease_until=None,
                 completed_at=datetime.now(UTC) if done else None,
