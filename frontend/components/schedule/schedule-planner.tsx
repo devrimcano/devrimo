@@ -1457,6 +1457,11 @@ export function SchedulePlanner() {
     const requestedCourses = catalogCourses.length;
     const unavailable: string[] = [];
     const unpublished: string[] = [];
+    // Timed sections exist, and none of them is one this student may take.
+    // Its own bucket because it asks for something different from the others:
+    // not "wait for METU", not "your surname is out of range", but "the
+    // sections that have times belong to other departments".
+    const closedToStudent: string[] = [];
     const needsVerification: string[] = [];
     let scheduledCourses = 0;
     let alternativeCount = 0;
@@ -1474,6 +1479,7 @@ export function SchedulePlanner() {
       alternatives: alternativeCount,
       unavailable_courses: unavailable.length,
       unpublished_courses: unpublished.length,
+      closed_to_student_courses: closedToStudent.length,
       restricted_courses: restrictedCourses,
       needs_verification_courses: needsVerification.length,
       unplaced_courses: unplacedCourses,
@@ -1537,6 +1543,18 @@ export function SchedulePlanner() {
         if (timed.some((section) => sectionNeedsVerification(section, verdicts[section.section]))) {
           needsVerification.push(course.code);
         }
+        // Whether a course can be placed is timed AND allowed, not timed alone.
+        //
+        // Measured on the live planner: HIST 2201 has 45 sections, 13 of them
+        // with published times and 2 the student is eligible for - and those
+        // two are among the untimed. Every existing bucket missed it. It was
+        // not "unpublished", because `timed` counted all 45 and found 13; it
+        // was not "restricted", because that needs *every* section ineligible
+        // and two were not. So it fell into `unplaced`, which had no message at
+        // all, and the course simply vanished off the week with nothing said.
+        else if (!ignoreConstraints && !timed.some((section) => sectionAllowed(course, section).allowed !== false)) {
+          closedToStudent.push(course.code);
+        }
       }
 
       // The fetched sections and server generated eligibility verdicts are
@@ -1576,7 +1594,7 @@ export function SchedulePlanner() {
         .map((course) => course.code);
       const unplaced = catalogCourses
         .filter((course) => !scheduled.has(courseIdentity(course.code)))
-        .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !needsVerification.includes(course.code) && !restricted.includes(course.code))
+        .filter((course) => !unavailable.includes(course.code) && !unpublished.includes(course.code) && !needsVerification.includes(course.code) && !restricted.includes(course.code) && !closedToStudent.includes(course.code))
         .map((course) => course.code);
       restrictedCourses = restricted.length;
       unplacedCourses = unplaced.length;
@@ -1613,6 +1631,13 @@ export function SchedulePlanner() {
       if (unavailable.length) toast.error(t(`${unavailable.join(", ")} için ODTÜ sisteminde şube bulunamadı.`, `No sections were found in METU's system for ${unavailable.join(", ")}.`));
       if (unpublished.length) toast.warning(t(`${unpublished.join(", ")} için gün ve saat ODTÜ tarafından henüz yayımlanmadı.`, `METU has not published days and times for ${unpublished.join(", ")} yet.`));
       if (restricted.length) toast.warning(t(`${restricted.join(", ")} için soyadına açık şube yok. Kısıtları yok sayarak tekrar dene.`, `No section of ${restricted.join(", ")} is open to your surname. Try again with restrictions ignored.`));
+      if (closedToStudent.length) toast.warning(t(`${closedToStudent.join(", ")} için saati yayımlanmış şubelerin hiçbiri sana açık değil; sana açık olanların saati henüz belli değil.`, `For ${closedToStudent.join(", ")}, none of the sections with published times is open to you, and the ones that are do not have times yet.`));
+      // The net under everything above. A course can leave the pool unplaced
+      // for a reason none of the buckets names - a solver that ran out of room,
+      // a rule nobody anticipated - and until now that course just was not
+      // there, with nothing on screen to read. Silence is the one outcome a
+      // planner must never have.
+      if (unplaced.length) toast.warning(t(`${unplaced.join(", ")} bu programa yerleştirilemedi. Tercihlerini gevşetip tekrar deneyebilirsin.`, `${unplaced.join(", ")} could not be placed in this schedule. Try again with your preferences relaxed.`));
       if (needsVerification.length) toast.warning(t(`${needsVerification.join(", ")} için şube kısıtlarını ODTÜ'den okuyamadım; kayıt olabildiğini kendin kontrol et.`, `I could not read the section restrictions for ${needsVerification.join(", ")} from METU; check yourself that you can register.`));
       if (!solved.state.alternatives.length) {
         toast.error(t(

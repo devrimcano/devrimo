@@ -109,6 +109,11 @@ type ProductEventProperties = {
     alternatives: number;
     unavailable_courses: number;
     unpublished_courses: number;
+    // Timed sections exist and none is open to this student — distinct from
+    // unpublished (METU has not said when) and from restricted (no section is
+    // open at all). Counted separately because it is the case that used to
+    // leave a course off the week with nothing said.
+    closed_to_student_courses: number;
     restricted_courses: number;
     needs_verification_courses: number;
     unplaced_courses: number;
