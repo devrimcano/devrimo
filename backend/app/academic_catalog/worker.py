@@ -512,6 +512,10 @@ async def run_once() -> CatalogPassResult:
         source = None
         try:
             source = CatalogSource(secret, lambda: admit_request(job.organization_id, job.id, job.lease_token))
+            # Skipping one department is not the same as a source answering
+            # nothing at all. These two tell those apart.
+            succeeded = 0
+            listing_refusal: ValueError | None = None
             while offset < len(steps) and fetched < settings.catalog_warm_batch:
                 step = steps[offset]
                 # A department METU lists but its course app will not serve is
@@ -542,6 +546,9 @@ async def run_once() -> CatalogPassResult:
                             datetime.now(UTC), source_fetched_at=None, job_id=job.id,
                         )
                         await db.commit()
+                    # The first one, which is the one that says what went wrong;
+                    # the ones after it are usually the same thing again.
+                    listing_refusal = listing_refusal or exc
                     offset += 1
                     fetched += 1
                     await _save_offset(job.id, job.lease_token, offset)
@@ -563,6 +570,7 @@ async def run_once() -> CatalogPassResult:
                     steps.extend(s for s in added if str((s["tool"], sorted(s["values"].items()))) not in existing)
                 offset += 1
                 fetched += 1
+                succeeded += 1
                 if added:
                     # Persist a changed operation plan in full. The common
                     # case after that is a cursor-only update below.
@@ -586,6 +594,13 @@ async def run_once() -> CatalogPassResult:
                         attempts=0,
                     )
                     retry_pending = False
+            if succeeded == 0 and listing_refusal is not None:
+                # Every listing refused and none answered: that is a source
+                # that is not working, not a programme METU does not serve, and
+                # it belongs in the job's error where someone will see it -
+                # rather than in an import that reports success and imports
+                # nothing.
+                raise listing_refusal
             done = offset >= len(steps)
             await _save_offset(
                 job.id,
