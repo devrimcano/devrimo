@@ -66,7 +66,13 @@ export default function LoginPage() {
           </div>
         </section>
 
-        <section className="order-1 flex min-w-0 items-center justify-center p-4 py-8 lg:order-2 sm:p-10 lg:p-14">
+        {/* Horizontal padding only where it is not already there. Measured at
+            375px: the shell's own px-3, this section's p-4 and the card's
+            padding stacked to 88px, so the sign-in form was 285px of a 375px
+            phone - a quarter of the screen spent insetting the same edge three
+            times. The card brings its own inset; this one only needs to keep it
+            off the shell's rounded border. */}
+        <section className="order-1 flex min-w-0 items-center justify-center px-2 py-8 lg:order-2 sm:p-10 lg:p-14">
           <div className="motion-enter min-w-0 w-full max-w-md [animation-delay:180ms]">
             {isSupabaseConfigured() ? (
               <Suspense>

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Devrimo">
+  <!--
+    The same mark as components/brand-mark.tsx, and the same geometry as the
+    generated favicon.ico: a tile inset 3 with a 14 radius, leaning -3 degrees,
+    a hard shadow 3.2 below it at 65% of the brand violet over black, and a
+    geometric D whose bowl is a true half-circle.
+
+    Vector because a tab icon is asked for at half a dozen sizes and a browser
+    that can take this one never has to pick between them. The .ico beside it
+    is for the ones that cannot.
+  -->
+  <g transform="rotate(-3 32 32)">
+    <rect x="3" y="6.2" width="58" height="58" rx="14" fill="#301f7b"/>
+    <rect x="3" y="3" width="58" height="58" rx="14" fill="#4a2fbd"/>
+    <path
+      fill="#ffffff"
+      fill-rule="evenodd"
+      d="M17 16 H31 A16 16 0 0 1 31 48 H17 Z
+         M25 24 H31 A8 8 0 0 1 31 40 H25 Z"/>
+  </g>
+</svg>

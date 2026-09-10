@@ -178,7 +178,11 @@ jobs:
           out=frontend/.next/standalone
           test -f "$out/server.js" || { echo '::error::next build produced no standalone server'; exit 1; }
           cp -r frontend/.next/static "$out/.next/static"
-          cp -r frontend/public "$out/public"
+          # Guarded: git does not track an empty directory, so a checkout of a
+          # tree whose public/ holds nothing has no public/ at all — and an
+          # unguarded copy would fail the build for the absence of files it was
+          # about to copy none of.
+          if [ -d frontend/public ]; then cp -r frontend/public "$out/public"; fi
           # Named so the host can refuse a bundle from a different commit
           # rather than serve one version's pages against another's API.
           printf '%s' "$GITHUB_SHA" > "$out/.built-sha"
