@@ -199,6 +199,37 @@ class ChatSession(Base):
     agent: Mapped[Agent] = relationship(back_populates="chat_sessions")
 
 
+class ChatTranscriptCache(Base):
+    """A conversation as it was last read out of Agno.
+
+    Opening a chat costs about half a second, and the measurements say where:
+    the database is in Frankfurt, a query round trip from the host is 40ms, and
+    Agno's own ``get_session`` spends 203ms of that on a one-message
+    conversation - roughly five sequential queries for a single line of text.
+
+    So the read is remembered. Nothing writes here on the turn-completion path,
+    which is the one that must never break: this fills in lazily the first time
+    a conversation is opened, and every open after that is one query.
+
+    ``source_updated_at`` is what makes it safe. It holds the ``updated_at`` of
+    the chat_sessions row the copy was built from, and that column moves on
+    every turn - so a cached copy can only ever be served for a conversation
+    that has not changed since. There is no invalidation to remember and no way
+    to serve a stale answer; a mismatch simply reads Agno again.
+
+    Agno remains the truth. This is a copy kept for display.
+    """
+
+    __tablename__ = "chat_transcript_cache"
+
+    session_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("chat_sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    messages: Mapped[list] = mapped_column(JSON, nullable=False)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class UserProfile(Base):
     """Per-user preferences and onboarding progress.
 

@@ -129,6 +129,76 @@ async def test_history_is_readable_without_the_agent_resident(client):
     assert messages[1]["content"]
 
 
+async def test_a_reopened_conversation_is_served_without_asking_agno_again(client, monkeypatch):
+    """The second open of an unchanged conversation costs one query, not five.
+
+    Opening a chat measured about half a second, and 203ms of it was Agno's own
+    read of a one-message conversation - roughly five sequential queries to a
+    database in Frankfurt. The answer does not change while the conversation
+    does not, so it is read once and remembered.
+    """
+    from app.api.v1 import sessions as sessions_api
+
+    headers = auth_header(new_user_id())
+    await provision(client, headers)
+    await send(client, headers, "what is my CGPA")
+    await close_all()
+
+    first = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    assert first.status_code == 200
+    expected = first.json()["messages"]
+    assert [m["role"] for m in expected] == ["user", "assistant"]
+
+    # Agno is made unavailable. A second open must not need it.
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the remembered copy was not used")
+
+    monkeypatch.setattr(sessions_api, "_load_history", refuse)
+
+    second = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    assert second.status_code == 200
+    assert second.json()["messages"] == expected
+
+
+async def test_a_new_turn_retires_the_remembered_copy(client):
+    """A copy is only ever served for a conversation that has not changed."""
+    headers = auth_header(new_user_id())
+    await provision(client, headers)
+    await send(client, headers, "first question")
+    await close_all()
+
+    before = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    assert len(before.json()["messages"]) == 2
+
+    await send(client, headers, "second question")
+    await close_all()
+
+    after = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    contents = [m["content"] for m in after.json()["messages"]]
+    assert "second question" in contents, "a stale copy hid the newest turn"
+    assert len(after.json()["messages"]) > 2
+
+
+async def test_a_broken_cache_costs_nothing_but_speed(client, monkeypatch):
+    """The optimisation must never be the reason a conversation fails to open."""
+    from app.api.v1 import sessions as sessions_api
+
+    headers = auth_header(new_user_id())
+    await provision(client, headers)
+    await send(client, headers, "what is my CGPA")
+    await close_all()
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("cache table is unavailable")
+
+    monkeypatch.setattr(sessions_api, "_cached_transcript", broken)
+    monkeypatch.setattr(sessions_api, "_remember_transcript", broken)
+
+    detail = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    assert detail.status_code == 200
+    assert [m["role"] for m in detail.json()["messages"]] == ["user", "assistant"]
+
+
 async def test_history_never_includes_the_system_prompt(client):
     # Agno's stored history contains the persona; returning it would hand the
     # system prompt to anyone with devtools open.

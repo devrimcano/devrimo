@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.store import get_agno_db
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
-from app.db.models import ChatSession
+from app.db.models import ChatSession, ChatTranscriptCache
 from app.db.session import get_db
 from app.logging import get_logger
 from app.observability.client import report_exception
@@ -76,6 +76,50 @@ def _load_history(agno_session_id: str, user_id: str) -> list[ChatMessageOut]:
     return [out for out in (_to_message_out(m) for m in messages) if out is not None]
 
 
+async def _cached_transcript(db: AsyncSession, session: ChatSession) -> list[ChatMessageOut] | None:
+    """The stored copy, when it was taken from this exact version of the chat.
+
+    ``source_updated_at`` is the chat_sessions row's ``updated_at`` at the time
+    the copy was made, and that column moves on every turn. Comparing them is
+    the whole of the invalidation: a copy from an older version is simply not
+    used, so there is nothing to remember to clear.
+    """
+    try:
+        cached = await db.get(ChatTranscriptCache, session.id)
+        if cached is None or cached.source_updated_at != session.updated_at:
+            return None
+        return [ChatMessageOut(**message) for message in cached.messages]
+    except Exception as exc:
+        # Anything at all - a schema not yet migrated, a malformed row - means
+        # read it from Agno instead. This is an optimisation and is never
+        # allowed to be the reason a conversation fails to open.
+        logger.warning("transcript_cache_read_failed", session_id=session.id, error=str(exc))
+        return None
+
+
+async def _remember_transcript(db: AsyncSession, session: ChatSession, messages: list[ChatMessageOut]) -> None:
+    """Store what Agno just returned, against the version it was read from."""
+    try:
+        payload = [message.model_dump() for message in messages]
+        existing = await db.get(ChatTranscriptCache, session.id)
+        if existing is None:
+            db.add(ChatTranscriptCache(
+                session_id=session.id,
+                source_updated_at=session.updated_at,
+                messages=payload,
+            ))
+        else:
+            existing.source_updated_at = session.updated_at
+            existing.messages = payload
+            existing.cached_at = datetime.now(UTC)
+        await db.commit()
+    except Exception as exc:
+        # The student already has their history; failing to remember it is not
+        # their problem. Roll back so the request still returns cleanly.
+        await db.rollback()
+        logger.warning("transcript_cache_write_failed", session_id=session.id, error=str(exc))
+
+
 @router.get("", response_model=ChatSessionListOut)
 async def list_sessions(
     user: AuthenticatedUser = Depends(get_current_user),
@@ -98,6 +142,30 @@ async def get_session(
 ) -> ChatSessionDetailOut:
     session = await _get_owned_session(db, user.id, session_id)
 
+    # The copy taken the last time this conversation was read, if it is still
+    # the same conversation. See ChatTranscriptCache: opening a chat spent
+    # 203ms inside Agno for a single message, which is about five sequential
+    # queries to a database in Frankfurt, and none of it is needed twice.
+    #
+    # Every step here falls back to the Agno read below rather than failing:
+    # a cache that cannot be reached must never be able to cost a student
+    # their history.
+    try:
+        cached = await _cached_transcript(db, session)
+    except Exception:
+        # The guarantee lives here rather than inside the helper: whatever goes
+        # wrong reading a remembered copy, the conversation still opens by the
+        # path it opened by before any of this existed.
+        cached = None
+    if cached is not None:
+        return ChatSessionDetailOut(
+            id=session.id,
+            title=session.title,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            messages=cached,
+        )
+
     try:
         messages = await asyncio.to_thread(_load_history, session.agno_session_id or session.id, str(user.id))
     except Exception as exc:
@@ -112,6 +180,16 @@ async def get_session(
             **{"$exception_fingerprint": ["history_load_failed"]},
         )
         messages = []
+    else:
+        # Only a read that actually answered is worth remembering. An empty
+        # result is stored too - an empty conversation is a real answer - but a
+        # failed one above never reaches here.
+        try:
+            await _remember_transcript(db, session, messages)
+        except Exception:
+            # The student already has their history. Failing to remember it
+            # costs the next open some speed and nothing else.
+            pass
 
     return ChatSessionDetailOut(
         id=session.id,
