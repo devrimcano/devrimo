@@ -932,7 +932,20 @@ export function SchedulePlanner() {
   // short debounce for rapid UI changes, while the server still orders each
   // request with its revision and idempotency key.
   useEffect(() => {
-    if (!hydrated || !planningReady || planning.saving || planning.retryable || planning.conflict) return;
+    // `saveError` belongs in this guard for the same reason it is already in
+    // submitPlanningUpdate's, and leaving it out made the two disagree.
+    //
+    // A rejected save does not change the local state, so the fingerprint still
+    // differs from the server's and this effect fires again - and each attempt
+    // begins by clearing saveError. Measured on the live planner: marking a day
+    // free while a class sat on it was answered 422 four times in five seconds,
+    // and the error banner was wiped at the start of every retry, so the
+    // student saw nothing at all while the request that could never succeed was
+    // replayed for as long as the page stayed open.
+    //
+    // Replaying a validation failure cannot fix it. Stopping leaves the banner
+    // standing, which is the whole point of having one.
+    if (!hydrated || !planningReady || planning.saving || planning.retryable || planning.conflict || planning.saveError) return;
     const fingerprint = localFingerprint;
     if (fingerprint === serverStateFingerprint.current) return;
     const timer = window.setTimeout(() => {
@@ -941,7 +954,7 @@ export function SchedulePlanner() {
       void planningUpdate({ operation: "replace", state: localCanonicalState }, submitted.idempotencyKey);
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [hydrated, localCanonicalState, localFingerprint, planning.conflict, planning.retryable, planning.saving, planningIdentity, planningReady, planningUpdate, term]);
+  }, [hydrated, localCanonicalState, localFingerprint, planning.conflict, planning.retryable, planning.saveError, planning.saving, planningIdentity, planningReady, planningUpdate, term]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2134,8 +2147,24 @@ export function SchedulePlanner() {
           </div>
         ) : planning.saveError ? (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
-            <span className="min-w-0 flex-1">{planning.saveError}</span>
-            {planning.retryable ? <Button size="sm" variant="outline" onClick={() => void planning.retry()} disabled={planning.saving}>{t("Tekrar dene", "Retry")}</Button> : null}
+            <span className="min-w-0 flex-1">
+              {planning.saveError}
+              {/* A failure that cannot be replayed leaves the screen showing a
+                  change the server does not have, and the raw message is the
+                  broker's own English. Say what it means for the plan, and give
+                  the one action that resolves it. */}
+              {planning.retryable ? null : (
+                <span className="block opacity-90">
+                  {t(
+                    "Bu değişiklik kaydedilmedi. Sayfayı yenilediğinde kayıtlı program geri gelir.",
+                    "This change was not saved. Reload to return to the stored schedule.",
+                  )}
+                </span>
+              )}
+            </span>
+            {planning.retryable
+              ? <Button size="sm" variant="outline" onClick={() => void planning.retry()} disabled={planning.saving}>{t("Tekrar dene", "Retry")}</Button>
+              : <Button size="sm" variant="outline" onClick={() => window.location.reload()}>{t("Yenile", "Reload")}</Button>}
           </div>
         ) : null}
 
@@ -2339,7 +2368,34 @@ export function SchedulePlanner() {
                         key={day}
                         type="button"
                         aria-pressed={chosen}
-                        onClick={() => setEmptyDays((current) => chosen ? current.filter((item) => item !== day) : [...current, day])}
+                        onClick={() => {
+                          // Marking a day free while a class sits on it is a
+                          // state the server refuses, and refusing it here is
+                          // the only way the student ever finds out.
+                          //
+                          // Measured on the live planner: with PHYS 213 on a
+                          // Tuesday, pressing "Sal" left the button pressed and
+                          // the summary reading "Boş: Sal" while every save was
+                          // answered 422 "entry falls on a selected empty day:
+                          // Tue". Four rejections, no toast, no banner - and the
+                          // preference was gone on the next reload, because it
+                          // had never been stored at all.
+                          //
+                          // The opposite direction was already guarded: adding a
+                          // section onto a day already marked free says so. This
+                          // is that same rule, read the other way round.
+                          if (!chosen) {
+                            const onThatDay = entries.filter((entry) => entry.day === day);
+                            if (onThatDay.length) {
+                              const codes = [...new Set(onThatDay.map((entry) => entry.code))].join(", ");
+                              return toast.error(t(
+                                `${dayLabel(day)} günü boş işaretlenemiyor: programda ${codes} var. Önce o dersi kaldır.`,
+                                `${dayLabel(day)} cannot be marked free: ${codes} is on it. Remove that first.`,
+                              ));
+                            }
+                          }
+                          setEmptyDays((current) => chosen ? current.filter((item) => item !== day) : [...current, day]);
+                        }}
                         className={cn("h-9 flex-1 rounded-md border text-xs font-medium transition", chosen ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent")}
                       >
                         {dayLabel(day)}
