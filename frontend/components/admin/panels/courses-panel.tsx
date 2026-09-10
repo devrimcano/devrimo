@@ -60,6 +60,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { adminGet, adminMutate } from "@/lib/admin/client";
+import { newId } from "@/lib/new-id";
 import type { AdminPrincipal } from "@/lib/admin/types";
 import {
   conflictCount,
@@ -699,7 +700,7 @@ export function CoursesPanel({
       draft_ids: selectedRows.map((row) => row.draft_id).filter((id): id is string => Boolean(id)),
       expected_release_id: activeReleaseId,
       acknowledge_conflicts: payload.acknowledge_conflicts,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: newId(),
       reason: payload.reason,
     }),
     onSuccess: () => {
@@ -715,7 +716,7 @@ export function CoursesPanel({
       term,
       target_release_id: payload.target_release_id,
       expected_release_id: activeReleaseId,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: newId(),
       reason: payload.reason,
     }),
     onSuccess: () => {

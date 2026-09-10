@@ -1,6 +1,8 @@
 "use client";
 
 import { PlanSaveTracker } from "@/lib/planning-sync";
+import { newId } from "@/lib/new-id";
+import { ApiError } from "@/lib/api/errors";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -873,7 +875,7 @@ export function SchedulePlanner() {
   /** Submit an explicit planner mutation and reconcile it with local edits. */
   const submitPlanningUpdate = useCallback((changes: Parameters<typeof planningUpdate>[0]) => {
     if (planning.saving || planning.retryable || planning.conflict || planning.saveError) return Promise.resolve(null);
-    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: newId() };
     saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
     const result = planningUpdate(changes, submitted.idempotencyKey);
     void result.then((next) => {
@@ -891,7 +893,7 @@ export function SchedulePlanner() {
     const fingerprint = localFingerprint;
     if (fingerprint === serverStateFingerprint.current) return;
     const timer = window.setTimeout(() => {
-      const submitted: SubmittedMutation = { term, fingerprint, idempotencyKey: crypto.randomUUID() };
+      const submitted: SubmittedMutation = { term, fingerprint, idempotencyKey: newId() };
       saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
       void planningUpdate({ operation: "replace", state: localCanonicalState }, submitted.idempotencyKey);
     }, 350);
@@ -980,7 +982,7 @@ export function SchedulePlanner() {
   async function addEntry() {
     const code = draft.code.trim().toUpperCase().replace(/\s+/g, " ");
     if (!code) return toast.error(t("Ders kodu veya blok adı gerekli.", "A course code or block name is required."));
-    let next: Entry = { ...draft, id: crypto.randomUUID(), code, name: draft.name.trim() || code, room: draft.room.trim(), color: uniqueCourses % COLORS.length, kind: code.startsWith("BLOCK:") ? "block" : "course" };
+    let next: Entry = { ...draft, id: newId(), code, name: draft.name.trim() || code, room: draft.room.trim(), color: uniqueCourses % COLORS.length, kind: code.startsWith("BLOCK:") ? "block" : "course" };
     if (emptyDays.includes(next.day)) return toast.error(t("Bu günü boş gün olarak seçtin.", "You selected this as an empty day."));
     if (avoidConflicts && entries.some((entry) => overlaps(entry, next))) return toast.error(t("Bu saat mevcut bir dersle çakışıyor.", "This time conflicts with an existing course."));
 
@@ -1591,13 +1593,19 @@ export function SchedulePlanner() {
       }
     } catch (error) {
       emitPlanCompleted("error", "solve");
-      toast.error(error instanceof Error ? error.message : t("Program oluşturulamadı.", "The schedule could not be generated."));
+      // A message the server wrote for a person is worth showing; anything
+      // else is this application failing, and its own words are no use to a
+      // student. "crypto.randomUUID is not a function" is what this line put
+      // in front of one, on the only button the page exists for.
+      toast.error(error instanceof ApiError
+        ? error.message
+        : t("Program oluşturulamadı. Birkaç saniye sonra tekrar dene.", "The schedule could not be generated. Try again in a few seconds."));
     } finally { setGenerateProgress(null); }
   }
 
   async function handleUndo() {
     if (planning.saving || planning.retryable || planning.conflict || !planning.envelope?.can_undo) return;
-    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: newId() };
     saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
     const next = await planning.undo(submitted.idempotencyKey);
     if (!next) return;
@@ -1606,7 +1614,7 @@ export function SchedulePlanner() {
 
   async function handleImportLegacy() {
     if (!planning.legacyDraft || planning.saving || planning.retryable || planning.conflict) return;
-    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: newId() };
     saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
     const next = await planning.importLegacy(submitted.idempotencyKey);
     if (!next) return;
@@ -1615,7 +1623,7 @@ export function SchedulePlanner() {
 
   async function handleRestoreRecovery() {
     if (!planning.recoveryDraft || planning.saving || planning.retryable || planning.conflict) return;
-    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: crypto.randomUUID() };
+    const submitted: SubmittedMutation = { term, fingerprint: localFingerprintRef.current, idempotencyKey: newId() };
     saveTracker.current.submit(submitted.idempotencyKey, submitted.term, submitted.fingerprint);
     const next = await planning.restoreRecovery(submitted.idempotencyKey);
     if (!next) return;
@@ -1673,7 +1681,7 @@ export function SchedulePlanner() {
     // Eligibility is checked by the canonical owner when this state is saved.
     // The browser may show the catalog verdict, but it cannot make the
     // registration decision that chat and other clients must also observe.
-    const additions = section.meetings.map((meeting, index) => ({ id: crypto.randomUUID(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, tentative, verification_status: tentative ? "tentative" as const : "verified" as const, catalog_release_id: tentative ? null : section.catalog_release_id ?? null, ...meeting }));
+    const additions = section.meetings.map((meeting, index) => ({ id: newId(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, tentative, verification_status: tentative ? "tentative" as const : "verified" as const, catalog_release_id: tentative ? null : section.catalog_release_id ?? null, ...meeting }));
     if (avoidConflicts && additions.some((next) => entries.some((entry) => overlaps(entry, next)))) return toast.error(t("Bu şube mevcut programla çakışıyor.", "This section conflicts with your schedule."));
     setEntries((current) => [...current, ...additions]);
     toast.success(t(`${course.code} şube ${section.section} eklendi.`, `${course.code} section ${section.section} added.`));

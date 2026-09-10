@@ -1,3 +1,5 @@
+import { newId } from "@/lib/new-id";
+
 /**
  * The vocabulary and metadata shared by every telemetry call in this app.
  *
@@ -42,11 +44,9 @@ export function outcomeForStatus(status: number): Outcome {
 }
 
 export function newRequestId(): string {
-  // `randomUUID` needs a secure context, which a preview served over plain
-  // HTTP is not. A correlation id that is merely unique is fine here.
-  const uuid = globalThis.crypto?.randomUUID?.();
-  if (uuid) return uuid;
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  // One implementation, in lib/new-id.ts, which explains why the guard is
+  // needed. This function was the only place that had it.
+  return newId();
 }
 
 /** The correlation id on an incoming request, or a fresh one. */

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { newId } from "@/lib/new-id";
 
 /**
  * Ask the assistant about the schedule being built, without leaving the page.
@@ -49,7 +50,7 @@ export function PlannerAssistant({ className }: { className?: string }) {
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
-          messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: trimmed }] }],
+          messages: [{ id: newId(), role: "user", parts: [{ type: "text", text: trimmed }] }],
         }),
       });
       if (!response.ok || !response.body) throw new Error(`Request failed (${response.status})`);

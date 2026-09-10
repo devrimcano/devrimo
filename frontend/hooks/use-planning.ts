@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/errors";
+import { newId } from "@/lib/new-id";
 import { jsonFetch } from "@/lib/api/fetcher";
 
 export type PlanDay = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
@@ -321,20 +322,20 @@ export function usePlanning(term: string) {
     return queue.current;
   }, [execute]);
 
-  const update = useCallback((changes: PlanChanges, idempotencyKey = crypto.randomUUID()) => {
+  const update = useCallback((changes: PlanChanges, idempotencyKey = newId()) => {
     if (blocked.current || pendingFailure.current || activeTerm.current !== term) return Promise.resolve(null);
     return enqueue({ epoch: loadSequence.current, kind: "update", term, idempotency_key: idempotencyKey, changes });
   }, [enqueue, term]);
 
   /** Apply a server-generated plan proposal through the same revision queue. */
-  const applyProposal = useCallback((changes: PlanChanges, idempotencyKey = crypto.randomUUID()) => {
+  const applyProposal = useCallback((changes: PlanChanges, idempotencyKey = newId()) => {
     if (changes.operation !== "apply_proposal") {
       return Promise.reject(new Error("A proposal application must use apply_proposal."));
     }
     return update(changes, idempotencyKey);
   }, [update]);
 
-  const undo = useCallback((idempotencyKey = crypto.randomUUID()) => {
+  const undo = useCallback((idempotencyKey = newId()) => {
     if (blocked.current || pendingFailure.current || activeTerm.current !== term) return Promise.resolve(null);
     return enqueue({ epoch: loadSequence.current, kind: "undo", term, idempotency_key: idempotencyKey });
   }, [enqueue, term]);
