@@ -106,8 +106,44 @@ def smoke(release: Path, node: str) -> None:
                 (release / "smoke.log").unlink(missing_ok=True)
 
 
+def carry_static_forward(previous: Path, release: Path) -> int:
+    """Keep the outgoing build's browser assets reachable from the new release.
+
+    The edge serves /_next/static straight off disk, from whichever release the
+    `frontend` symlink points at. So the moment a deploy swaps that link, every
+    asset filename that changed in this build stops existing — and a student who
+    had the app open is still asking for the old ones.
+
+    Measured across two consecutive releases: 42 chunks each, 39 shared, 3 that
+    only the outgoing build had, and the live edge answered 404 for one of them.
+    That is a real person mid-session getting a script that will not load, and
+    it happens on every deploy that changes a chunk.
+
+    The filenames carry a content hash, so the two sets cannot disagree about
+    what a name means: copying the missing ones forward is safe, and the new
+    build always wins where both have a file. Only files are added, so the
+    smoke test still exercises the build that was actually shipped.
+
+    Returns how many files were carried, for the deploy log.
+    """
+    source, target = previous / ".next/static", release / ".next/static"
+    if not source.is_dir() or not target.is_dir():
+        return 0
+    carried = 0
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        destination = target / path.relative_to(source)
+        if destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        carried += 1
+    return carried
+
+
 def prepare(source: Path, release: Path, env_file: Path, node_bin: Path, sha: str,
-            prebuilt: Path | None = None) -> None:
+            prebuilt: Path | None = None, previous: Path | None = None) -> None:
     # A release is built at its permanent path: generated absolute paths stay valid.
     if source.resolve() == release.resolve() or release.exists():
         raise RuntimeError("Frontend release must be a new directory")
@@ -132,6 +168,10 @@ def prepare(source: Path, release: Path, env_file: Path, node_bin: Path, sha: st
                "GIT_COMMIT_SHA": sha, "NEXT_PUBLIC_RELEASE": sha, "NEXT_TELEMETRY_DISABLED": "1"}
         subprocess.run([str(node_bin / "npm"), "ci"], cwd=release, env=env, check=True)
         subprocess.run([str(node_bin / "npm"), "run", "build"], cwd=release, env=env, check=True)
+    if previous is not None and previous.is_dir():
+        carried = carry_static_forward(previous, release)
+        if carried:
+            print(f"Carried {carried} browser assets forward from the outgoing release")
     smoke(release, str(node_bin / "node"))
     # Root-led recovery and the ordinary devrimo deploy account both retain the
     # existing runtime owner's access to the copied private environment/cache.
@@ -167,11 +207,13 @@ def main():
     parser.add_argument("--sha")
     parser.add_argument("--prebuilt", type=Path,
                         help="A standalone build to install instead of building here")
+    parser.add_argument("--previous", type=Path,
+                        help="The release being replaced, whose browser assets are carried forward")
     parser.add_argument("--current", type=Path)
     parser.add_argument("--url", default="http://127.0.0.1:3000")
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare(args.source, args.release, args.env_file, args.node_bin, args.sha, args.prebuilt)
+        prepare(args.source, args.release, args.env_file, args.node_bin, args.sha, args.prebuilt, args.previous)
     elif args.command == "validate":
         validate_build(args.release)
     elif args.command == "smoke":

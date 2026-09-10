@@ -281,10 +281,21 @@ if [ -n "${FRONTEND_ARCHIVE:-}" ] && [ -f "$FRONTEND_ARCHIVE" ]; then
   echo "Installing the frontend built for $DEPLOY_SHA ($(du -sh "$prebuilt_frontend" | cut -f1))"
   prebuilt_args=(--prebuilt "$prebuilt_frontend")
 fi
+# The release being replaced, so its browser assets can be carried into the new
+# one. The edge serves /_next/static off disk from whichever release the symlink
+# points at, so without this every asset filename that changed in this build
+# stops existing the instant the link swaps — for students who have the app open
+# right now. Measured between two consecutive releases: three of forty-two
+# chunks differed, and the live edge answered 404 for one of them.
+outgoing_frontend="$(readlink -f "$DEPLOY_DIR/frontend" 2>/dev/null || true)"
+carry_args=()
+if [ -n "$outgoing_frontend" ] && [ -d "$outgoing_frontend/.next/static" ]; then
+  carry_args=(--previous "$outgoing_frontend")
+fi
 python3 "$frontend_tool" prepare --source "$stage_dir/frontend" \
   --release "$frontend_release" --env-file "$DEPLOY_DIR/frontend/.env.local" \
   --node-bin "$NODE_BIN" --sha "$DEPLOY_SHA" \
-  "${prebuilt_args[@]}"
+  "${prebuilt_args[@]}" "${carry_args[@]}"
 mkdir -p "$DEPLOY_DIR/scripts"
 install -m 0644 "$stage_dir/scripts/frontend_release.py" "$DEPLOY_DIR/scripts/frontend_release.py"
 install -m 0644 "$stage_dir/scripts/web_error_observer.py" "$DEPLOY_DIR/scripts/web_error_observer.py"

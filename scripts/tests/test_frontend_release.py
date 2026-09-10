@@ -137,6 +137,35 @@ class FrontendReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "standalone"):
             release.prepare(self.root / "source", self.root / "target", env_file, Path("/bin"), "abc", prebuilt)
 
+    def test_the_outgoing_builds_assets_survive_the_switch(self):
+        """A student with the app open is still asking for the old filenames."""
+        previous, incoming = self.root / "previous", self.root / "incoming"
+        for path, chunk, content in (
+            (previous, "old-only.js", "outgoing"),
+            (previous, "shared.js", "outgoing version"),
+            (incoming, "new-only.js", "incoming"),
+            (incoming, "shared.js", "incoming version"),
+        ):
+            target = path / ".next/static/chunks" / chunk
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+
+        carried = release.carry_static_forward(previous, incoming)
+
+        chunks = incoming / ".next/static/chunks"
+        self.assertEqual(carried, 1)
+        # The outgoing build's own chunk is reachable again.
+        self.assertEqual((chunks / "old-only.js").read_text(), "outgoing")
+        self.assertEqual((chunks / "new-only.js").read_text(), "incoming")
+        # Where both have a file the incoming build wins: the names carry a
+        # content hash, so this only happens for files that are not hashed.
+        self.assertEqual((chunks / "shared.js").read_text(), "incoming version")
+
+    def test_carrying_assets_is_skipped_when_there_is_nothing_to_carry(self):
+        incoming = self.root / "incoming"
+        (incoming / ".next/static").mkdir(parents=True)
+        self.assertEqual(release.carry_static_forward(self.root / "nothing-here", incoming), 0)
+
     def test_healthy_login_with_missing_asset_fails_health_check(self):
         response = io.BytesIO(b'<html><script src="/_next/static/missing.js"></script></html>')
         response.status = 200
