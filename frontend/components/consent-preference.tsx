@@ -40,14 +40,14 @@ export function ConsentPreference() {
 
   const state = !consent.decided
     ? pick({
-        tr: "Henüz bir tercih belirtmedin; isteğe bağlı çerezlerin hiçbiri yüklenmiyor.",
-        en: "You have not chosen yet; none of the optional cookies are loaded.",
+        tr: "Henüz seçmedin — o yüzden isteğe bağlı hiçbir çerez yüklenmiyor.",
+        en: "You haven't chosen yet — so no optional cookies are loaded.",
       })
     : consent.measurement
       ? consent.replay
-        ? pick({ tr: "Ölçüm ve oturum kaydı açık.", en: "Measurement and session recording are on." })
-        : pick({ tr: "Ölçüm açık, oturum kaydı kapalı.", en: "Measurement is on, session recording is off." })
-      : pick({ tr: "İsteğe bağlı çerezlerin hiçbiri kullanılmıyor.", en: "None of the optional cookies are in use." });
+        ? pick({ tr: "İkisi de açık. Teşekkürler, gerçekten yardımı oluyor.", en: "Both are on. Thank you — it genuinely helps." })
+        : pick({ tr: "Sayım açık, kayıt kapalı.", en: "Counting is on, recording is off." })
+      : pick({ tr: "Hepsi kapalı. Site yine tam çalışıyor.", en: "All off. The site still works fully." });
 
   return (
     <div className="border-border flex flex-col gap-3 rounded-lg border p-3">
@@ -56,17 +56,17 @@ export function ConsentPreference() {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium">
-            {pick({ tr: "Kullanım ölçümü ve hata takibi", en: "Usage measurement and error tracking" })}
+            {pick({ tr: "Neyin işe yaradığını sayalım", en: "Count what's useful" })}
           </p>
           <p className="text-muted-foreground text-xs leading-5">
             {pick({
-              tr: "Hangi sayfaların kullanıldığını sayar ve çöken ekranları yakalar.",
-              en: "Counts which pages get used and catches screens that crash.",
+              tr: "Hangi sayfaların kullanıldığı, bir ekran çöktüğünde haberimizin olması.",
+              en: "Which pages get used, and a heads-up when a screen crashes.",
             })}
           </p>
         </div>
         <Switch
-          aria-label={pick({ tr: "Kullanım ölçümü ve hata takibi", en: "Usage measurement and error tracking" })}
+          aria-label={pick({ tr: "Neyin işe yaradığını sayalım", en: "Count what's useful" })}
           checked={consent.measurement}
           onCheckedChange={(next) => answer({ measurement: next, replay: next && consent.replay })}
         />
@@ -74,16 +74,18 @@ export function ConsentPreference() {
 
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm font-medium">{pick({ tr: "Oturum kaydı", en: "Session recording" })}</p>
+          <p className="text-sm font-medium">
+            {pick({ tr: "Bozulduğunda geri sarabilelim", en: "Let us rewind a problem" })}
+          </p>
           <p className="text-muted-foreground text-xs leading-5">
             {pick({
-              tr: "Ekranındaki hareketleri kaydeder. Parola alanları kayıtta maskelenir.",
-              en: "Records what happens on your screen. Password fields are masked.",
+              tr: "Bir şey ters gittiğinde ne olduğunu görebilmek için oturum kaydı. Şifreler kayda girmez.",
+              en: "A session recording, so we can see what went wrong. Passwords never enter it.",
             })}
           </p>
         </div>
         <Switch
-          aria-label={pick({ tr: "Oturum kaydı", en: "Session recording" })}
+          aria-label={pick({ tr: "Bozulduğunda geri sarabilelim", en: "Let us rewind a problem" })}
           checked={consent.replay}
           disabled={!consent.measurement}
           onCheckedChange={(next) => answer({ measurement: consent.measurement, replay: next })}
@@ -93,7 +95,7 @@ export function ConsentPreference() {
       {consent.decided && (consent.measurement || consent.replay) ? (
         <div>
           <Button size="sm" variant="outline" onClick={() => answer({ measurement: false, replay: false })}>
-            {pick({ tr: "Hepsini kapat ve verileri sil", en: "Turn everything off and delete the data" })}
+            {pick({ tr: "Hepsini kapat, bıraktıklarını da sil", en: "Turn it all off and delete what's left" })}
           </Button>
         </div>
       ) : null}

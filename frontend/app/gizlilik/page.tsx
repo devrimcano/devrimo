@@ -3,27 +3,32 @@ import Link from "next/link";
 import { ConsentPreference } from "@/components/consent-preference";
 
 export const metadata: Metadata = {
-  title: "Çerez ve Gizlilik Aydınlatma Metni · Devrimo",
-  description: "Devrimo'nun hangi çerezleri neden kullandığı ve KVKK kapsamındaki haklarınız.",
+  title: "Çerezler ve gizlilik · Devrimo",
+  description: "Devrimo hangi çerezleri neden kullanıyor, ve bunu istediğin an nasıl değiştirirsin.",
 };
 
 /**
- * The notice the banner links to.
+ * The notice the banner links to, written to be read.
  *
- * Written in Turkish and not translated. KVKK's disclosure duty is owed to
- * people in Turkey and is discharged in Turkish; a second legal text in another
- * language is a second thing to keep accurate, and the day the two disagree the
- * question of which one governs is a worse problem than not having had it.
+ * The first version was legally complete and nobody would have read it: it
+ * opened with a statute number, mixed "sen" and "siz" in the same paragraph,
+ * and put a red warning above the part that answers the actual question. A
+ * notice that intimidates the reader informs nobody, which is the opposite of
+ * what a disclosure duty is for.
  *
- * The cookie table below is the actual inventory, measured in a browser against
- * the deployed site rather than transcribed from a vendor's documentation.
+ * So it is layered, which is the shape the KVKK guidance itself favours: the
+ * plain answer and the switch that acts on it come first, the cookie inventory
+ * next, and the statutory detail last, folded away — still complete, still
+ * exact, just not the first thing a student meets.
+ *
+ * Written in Turkish and not translated: the disclosure is owed to people in
+ * Turkey and is discharged in Turkish, and a second legal text in another
+ * language is a second thing to keep true.
  */
 
 /**
- * Who is answerable for this. Supplied by configuration rather than hardcoded
- * because it is the one part of this notice that source control is the wrong
- * place to decide, and because a deployment run by someone else must not claim
- * to be run by us.
+ * Who is answerable for this. Supplied by configuration rather than hardcoded,
+ * because a deployment run by someone else must not claim to be run by us.
  */
 const CONTROLLER = {
   name: process.env.NEXT_PUBLIC_CONTROLLER_NAME?.trim() || "",
@@ -33,39 +38,37 @@ const CONTROLLER = {
 const COOKIES = [
   {
     name: "sb-…-auth-token",
-    party: "Supabase (birinci taraf çerez)",
-    purpose: "Oturumunuzu açık tutar. Bu çerez olmadan giriş yapılamaz.",
-    kind: "Zorunlu",
-    life: "Oturum boyunca / yenilenene kadar",
+    party: "Supabase",
+    purpose: "Girişini açık tutar. Bu olmadan her sayfada yeniden giriş yapman gerekirdi.",
+    kind: "Şart",
+    life: "Çıkış yapana kadar",
   },
   {
     name: "devrimo-cerez-tercihi",
     party: "Devrimo",
-    purpose: "Bu sayfadaki çerez tercihinizi hatırlar; olmazsa her ziyarette tekrar sorulur.",
-    kind: "Zorunlu",
+    purpose: "Bu sayfadaki cevabını hatırlar. Olmasa her açtığında aynı soruyu sorardık.",
+    kind: "Şart",
     life: "12 ay",
   },
   {
     name: "devrimo-theme, devrimo-locale",
     party: "Devrimo",
-    purpose: "Seçtiğiniz tema ve dil. Tarayıcınızın kendi deposunda tutulur, sunucuya gönderilmez.",
-    kind: "Zorunlu",
-    life: "Siz silene kadar",
+    purpose: "Seçtiğin tema ve dil. Tarayıcında kalır, bize hiç gelmez.",
+    kind: "Şart",
+    life: "Sen silene kadar",
   },
   {
     name: "ph_… (PostHog)",
-    party: "PostHog (EU bulut)",
-    purpose:
-      "Kullanım ölçümü ve hata takibi: hangi sayfaların kullanıldığını sayar, çöken ekranları yakalar.",
-    kind: "İsteğe bağlı — yalnızca açık rızanızla",
+    party: "PostHog · AB sunucuları",
+    purpose: "Hangi sayfaların işine yaradığını sayar, bir ekran çöktüğünde bize haber verir.",
+    kind: "Senin izninle",
     life: "12 ay",
   },
   {
-    name: "ph_… (PostHog, oturum kaydı)",
-    party: "PostHog (EU bulut)",
-    purpose:
-      "Oturum kaydı: ekranınızdaki hareketleri kaydeder. Parola alanları kayıtta maskelenir. Ayrı olarak açılıp kapatılabilir.",
-    kind: "İsteğe bağlı — yalnızca açık rızanızla",
+    name: "ph_… (PostHog)",
+    party: "PostHog · AB sunucuları",
+    purpose: "Bir şey bozulduğunda ne olduğunu geri sarıp görebilmemiz için. Yazdığın şifreler kayda girmez.",
+    kind: "Senin izninle · ayrı sorulur",
     life: "12 ay",
   },
 ];
@@ -81,45 +84,51 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export default function PrivacyPage() {
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-10">
+    <main className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-4 py-10">
       <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold">Çerez ve Gizlilik Aydınlatma Metni</h1>
+        <h1 className="text-2xl font-semibold">Çerezler ve gizlilik</h1>
         <p className="text-muted-foreground text-sm leading-6">
-          Bu metin, 6698 sayılı Kişisel Verilerin Korunması Kanunu&apos;nun 10. maddesi ve Kişisel Verileri Koruma
-          Kurumu&apos;nun Çerez Uygulamaları Hakkında Rehberi kapsamında hazırlanmıştır.
-        </p>
-        <p className="text-muted-foreground text-xs">
-          This notice is provided in Turkish, which is the governing text.
+          Kısa versiyonu: Devrimo&apos;yu çalıştıran birkaç çerez var, onlar hep açık. Başka hiçbir şey sen izin
+          vermeden yüklenmiyor.
         </p>
       </header>
 
-      <Section title="Veri sorumlusu">
-        {CONTROLLER.name && CONTROLLER.contact ? (
-          <p>
-            {CONTROLLER.name} — {CONTROLLER.contact}
-          </p>
-        ) : (
-          <p className="text-danger">
-            Veri sorumlusunun kimlik ve iletişim bilgileri bu kurulumda tanımlanmamıştır.
-          </p>
-        )}
-      </Section>
+      {/* The answer and the switch, before anything a reader has to wade through. */}
+      <section className="border-border bg-card/60 flex flex-col gap-4 rounded-xl border p-4">
+        <ul className="text-muted-foreground flex flex-col gap-2 text-sm leading-6">
+          <li>
+            <strong className="text-foreground">Şart olanlar:</strong> girişini hatırlamak, temanı ve dilini bilmek,
+            bir de bu sayfadaki cevabını saklamak. Bunlar kapatılamıyor, çünkü kapatılırsa site çalışmıyor.
+          </li>
+          <li>
+            <strong className="text-foreground">İsteğe bağlı olanlar:</strong> neyin kullanıldığını saymak ve bir şey
+            bozulduğunda haberimizin olması. Bunlar tamamen sana bağlı.
+          </li>
+          <li>
+            <strong className="text-foreground">Reddedersen ne olur:</strong> hiçbir şey. Site aynı şekilde çalışır,
+            hiçbir özellik kapanmaz.
+          </li>
+          <li>Fikrini istediğin an değiştirebilirsin — aşağıdaki düğmeler her zaman burada.</li>
+        </ul>
 
-      <Section title="Hangi çerezleri kullanıyoruz">
+        <ConsentPreference />
+      </section>
+
+      <Section title="Tam liste">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
+          <table className="w-full min-w-[34rem] border-collapse text-left text-sm">
             <thead className="text-foreground">
               <tr className="border-border border-b">
                 <th className="py-2 pr-3 font-medium">Çerez</th>
                 <th className="py-2 pr-3 font-medium">Kaynak</th>
-                <th className="py-2 pr-3 font-medium">Amaç</th>
+                <th className="py-2 pr-3 font-medium">Ne işe yarıyor</th>
                 <th className="py-2 pr-3 font-medium">Tür</th>
                 <th className="py-2 font-medium">Süre</th>
               </tr>
             </thead>
             <tbody>
               {COOKIES.map((cookie) => (
-                <tr key={cookie.name} className="border-border/60 border-b align-top">
+                <tr key={`${cookie.name}-${cookie.purpose}`} className="border-border/60 border-b align-top">
                   <td className="py-2 pr-3 font-mono text-xs">{cookie.name}</td>
                   <td className="py-2 pr-3">{cookie.party}</td>
                   <td className="py-2 pr-3">{cookie.purpose}</td>
@@ -130,50 +139,73 @@ export default function PrivacyPage() {
             </tbody>
           </table>
         </div>
+      </Section>
+
+      <Section title="İzin verirsen veriler nereye gidiyor">
         <p>
-          <strong className="text-foreground">Zorunlu çerezler kapatılamaz.</strong> Bunlar hizmetin
-          sunulabilmesi için gereklidir — oturumunuzu açık tutan çerez olmadan giriş yapılamaz — ve açık rızaya değil,
-          Kanun&apos;un 5/2-(c) ve 5/2-(f) bentlerindeki hukuki sebeplere dayanır. Bu nedenle size bir tercih olarak
-          sunulmazlar; yalnızca burada olduğu gibi açıklanırlar.
-        </p>
-        <p>
-          İsteğe bağlı çerezler ise tamamen size bağlıdır ve <strong className="text-foreground">ayrı ayrı</strong>{" "}
-          açılıp kapatılabilir: kullanım ölçümünü kabul edip oturum kaydını reddedebilirsiniz. Hiçbiri siz izin
-          vermeden yüklenmez; hepsini reddederseniz site tam olarak çalışmaya devam eder.
+          Ölçüm verileri PostHog&apos;un Avrupa Birliği&apos;ndeki sunucularında tutuluyor. İzin vermezsen bu aktarım
+          hiç olmuyor — veri de olmuyor.
         </p>
       </Section>
 
-      <Section title="Tercihinizi değiştirme">
-        <p>
-          Rızanızı istediğiniz an, verdiğiniz kolaylıkta geri alabilirsiniz. Geri aldığınızda ölçüm durdurulur ve
-          tarayıcınızda bırakılmış ölçüm çerezleri silinir.
-        </p>
-        <ConsentPreference />
-      </Section>
+      {/* Complete and exact, and out of the way. Someone who needs the article
+          numbers is looking for them; nobody else should have to read past
+          them to find the switch. */}
+      <details className="border-border rounded-xl border p-4">
+        <summary className="cursor-pointer text-sm font-medium">
+          KVKK kapsamındaki hukuki ayrıntılar
+        </summary>
 
-      <Section title="Yurt dışına aktarım">
-        <p>
-          İsteğe bağlı ölçüm çerezlerini kabul etmeniz hâlinde, bu veriler PostHog&apos;un Avrupa Birliği&apos;ndeki
-          sunucularında işlenir. Bu, Kanun&apos;un 9. maddesi anlamında yurt dışına aktarımdır ve açık rızanıza
-          dayanır. Kabul etmezseniz bu aktarım hiç gerçekleşmez.
-        </p>
-      </Section>
+        <div className="text-muted-foreground mt-4 flex flex-col gap-4 text-sm leading-6">
+          <p>
+            Bu metin, 6698 sayılı Kişisel Verilerin Korunması Kanunu&apos;nun 10. maddesindeki aydınlatma yükümlülüğü
+            ve Kişisel Verileri Koruma Kurumu&apos;nun Çerez Uygulamaları Hakkında Rehberi kapsamında hazırlanmıştır.
+          </p>
 
-      <Section title="Haklarınız">
-        <p>
-          Kanun&apos;un 11. maddesi uyarınca; kişisel verilerinizin işlenip işlenmediğini öğrenme, işlenmişse buna
-          ilişkin bilgi talep etme, işlenme amacını ve amacına uygun kullanılıp kullanılmadığını öğrenme, eksik veya
-          yanlış işlenmişse düzeltilmesini, şartları oluştuğunda silinmesini veya yok edilmesini isteme, bu işlemlerin
-          verilerin aktarıldığı üçüncü kişilere bildirilmesini isteme, işlenen verilerin münhasıran otomatik
-          sistemlerle analiz edilmesi suretiyle aleyhinize bir sonuç ortaya çıkmasına itiraz etme ve verilerinizin
-          kanuna aykırı işlenmesi sebebiyle zarara uğramanız hâlinde zararın giderilmesini talep etme haklarına
-          sahipsiniz.
-        </p>
-        <p>
-          Bu haklarınızı kullanmak için yukarıdaki iletişim adresine başvurabilirsiniz. Başvurular en geç otuz gün
-          içinde sonuçlandırılır.
-        </p>
-      </Section>
+          <div>
+            <h3 className="text-foreground font-medium">Veri sorumlusu</h3>
+            {CONTROLLER.name && CONTROLLER.contact ? (
+              <p>
+                {CONTROLLER.name} — {CONTROLLER.contact}
+              </p>
+            ) : (
+              <p>Veri sorumlusuna ait iletişim bilgileri bu kurulumda henüz tanımlanmamıştır.</p>
+            )}
+          </div>
+
+          <div>
+            <h3 className="text-foreground font-medium">Hukuki sebep</h3>
+            <p>
+              Zorunlu çerezler açık rızaya değil, Kanun&apos;un 5/2-(c) ve 5/2-(f) bentlerindeki hukuki sebeplere
+              dayanır; bu nedenle bir tercih olarak sunulmaz, yalnızca açıklanır. İsteğe bağlı çerezler yalnızca açık
+              rızanıza dayanır, kategori kategori ayrı ayrı verilebilir ve aynı kolaylıkta geri alınabilir. Geri
+              aldığınızda ölçüm durur ve tarayıcınızda bırakılmış ölçüm çerezleri silinir.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="text-foreground font-medium">Yurt dışına aktarım</h3>
+            <p>
+              İsteğe bağlı çerezleri kabul etmeniz hâlinde veriler PostHog&apos;un Avrupa Birliği&apos;ndeki
+              sunucularında işlenir. Bu, Kanun&apos;un 9. maddesi anlamında yurt dışına aktarım sayılır ve açık
+              rızanıza dayanır.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="text-foreground font-medium">Haklarınız</h3>
+            <p>
+              Kanun&apos;un 11. maddesi uyarınca; kişisel verilerinizin işlenip işlenmediğini öğrenme, işlenmişse buna
+              ilişkin bilgi talep etme, işlenme amacını ve amacına uygun kullanılıp kullanılmadığını öğrenme, eksik
+              veya yanlış işlenmişse düzeltilmesini, şartları oluştuğunda silinmesini veya yok edilmesini isteme, bu
+              işlemlerin verilerin aktarıldığı üçüncü kişilere bildirilmesini isteme, işlenen verilerin münhasıran
+              otomatik sistemlerle analiz edilmesi suretiyle aleyhinize bir sonuç ortaya çıkmasına itiraz etme ve
+              verilerinizin kanuna aykırı işlenmesi sebebiyle zarara uğramanız hâlinde zararın giderilmesini talep
+              etme haklarına sahipsiniz. Başvurular en geç otuz gün içinde sonuçlandırılır.
+            </p>
+          </div>
+        </div>
+      </details>
 
       <footer className="text-muted-foreground text-sm">
         <Link href="/login" className="text-primary underline underline-offset-4">

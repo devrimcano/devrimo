@@ -65,13 +65,16 @@ export function CookieConsent() {
       <div className="bg-popover text-popover-foreground border-border w-full max-w-3xl rounded-xl border p-4 shadow-lg">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
           <div className="min-w-0 flex-1">
-            <p className="text-muted-foreground text-xs leading-5">
+            <p className="text-foreground text-sm font-medium">
+              {pick({ tr: "Çerezler hakkında kısa bir soru", en: "A quick question about cookies" })}
+            </p>
+            <p className="text-muted-foreground mt-1 text-xs leading-5">
               {pick({
-                tr: "Devrimo'nun çalışması için gereken çerezleri kullanıyoruz; bunlar olmadan giriş yapılamaz ve kapatılamaz. Bunların dışındakiler tamamen sana bağlı — reddedersen site aynı şekilde çalışmaya devam eder.",
-                en: "Devrimo uses the cookies it cannot work without; sign-in depends on them and they cannot be switched off. Everything beyond that is up to you — refuse, and the site works exactly the same.",
+                tr: "Girişini hatırlayan birkaç çerez zaten var, onlar şart. Bunun dışında, neyin işine yaradığını sayan ve bir şey bozulduğunda bize haber veren çerezler için iznini istiyoruz. İstemezsen site hiçbir şey kaybetmez.",
+                en: "A few cookies keep you signed in; those are essential. Beyond that we'd like permission for cookies that count what's useful and tell us when something breaks. Say no and the site loses nothing.",
               })}{" "}
               <Link href="/gizlilik" className="text-primary underline underline-offset-4">
-                {pick({ tr: "Çerez ve gizlilik metni", en: "Cookie and privacy notice" })}
+                {pick({ tr: "Çerezler ve gizlilik", en: "Cookies and privacy" })}
               </Link>
             </p>
             <button
@@ -80,7 +83,7 @@ export function CookieConsent() {
               aria-expanded={open}
               className="text-muted-foreground hover:text-foreground mt-2 text-xs underline underline-offset-4"
             >
-              {pick({ tr: "Tek tek seç", en: "Choose individually" })}
+              {pick({ tr: "Tek tek seçmek isterim", en: "Let me choose one by one" })}
             </button>
           </div>
 
@@ -93,7 +96,7 @@ export function CookieConsent() {
               className="flex-1 sm:flex-none"
               onClick={() => answer({ measurement: false, replay: false })}
             >
-              {pick({ tr: "Reddet", en: "Reject" })}
+              {pick({ tr: "Gerek yok", en: "No thanks" })}
             </Button>
             <Button
               size="sm"
@@ -101,7 +104,7 @@ export function CookieConsent() {
               className="flex-1 sm:flex-none"
               onClick={() => answer(open ? { measurement, replay } : { measurement: true, replay: true })}
             >
-              {open ? pick({ tr: "Seçimimi kaydet", en: "Save my choice" }) : pick({ tr: "Kabul et", en: "Accept" })}
+              {open ? pick({ tr: "Kaydet", en: "Save" }) : pick({ tr: "Olur", en: "Sure" })}
             </Button>
           </div>
         </div>
@@ -109,10 +112,10 @@ export function CookieConsent() {
         {open ? (
           <div className="border-border mt-3 flex flex-col gap-3 border-t pt-3">
             <ConsentRow
-              label={pick({ tr: "Kullanım ölçümü ve hata takibi", en: "Usage measurement and error tracking" })}
+              label={pick({ tr: "Neyin işe yaradığını sayalım", en: "Count what's useful" })}
               description={pick({
-                tr: "Hangi sayfaların kullanıldığını sayar ve çöken ekranları yakalar.",
-                en: "Counts which pages get used and catches screens that crash.",
+                tr: "Hangi sayfaların kullanıldığı, bir ekran çöktüğünde haberimizin olması.",
+                en: "Which pages get used, and a heads-up when a screen crashes.",
               })}
               checked={measurement}
               onChange={(next) => {
@@ -123,10 +126,10 @@ export function CookieConsent() {
               }}
             />
             <ConsentRow
-              label={pick({ tr: "Oturum kaydı", en: "Session recording" })}
+              label={pick({ tr: "Bozulduğunda geri sarabilelim", en: "Let us rewind a problem" })}
               description={pick({
-                tr: "Ekranındaki hareketleri kaydeder. Parola alanları kayıtta maskelenir.",
-                en: "Records what happens on your screen. Password fields are masked.",
+                tr: "Bir şey ters gittiğinde ne olduğunu görebilmek için oturum kaydı. Şifreler kayda girmez.",
+                en: "A session recording, so we can see what went wrong. Passwords never enter it.",
               })}
               checked={replay}
               disabled={!measurement}

@@ -195,7 +195,7 @@ export function SettingsClient() {
             </CardHeader>
             <CardContent className="space-y-3">
               <ConsentPreference />
-              <a href="/gizlilik" className="text-primary text-sm underline underline-offset-4">{pick({ tr: "Çerez ve gizlilik metni", en: "Cookie and privacy notice" })}</a>
+              <a href="/gizlilik" className="text-primary text-sm underline underline-offset-4">{pick({ tr: "Çerezler ve gizlilik", en: "Cookies and privacy" })}</a>
             </CardContent>
           </Card>
         </div>
