@@ -1795,19 +1795,173 @@ export function SchedulePlanner() {
     toast.success(t("Program CSV olarak indirildi.", "Schedule downloaded as CSV."));
   }
 
-  function exportWallpaper() {
-    const width = 3840, height = 2160;
-    const baseMinute = DEFAULT_HOURS[0] * 60 + 40;
-    const pixelsPerMinute = 170 / 60;
-    const cells = entries.map((e) => {
-      const x = 460 + DAYS.indexOf(e.day) * 650;
-      const y = 330 + (itemStartMinute(e) - baseMinute) * pixelsPerMinute;
-      const height = Math.max(72, itemDurationMinutes(e) * pixelsPerMinute);
-      const labelY = y + Math.min(60, Math.max(34, height - 18));
-      return `<rect x="${x}" y="${y}" width="610" height="${height}" rx="24" fill="#4a2fbd" opacity=".9"/><text x="${x + 30}" y="${labelY}" fill="white" font-size="36" font-family="Arial" font-weight="700">${e.code.replace(/[<>&]/g, "")} · ${formatItemRange(e)}</text>`;
-    }).join("");
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#171312"/><text x="180" y="170" fill="white" font-size="72" font-family="Arial" font-weight="700">Devrimo · ${termLabel(term, t).replace(/[<>&]/g, "")}</text>${DAYS.map((d, i) => `<text x="${500 + i * 650}" y="285" fill="#aaa" font-size="36" font-family="Arial">${dayLabel(d)}</text>`).join("")}${cells}</svg>`;
-    downloadFile("devrimo-schedule-4k.svg", new Blob([svg], { type: "image/svg+xml" }));
+  /**
+   * The week as a picture worth keeping.
+   *
+   * What this replaced drew every course in the same violet on a near-black
+   * field in Arial, with no grid and no time axis; two classes in one hour
+   * covered each other because it had no lane layout; and anything outside the
+   * default 08:40-17:40 was positioned off the canvas entirely, because the
+   * hours were hard-coded while the screen's own grid grows to fit. It also
+   * called itself a wallpaper and handed back an SVG.
+   *
+   * This draws the week the screen draws, from the same colour tokens, so a
+   * course is the colour the student has been looking at all day, in the theme
+   * they are using. PNG, because that is what a wallpaper is.
+   */
+  async function exportWallpaper() {
+    if (!entries.length) return toast.error(t("Dışa aktarılacak ders yok.", "There is nothing to export yet."));
+    const WIDTH = 3840, HEIGHT = 2160;
+    const canvas = document.createElement("canvas");
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return toast.error(t("Görsel oluşturulamadı.", "The image could not be created."));
+    // The app's own faces, once they are actually loaded; without this the
+    // first export after a cold load falls back to a system serif in silence.
+    await document.fonts?.ready?.catch?.(() => undefined);
+
+    const styles = getComputedStyle(document.documentElement);
+    const token = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
+    const FONT = token("--font-sans", "Inter, system-ui, sans-serif");
+    const ink = token("--foreground", "#1a1611");
+    const muted = token("--muted-foreground", "#645b50");
+    const card = token("--card", "#faf5e9");
+    const ground = token("--background", "#ebe3d2");
+    const line = token("--border", "#d8cdb8");
+    const brand = token("--primary", "#4a2fbd");
+    const palette = COLORS.map((_, index) => token(`--course-${index + 1}`, brand));
+
+    const channels = (hex: string) => {
+      const value = hex.replace("#", "").trim();
+      const full = value.length === 3 ? value.split("").map((c) => c + c).join("") : value;
+      return [0, 2, 4].map((offset) => parseInt(full.slice(offset, offset + 2), 16) || 0);
+    };
+    /** The same tint the screen paints behind a course block. */
+    const mix = (top: string, bottom: string, amount: number) => {
+      const a = channels(top), b = channels(bottom);
+      return `rgb(${a.map((value, index) => Math.round(value * amount + b[index] * (1 - amount))).join(",")})`;
+    };
+    const clip = (text: string, width: number) => {
+      if (ctx.measureText(text).width <= width) return text;
+      let cut = text;
+      while (cut.length > 1 && ctx.measureText(`${cut}…`).width > width) cut = cut.slice(0, -1);
+      return `${cut}…`;
+    };
+
+    ctx.fillStyle = ground;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    const margin = 150;
+    const gridTop = 430;
+    const gutter = 190;
+    const gridLeft = margin + gutter;
+    const gridRight = WIDTH - margin;
+    const gridBottom = HEIGHT - margin - 130;
+    const columnWidth = (gridRight - gridLeft) / DAYS.length;
+    const rowHeight = (gridBottom - gridTop) / hours.length;
+
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = ink;
+    ctx.font = `700 96px ${FONT}`;
+    ctx.fillText(termLabel(term, t), margin, 210);
+    ctx.fillStyle = muted;
+    ctx.font = `500 44px ${FONT}`;
+    const credits = entries.filter((entry) => entry.kind === "course").reduce((sum, entry) => sum + entry.credits, 0);
+    ctx.fillText(
+      t(`${uniqueCourses} ders · ${credits} kredi · ${totalHours} saat`, `${uniqueCourses} courses · ${credits} credits · ${totalHours} hours`),
+      margin,
+      280,
+    );
+
+    ctx.fillStyle = card;
+    ctx.beginPath();
+    ctx.roundRect(margin, gridTop - 110, gridRight - margin, gridBottom - gridTop + 110, 40);
+    ctx.fill();
+
+    ctx.font = `600 42px ${FONT}`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = ink;
+    DAYS.forEach((day, index) => {
+      ctx.fillText(dayLabel(day), gridLeft + columnWidth * (index + 0.5), gridTop - 40);
+    });
+
+    ctx.textAlign = "right";
+    ctx.font = `500 34px ${FONT}`;
+    hours.forEach((hour, index) => {
+      const y = gridTop + rowHeight * index;
+      ctx.fillStyle = muted;
+      ctx.fillText(formatClock(hour * 60 + 40), gridLeft - 40, y + 46);
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(gridLeft, y);
+      ctx.lineTo(gridRight, y);
+      ctx.stroke();
+    });
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 2;
+    DAYS.forEach((_, index) => {
+      if (!index) return;
+      const x = gridLeft + columnWidth * index;
+      ctx.beginPath();
+      ctx.moveTo(x, gridTop);
+      ctx.lineTo(x, gridBottom);
+      ctx.stroke();
+    });
+
+    const lanes = laneLayout(entries);
+    const baseHour = hours[0];
+    ctx.textAlign = "left";
+    for (const entry of entries) {
+      const dayIndex = DAYS.indexOf(entry.day);
+      if (dayIndex < 0) continue;
+      const { lane, lanes: laneCount } = lanes.get(entry.id) ?? { lane: 0, lanes: 1 };
+      const width = columnWidth / laneCount;
+      const x = gridLeft + columnWidth * dayIndex + width * lane + 10;
+      const y = gridTop + (entry.start - baseHour) * rowHeight + 8;
+      const height = Math.max(rowHeight * entry.duration - 16, 96);
+      const colour = palette[entry.color % palette.length];
+
+      ctx.fillStyle = mix(colour, card, 0.16);
+      ctx.strokeStyle = mix(colour, card, 0.5);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.roundRect(x, y, width - 20, height, 22);
+      ctx.fill();
+      ctx.stroke();
+
+      const inner = width - 20 - 56;
+      ctx.fillStyle = ink;
+      ctx.font = `700 40px ${FONT}`;
+      ctx.fillText(clip(`${entry.code}${entry.section ? ` · ${entry.section}` : ""}`, inner), x + 28, y + 58);
+      ctx.fillStyle = muted;
+      ctx.font = `500 30px ${FONT}`;
+      ctx.fillText(clip(formatItemRange(entry), inner), x + 28, y + 100);
+      if (height > 150) ctx.fillText(clip(localizedCourseName(entry.name, locale), inner), x + 28, y + 142);
+      if (height > 200) {
+        const where = [entry.room?.trim() || (entry.kind === "course" ? "TBA" : ""), entry.instructor?.trim()].filter(Boolean).join(" · ");
+        if (where) ctx.fillText(clip(where, inner), x + 28, y + 184);
+      }
+    }
+
+    const free = DAYS.filter((day) => !entries.some((entry) => entry.day === day)).map((day) => dayLabel(day));
+    ctx.fillStyle = muted;
+    ctx.font = `500 34px ${FONT}`;
+    ctx.textAlign = "left";
+    ctx.fillText(
+      free.length ? t(`Boş günler: ${free.join(", ")}`, `Free days: ${free.join(", ")}`) : t("Boş gün yok", "No free days"),
+      margin,
+      HEIGHT - margin + 20,
+    );
+    ctx.textAlign = "right";
+    ctx.fillStyle = brand;
+    ctx.font = `700 34px ${FONT}`;
+    ctx.fillText("devrimo", WIDTH - margin, HEIGHT - margin + 20);
+
+    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return toast.error(t("Görsel oluşturulamadı.", "The image could not be created."));
+    downloadFile(`devrimo-${term}-program.png`, blob);
   }
 
   // --- render -------------------------------------------------------------
@@ -2205,7 +2359,7 @@ export function SchedulePlanner() {
                   </div>
                   ) : null}
                   <Button size="icon-sm" variant="ghost" aria-label={t("CSV olarak indir", "Download as CSV")} onClick={exportCsv}><DownloadIcon /></Button>
-                  <Button size="icon-sm" variant="ghost" aria-label={t("4K duvar kâğıdı olarak indir", "Download as a 4K wallpaper")} onClick={exportWallpaper}><ImageIcon /></Button>
+                  <Button size="icon-sm" variant="ghost" aria-label={t("Programı görsel olarak indir", "Download the schedule as an image")} title={t("Programı görsel olarak indir", "Download the schedule as an image")} onClick={() => void exportWallpaper()}><ImageIcon /></Button>
                   {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setFavoritesOpen(true)}>{t(`Favoriler (${favorites.length})`, `Favorites (${favorites.length})`)}</Button> : null}
                   {/* A heart that only ever added was a lie about its own
                       shape. It now says which way it will go, and shows
