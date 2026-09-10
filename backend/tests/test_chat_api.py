@@ -203,6 +203,49 @@ async def test_a_broken_cache_costs_nothing_but_speed(client, monkeypatch):
     assert [m["role"] for m in detail.json()["messages"]] == ["user", "assistant"]
 
 
+async def test_a_cache_read_that_fails_inside_the_request_still_opens_the_chat(client, monkeypatch):
+    """The failure that actually happened, which the test above could not see.
+
+    Replacing the whole helper never runs its `except`, so it proved nothing
+    about the state that branch leaves behind. On production the table existed
+    but the API role had never been granted it: the SELECT failed, the handler
+    caught it and fell back exactly as designed - and every later query on the
+    same session then raised InFailedSQLTransaction, so opening any
+    conversation returned 500. A caught statement error still poisons the
+    transaction; the rollback is what makes catching it mean anything.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.api.v1 import sessions as sessions_api
+    from app.campus.session_pool import close_all
+
+    headers = auth_header(new_user_id())
+    await provision(client, headers)
+    await send(client, headers, "what is my CGPA")
+    await close_all()
+
+    rolled_back: list[bool] = []
+    original_get = sessions_api.AsyncSession.get
+    original_rollback = sessions_api.AsyncSession.rollback
+
+    async def failing_get(self, entity, *args, **kwargs):
+        if entity is sessions_api.ChatTranscriptCache:
+            raise ProgrammingError("SELECT chat_transcript_cache", {}, Exception("permission denied"))
+        return await original_get(self, entity, *args, **kwargs)
+
+    async def recording_rollback(self):
+        rolled_back.append(True)
+        return await original_rollback(self)
+
+    monkeypatch.setattr(sessions_api.AsyncSession, "get", failing_get)
+    monkeypatch.setattr(sessions_api.AsyncSession, "rollback", recording_rollback)
+
+    detail = await client.get("/api/v1/chat/sessions/thread-1", headers=headers)
+    assert detail.status_code == 200
+    assert [m["role"] for m in detail.json()["messages"]] == ["user", "assistant"]
+    assert rolled_back, "a failed cache read left the request's transaction unusable"
+
+
 async def test_history_never_includes_the_system_prompt(client):
     # Agno's stored history contains the persona; returning it would hand the
     # system prompt to anyone with devtools open.

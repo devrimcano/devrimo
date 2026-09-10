@@ -26,7 +26,7 @@ def test_migration_graph_has_one_head_and_revision_ids_fit_version_table():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0037_chat_transcript_cache"]
+    assert scripts.get_heads() == ["0038_transcript_cache_grants"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

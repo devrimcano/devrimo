@@ -93,6 +93,16 @@ async def _cached_transcript(db: AsyncSession, session: ChatSession) -> list[Cha
         # Anything at all - a schema not yet migrated, a malformed row - means
         # read it from Agno instead. This is an optimisation and is never
         # allowed to be the reason a conversation fails to open.
+        #
+        # The rollback is what makes that true, and leaving it out is what
+        # broke it: a permission this table had never been granted made the
+        # SELECT fail, this branch caught it and returned None as designed, and
+        # then every later query on the same session raised
+        # InFailedSQLTransaction. So a cache that could not be read turned into
+        # a 500 on opening any conversation - exactly the outcome this except
+        # exists to prevent. A failed statement poisons the transaction whether
+        # or not the caller minds it failing.
+        await db.rollback()
         logger.warning("transcript_cache_read_failed", session_id=session.id, error=str(exc))
         return None
 
