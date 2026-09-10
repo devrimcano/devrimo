@@ -13,6 +13,9 @@ import { toast } from "sonner";
 import { useLocale } from "@/components/locale-provider";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
@@ -711,6 +714,7 @@ export function SchedulePlanner() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
   const department = studentDepartment?.code ?? "";
@@ -1738,14 +1742,41 @@ export function SchedulePlanner() {
     toast.success(t("Program favorilere eklendi.", "Schedule added to favorites."));
   }
 
-  function nextFavorite() {
-    if (!favorites.length) return;
-    // Tracked by index rather than by comparing the current entries against
-    // each favorite: entries are replaced wholesale by every other action, so
-    // an identity comparison never matched and this always showed the first.
-    const index = (favoriteIndex + 1) % favorites.length;
+
+  /**
+   * Put a saved week back on the grid.
+   *
+   * This replaces the blind "next favourite" walk, which tracked position by
+   * index because entries are replaced wholesale by every other action and an
+   * identity comparison never matched. The list addresses a week directly, so
+   * nothing has to be inferred from where the cursor happens to be.
+   */
+  function loadFavorite(index: number) {
+    const saved = favorites[index];
+    if (!saved) return;
     setFavoriteIndex(index);
-    setEntries(favorites[index] ?? []);
+    setEntries(saved);
+    setFavoritesOpen(false);
+  }
+
+  function removeFavorite(index: number) {
+    const next = favorites.filter((_, position) => position !== index);
+    setFavorites(next);
+    setFavoriteIndex(next.length ? Math.min(index, next.length - 1) : -1);
+    if (!next.length) setFavoritesOpen(false);
+  }
+
+  /** What one saved week is, in the terms a student picked it for. */
+  function favoriteSummary(saved: Entry[]) {
+    const courses = new Set(saved.filter((entry) => entry.kind === "course").map((entry) => entry.code));
+    const credits = saved.reduce((sum, entry) => sum + (entry.credits || 0), 0);
+    const days = DAYS.filter((day) => saved.some((entry) => entry.day === day));
+    const free = DAYS.filter((day) => !days.includes(day));
+    return {
+      courses: courses.size,
+      credits,
+      free: free.map((day) => dayLabel(day)),
+    };
   }
 
   async function copySummary() {
@@ -1786,6 +1817,44 @@ export function SchedulePlanner() {
 
   return (
     <div className="h-full overflow-y-auto bg-[radial-gradient(circle_at_85%_0%,color-mix(in_oklab,var(--primary)_9%,transparent),transparent_32%)] px-4 py-4 sm:px-6 lg:px-8 xl:flex xl:flex-col xl:overflow-hidden xl:py-3">
+      <Dialog open={favoritesOpen} onOpenChange={setFavoritesOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("Favori programlar", "Favorite schedules")}</DialogTitle>
+            <DialogDescription>
+              {t("Kaydettiğin haftalar. Birini yükle, istemediğini çıkar.", "The weeks you saved. Load one, remove the ones you do not want.")}
+            </DialogDescription>
+          </DialogHeader>
+          {/* Cycling with "next favorite" told nobody what was saved or how
+              many, and nothing could ever be taken out. A list answers both. */}
+          <ul className="max-h-[50vh] space-y-2 overflow-y-auto">
+            {favorites.map((saved, index) => {
+              const summary = favoriteSummary(saved);
+              const current = index === favoriteIndex;
+              return (
+                <li key={index} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {t(`${index + 1}. program`, `Schedule ${index + 1}`)}
+                      {current ? <span className="text-primary ml-2 text-xs font-semibold">{t("ekranda", "on screen")}</span> : null}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {t(`${summary.courses} ders · ${summary.credits} kredi`, `${summary.courses} courses · ${summary.credits} credits`)}
+                      {summary.free.length ? t(` · boş: ${summary.free.join(", ")}`, ` · free: ${summary.free.join(", ")}`) : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => loadFavorite(index)}>{t("Yükle", "Load")}</Button>
+                  <Button size="icon-sm" variant="ghost" aria-label={t(`${index + 1}. programı favorilerden çıkar`, `Remove schedule ${index + 1} from favorites`)} onClick={() => removeFavorite(index)}><Trash2Icon /></Button>
+                </li>
+              );
+            })}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFavoritesOpen(false)}>{t("Kapat", "Close")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -2137,7 +2206,7 @@ export function SchedulePlanner() {
                   ) : null}
                   <Button size="icon-sm" variant="ghost" aria-label={t("CSV olarak indir", "Download as CSV")} onClick={exportCsv}><DownloadIcon /></Button>
                   <Button size="icon-sm" variant="ghost" aria-label={t("4K duvar kâğıdı olarak indir", "Download as a 4K wallpaper")} onClick={exportWallpaper}><ImageIcon /></Button>
-                  {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={nextFavorite}>{t(`Sonraki favori (${favorites.length})`, `Next favorite (${favorites.length})`)}</Button> : null}
+                  {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setFavoritesOpen(true)}>{t(`Favoriler (${favorites.length})`, `Favorites (${favorites.length})`)}</Button> : null}
                   {/* A heart that only ever added was a lie about its own
                       shape. It now says which way it will go, and shows
                       whether the week on screen is one of the saved ones. */}
