@@ -138,6 +138,7 @@ async def test_a_reopened_conversation_is_served_without_asking_agno_again(clien
     does not, so it is read once and remembered.
     """
     from app.api.v1 import sessions as sessions_api
+    from app.campus.session_pool import close_all
 
     headers = auth_header(new_user_id())
     await provision(client, headers)
@@ -162,6 +163,8 @@ async def test_a_reopened_conversation_is_served_without_asking_agno_again(clien
 
 async def test_a_new_turn_retires_the_remembered_copy(client):
     """A copy is only ever served for a conversation that has not changed."""
+    from app.campus.session_pool import close_all
+
     headers = auth_header(new_user_id())
     await provision(client, headers)
     await send(client, headers, "first question")
@@ -182,6 +185,7 @@ async def test_a_new_turn_retires_the_remembered_copy(client):
 async def test_a_broken_cache_costs_nothing_but_speed(client, monkeypatch):
     """The optimisation must never be the reason a conversation fails to open."""
     from app.api.v1 import sessions as sessions_api
+    from app.campus.session_pool import close_all
 
     headers = auth_header(new_user_id())
     await provision(client, headers)
