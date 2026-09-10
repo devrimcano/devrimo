@@ -178,6 +178,44 @@ def _capture_tool_span(
     capture("$ai_span", distinct_id=user_id, **properties)
 
 
+def _tool_error_detail(exc: BaseException, depth: int = 0) -> str:
+    """The message, with anyio's task-group wrappers unwrapped.
+
+    A failure that crosses an MCP client arrives as
+    ``ExceptionGroup(ExceptionGroup([real_error]))``, whose own message is
+    "unhandled errors in a TaskGroup (1 sub-exception)". The real error is
+    inside, and it is the only part worth writing down.
+    """
+    inner = getattr(exc, "exceptions", None)
+    if inner and depth < 4:
+        return "; ".join(_tool_error_detail(child, depth + 1) for child in inner[:3])
+    detail = getattr(exc, "detail", None)
+    message = str(detail if detail is not None else exc).strip()
+    return f"{type(exc).__name__}: {message[:400]}" if message else type(exc).__name__
+
+
+def _loggable_arguments(function_name: str, arguments) -> dict | None:
+    """The shape of the call, never the student's text.
+
+    Enough to reproduce a failing call - which resource, which course, which
+    term - and nothing a privacy boundary exists to keep out of a log.
+    """
+    if not isinstance(arguments, dict):
+        return None
+    allowed = {"kind", "key", "term", "resource", "limit", "record_types", "expected_revision"}
+    shown: dict = {}
+    for name, value in arguments.items():
+        if name not in allowed:
+            continue
+        if isinstance(value, dict):
+            shown[name] = {k: v for k, v in value.items() if k in allowed and isinstance(v, (str, int, float))}
+        elif isinstance(value, (str, int, float, bool)):
+            shown[name] = value
+        elif isinstance(value, list):
+            shown[name] = [v for v in value if isinstance(v, (str, int))][:8]
+    return shown or None
+
+
 async def production_tool_hook(function_name, function, arguments, run_context=None):
     """Execute one tool, cap text output, audit external mutations, and observe it."""
     started = time.monotonic()
@@ -197,6 +235,15 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
             tool=function_name,
             duration_ms=round((time.monotonic() - started) * 1000),
             error=exc.__class__.__name__,
+            # The class name alone cost this project an afternoon: every failing
+            # tool call in production logged error="ExceptionGroup" and nothing
+            # else, so a run that made eight failing calls and answered "I
+            # cannot verify this" left no way to find out what it had asked for
+            # or what it was told. The detail is the unwrapped message, and the
+            # arguments are resource kinds and course codes - not the student's
+            # own content, which stays behind the workspace boundary.
+            detail=_tool_error_detail(exc),
+            arguments=_loggable_arguments(function_name, arguments),
         )
         # The span below carries the failure as a property; this makes it a
         # first-class issue with a stack trace, grouped by server rather than

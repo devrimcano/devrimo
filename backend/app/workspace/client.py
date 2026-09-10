@@ -26,6 +26,27 @@ def trusted_workspace_token(token: str, approval_token: str | None = None):
         _access_token.reset(marker)
 
 
+def workspace_error_text(result, name: str) -> str:
+    """What the workspace actually said, rather than that something went wrong.
+
+    An MCP error result carries its explanation in the content block. This used
+    to be discarded in favour of "Workspace operation failed", and the sentence
+    lost was routinely the whole answer: "This resource supports read, not text
+    search" tells the model exactly what to do next, and instead it retried the
+    same search eight times over four and a half minutes.
+
+    Prefixed with the tool, because by the time the model reads this the call
+    that produced it is one of several it made.
+    """
+    for item in getattr(result, "content", None) or []:
+        text = str(getattr(item, "text", "") or "").strip()
+        if text:
+            # Bounded: this is model input, and an upstream server is free to
+            # return a page of HTML in an error block.
+            return f"{name} failed: {text[:600]}"
+    return f"{name} failed, and the workspace gave no reason"
+
+
 class WorkspaceClient:
     def __init__(self, url: str, *, transport: httpx.AsyncBaseTransport | None = None):
         self.url = url
@@ -38,19 +59,27 @@ class WorkspaceClient:
         headers = {"Authorization": f"Bearer {token}"}
         if name == "send_email" and _approval_token.get():
             headers["X-Devrimo-Mail-Approval"] = _approval_token.get()
+        # Collected inside the session and raised after it, because raising
+        # inside these nested `async with` blocks is what turned a one-sentence
+        # failure into ExceptionGroup(ExceptionGroup([HTTPException])). anyio's
+        # task groups wrap anything that leaves them, so the agent - and the
+        # log - saw the class name of the wrapper and nothing else.
+        failure: HTTPException | None = None
         async with httpx.AsyncClient(headers=headers, timeout=120, transport=self.transport) as http_client:
             async with streamable_http_client(self.url, http_client=http_client) as streams:
                 async with ClientSession(streams[0], streams[1]) as session:
                     await session.initialize()
                     result = await session.call_tool(name, arguments)
                     if result.isError:
-                        raise HTTPException(502, "Workspace operation failed")
-                    if result.structuredContent is not None:
+                        failure = HTTPException(502, workspace_error_text(result, name))
+                    elif result.structuredContent is not None:
                         return result.structuredContent
-                    for item in result.content:
-                        if item.type == "text":
-                            return json.loads(item.text)
-                    raise HTTPException(502, "Workspace returned no result")
+                    else:
+                        for item in result.content:
+                            if item.type == "text":
+                                return json.loads(item.text)
+                        failure = HTTPException(502, f"The workspace returned no result for {name}")
+        raise failure
 
     async def search(self, request):
         return await self.call("search", {"request": request.model_dump()})
