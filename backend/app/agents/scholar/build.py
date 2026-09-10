@@ -16,11 +16,11 @@ from app.observability.flags import FLAG_HISTORY_RUNS, FLAG_TOOL_CALL_LIMIT, int
 
 
 def build_scholar_agent(
-    runtime: AgentRuntimeConfig | None = None, *, user_id: UUID | None = None
+    runtime: AgentRuntimeConfig | None = None, *, user_id: UUID | None = None, session_id: str | None = None
 ) -> Agent:
     settings = get_settings()
     runtime = runtime or default_runtime_config()
-    model = build_model(runtime)
+    model = build_model(runtime, session_id=session_id)
     compression = build_compression(model)
     return Agent(
         id="devrimo-scholar",

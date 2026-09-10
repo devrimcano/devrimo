@@ -19,7 +19,28 @@ from app.observability.llm import build_traced_async_client
 logger = get_logger(__name__)
 
 
-def _traced(model: Model, runtime: AgentRuntimeConfig) -> Model:
+def opencode_session_headers(session_id: str | None) -> dict[str, str]:
+    """The header OpenCode Go began requiring, and refusing requests without.
+
+    Measured against the runs this broker actually made: every turn up to
+    2026-09-06 completed, and every turn from 2026-09-07 onwards failed with
+
+        Error from provider (Console Go): Request is missing x-opencode-session
+        and cannot be routed efficiently.
+
+    Four days in which the assistant answered nobody, while the API key was
+    valid the whole time and nothing in this repository had changed. The
+    provider had started enforcing a header we never sent.
+
+    Their documentation asks for "a stable session ID for each conversation",
+    which is exactly what a chat session id is, so that is what travels.
+    """
+    if not session_id:
+        return {}
+    return {"x-opencode-session": session_id}
+
+
+def _traced(model: Model, runtime: AgentRuntimeConfig, session_id: str | None = None) -> Model:
     """Swap in a PostHog-instrumented async client, if one can be built.
 
     Agno caches ``async_client`` and only rebuilds it when closed, so setting
@@ -32,6 +53,11 @@ def _traced(model: Model, runtime: AgentRuntimeConfig) -> Model:
         "api_key": settings.agent_openai_api_key,
         "base_url": settings.agent_openai_base_url,
     }
+    # The instrumented client replaces Agno's own, so the header has to be set
+    # here too or tracing quietly turns the provider requirement back off.
+    headers = opencode_session_headers(session_id)
+    if headers:
+        client_params["default_headers"] = headers
     client = build_traced_async_client(
         input_token_price=runtime.input_token_price,
         output_token_price=runtime.output_token_price,
@@ -43,7 +69,7 @@ def _traced(model: Model, runtime: AgentRuntimeConfig) -> Model:
     return model
 
 
-def build_model(runtime: AgentRuntimeConfig | None = None) -> Model:
+def build_model(runtime: AgentRuntimeConfig | None = None, *, session_id: str | None = None) -> Model:
     settings = get_settings()
     runtime = runtime or default_runtime_config()
     if settings.agent_runtime == "fake":
@@ -65,8 +91,10 @@ def build_model(runtime: AgentRuntimeConfig | None = None) -> Model:
                 api_key=settings.agent_openai_api_key,
                 base_url=settings.agent_openai_base_url,
                 max_output_tokens=runtime.max_tokens,
+                default_headers=opencode_session_headers(session_id) or None,
             ),
             runtime,
+            session_id,
         )
 
     if "openrouter.ai" in base_url:

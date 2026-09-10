@@ -13,11 +13,11 @@ from app.agents.store import get_agno_db
 _PERSONA_PATH = Path(__file__).with_name("persona.md")
 
 
-def build_legacy_agent(user_id: UUID, runtime: AgentRuntimeConfig) -> Agent:
+def build_legacy_agent(user_id: UUID, runtime: AgentRuntimeConfig, *, session_id: str | None = None) -> Agent:
     return Agent(
         id=f"devrimo-campus-{user_id}",
         name="Devrimo Campus Agent",
-        model=build_model(runtime),
+        model=build_model(runtime, session_id=session_id),
         db=get_agno_db(),
         tools=build_platform_tools(user_id),
         instructions=_PERSONA_PATH.read_text(encoding="utf-8"),

@@ -82,7 +82,9 @@ async def _execute(run, owner, abort):
                     abort["reason"] = "cancelled"
                     raise asyncio.CancelledError
                 runtime = await get_runtime_config(db)
-            agent = build_agent(run.user_id, runtime)
+            # The conversation this turn belongs to, which the provider wants
+            # as a stable per-conversation id. See opencode_session_headers.
+            agent = build_agent(run.user_id, runtime, session_id=run.session_id)
             model = runtime.model_id
             approval = decrypt_secret(run.approval_token_enc) if run.approval_token_enc else None
             with (
