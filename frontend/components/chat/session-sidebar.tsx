@@ -124,6 +124,10 @@ export function SessionSidebar({
                     // usually done by the time the button comes back up.
                     // Focus counts too, for anyone arriving by keyboard.
                     onPointerEnter={() => prefetchSessionMessages(session.id)}
+                    // pointerdown, not just enter: a phone has no hover, and a
+                    // tap still gives a head start - the browser waits to see
+                    // whether the touch becomes a scroll before it fires click.
+                    onPointerDown={() => prefetchSessionMessages(session.id)}
                     onFocus={() => prefetchSessionMessages(session.id)}
                     aria-current={active ? "page" : undefined}
                   >

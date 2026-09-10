@@ -7,7 +7,7 @@ import type { DataUIPart, UIMessage } from "ai";
 import { toast } from "sonner";
 import { Thread } from "@/components/thread.aui";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
-import { loadSessionMessages, useChatSessions } from "@/hooks/useChat";
+import { loadSessionMessages, prefetchSessionMessages, useChatSessions } from "@/hooks/useChat";
 import { Loader2Icon, MessagesSquareIcon, OctagonAlertIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 import { activityFields } from "@/lib/agent-activity";
@@ -503,6 +503,20 @@ export function ChatShell() {
   const { pick } = useLocale();
   const desktop = useDesktopLayout();
   const { sessions, isLoading: sessionsLoading, isFetching: sessionsFetching, error: sessionsError, remove, removeAll, refetch } = useChatSessions();
+  // The most recent conversation, fetched before anyone asks for it.
+  //
+  // Hovering a row starts the fetch on a desktop, which a phone cannot do. But
+  // the chat people reopen is overwhelmingly the last one they were in, and one
+  // request is a cheap bet: measured, opening a conversation costs about half a
+  // second of server time, most of it waiting on a database in Frankfurt.
+  //
+  // Only the newest, and only once the list has actually arrived, so this stays
+  // one request rather than a burst on a host with two cores.
+  const newestSessionId = sessions[0]?.id;
+  useEffect(() => {
+    if (newestSessionId) prefetchSessionMessages(newestSessionId);
+  }, [newestSessionId]);
+
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
   const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
   const [seedMessages, setSeedMessages] = useState<UIMessage[] | undefined>(undefined);
