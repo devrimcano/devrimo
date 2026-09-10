@@ -131,10 +131,27 @@ jobs:
           VPS_USER: ${{ secrets.VPS_SSH_USER }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" -o ConnectTimeout=30 \
-            "$VPS_USER@$VPS_HOST" \
-            "grep -E '^(NEXT_PUBLIC_[A-Z0-9_]+|POSTHOG_PERSONAL_API_KEY|POSTHOG_PROJECT_ID)=' /opt/devrimo/frontend/.env.local" \
-            > frontend/.env.local
+          # Retried, for the same reason the upload is: this connection crosses
+          # the public internet and it does drop. One run died here on
+          # "ssh: connect to host port: Connection timed out" — the whole deploy
+          # lost to a network blip, on a step that only reads a file. Retrying a
+          # read is free, and this step had been left as the one unprotected
+          # crossing while the upload beside it already had three attempts.
+          for attempt in 1 2 3; do
+            if ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" \
+              -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+              "$VPS_USER@$VPS_HOST" \
+              "grep -E '^(NEXT_PUBLIC_[A-Z0-9_]+|POSTHOG_PERSONAL_API_KEY|POSTHOG_PROJECT_ID)=' /opt/devrimo/frontend/.env.local" \
+              > frontend/.env.local; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not read the build configuration from the host after three attempts"
+              exit 1
+            fi
+            echo "Configuration read attempt $attempt failed; retrying"
+            sleep $((attempt * 10))
+          done
           # Masked before anything else can echo them. The PostHog personal
           # key is a real secret; the NEXT_PUBLIC ones ship to every browser
           # anyway, and are masked for the sake of not having to think about
