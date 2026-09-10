@@ -18,7 +18,16 @@ const HIGHLIGHT = ["ring-2", "ring-primary", "ring-offset-2", "ring-offset-backg
  * Each step names an element by `data-tour`; a step whose element is not on the
  * page is still shown, it simply lights nothing.
  */
-export function PlannerIntro({ className }: { className?: string }) {
+/**
+ * Two shapes, and now each renders only where it belongs.
+ *
+ * Dismissed, this is a one-line link; running, it is a card. Rendering both
+ * from the same slot meant the link held a full row of the page for ever after
+ * a student closed the tour. "inline" renders the link and nothing else,
+ * "card" renders the card and nothing else, so the link can live on the title
+ * row and the card can keep its own.
+ */
+export function PlannerIntro({ className, variant = "both" }: { className?: string; variant?: "inline" | "card" | "both" }) {
   const { pick } = useLocale();
   const t = (tr: string, en: string) => pick({ tr, en });
   const [running, setRunning] = useState(false);
@@ -138,6 +147,7 @@ export function PlannerIntro({ className }: { className?: string }) {
   }
 
   if (!running) {
+    if (variant === "card") return null;
     return (
       <button
         type="button"
@@ -151,6 +161,7 @@ export function PlannerIntro({ className }: { className?: string }) {
   }
 
   const current = steps[step];
+  if (variant === "inline") return null;
   return (
     <div
       role="region"

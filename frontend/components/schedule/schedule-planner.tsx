@@ -1812,11 +1812,17 @@ export function SchedulePlanner() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <div className="mx-auto w-full max-w-[1500px] space-y-4 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-3 xl:space-y-0">
-        <div className="flex flex-wrap items-center justify-between gap-3 xl:shrink-0">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3">
+      <div className="mx-auto w-full max-w-[1500px] space-y-3 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-2 xl:space-y-0">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 xl:shrink-0">
+          {/* The title, what term it is, and how to use the screen, on one
+              line. They were three stacked rows above a page whose own content
+              starts below the fold on a laptop: 88px of chrome for eleven
+              words. The link only joins them once the tour has been
+              dismissed - while it is open it is a card, and cards get a row. */}
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <h1 className="text-2xl font-semibold tracking-tight">{t("Ders programı", "Schedule")}</h1>
             <p className="truncate text-sm text-muted-foreground">{termLabel(term, t)} · {t("derslerini ekle, çakışmaları gör, paylaş", "add courses, spot conflicts, share")}</p>
+            <PlannerIntro variant="inline" />
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={clearSchedule}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
@@ -1824,9 +1830,10 @@ export function SchedulePlanner() {
           </div>
         </div>
 
-        {/* Above both columns: it explains the whole screen, and once dismissed
-            it shrinks to a single link rather than taking space forever. */}
-        <PlannerIntro className="sm:mb-4" />
+        {/* Above both columns while it is open; once dismissed it is a link,
+            and the link lives on the title row instead of holding a row of its
+            own for ever. */}
+        <PlannerIntro variant="card" />
 
         {planning.legacyDraft ? (
           <div className="border-info/40 bg-info/10 text-info flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-sm" role="status">
