@@ -138,6 +138,32 @@ class WorkspaceService:
             raise HTTPException(422, "Resource does not support read")
         return await self.upstream(ref)
 
+    @staticmethod
+    def _department(ref) -> str | None:
+        """The department this resource belongs to, which is not always its key.
+
+        `catalog.department` is keyed by a department code, so its key is the
+        department. Every other catalog resource is keyed by a *course* code -
+        seven digits whose first three are the department - and passing the
+        whole thing as the department is what made every prerequisite read fail
+        with 502 "Error executing tool get_course_prerequisites" while the same
+        course's sections read fine. Verified against the source: department
+        "236" with course "2360219" returns MATH 219's prerequisites; department
+        "2360219" with the same course returns the 502.
+
+        An explicit `ref.department` still wins, because a model that names the
+        department knows something the key does not carry.
+        """
+        if ref.department:
+            return ref.department
+        key = (ref.key or "").strip()
+        if ref.kind == "catalog.department":
+            return key or None
+        # A METU course code is seven digits and begins with its department.
+        if len(key) == 7 and key.isdigit():
+            return key[:3]
+        return key or None
+
     async def upstream(self, ref, *, query="", limit=10):
         integration, method = UPSTREAM[ref.kind]
         if ref.kind == "mail.messages" and query:
@@ -151,7 +177,7 @@ class WorkspaceService:
             "course_id": ref.key,
             "course_code": ref.key,
             "course": ref.key,
-            "department": ref.department or ref.key,
+            "department": self._department(ref),
             "message_id": ref.key,
             "email_id": ref.key,
             "uid": ref.key,
