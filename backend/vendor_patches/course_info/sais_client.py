@@ -162,7 +162,9 @@ def _verify_course_response_identity(
 
 
 def _verify_course_rule_response_identity(
-    soup: BeautifulSoup, course_code: str, semester_code: str, *, semester_label: Optional[str] = None
+    soup: BeautifulSoup, course_code: str, semester_code: str, *,
+    semester_label: Optional[str] = None,
+    department_label: Optional[str] = None,
 ) -> None:
     """Verify the identity fields METU actually returns for rule lookups.
 
@@ -173,13 +175,19 @@ def _verify_course_rule_response_identity(
     an exact radio value avoids treating arbitrary page text as identity while
     accepting the response shape used by the live service.
     """
+    requested = str(course_code).strip()
+    # The department as well, when the caller holds the name METU prints for
+    # it. Without that name there is nothing to compare against, so the check
+    # stays exactly as strict as it was rather than failing on its absence.
+    named_department = bool(department_label) and len(requested) == 7
     _verify_course_response_identity(
         soup,
         None,
         semester_code,
         semester_label=semester_label,
+        department_code=requested[:3] if named_department else None,
+        department_label=department_label if named_department else None,
     )
-    requested = str(course_code).strip()
     text = clean_text(soup.get_text(" ", strip=True))
     labelled = set(
         re.findall(
@@ -198,6 +206,15 @@ def _verify_course_rule_response_identity(
         if str(control.get("type", "")).lower() == "radio"
         and str(control.get("value", "")).strip() == requested
     ]
+    if not soup.find_all("input", attrs={"name": "text_course_code"}):
+        # METU prints "Prerequisite Courses for" and then does not repeat the
+        # code - the requested seven digits appear nowhere in this page, and
+        # the course list it would otherwise fall back to is replaced by the
+        # rule table. Every course that actually has a prerequisite arrives
+        # this way, so requiring the code refused all of them. What the page
+        # does carry - its department and its semester - is verified above.
+        if re.search(r"\b(?:Auto\s+Replace|Prerequisite)\s+Courses?\s+for\b", text, re.I):
+            return
     if len(matches) != 1:
         raise ValueError("SAIS course rules page course identity is missing, ambiguous, or mismatched")
 
@@ -956,7 +973,8 @@ class SAISClient:
         if not prerequisite_table_found and not _explicit_empty_result(soup, "prerequisite"):
             raise ValueError("SAIS prerequisite table could not be read")
         _verify_course_rule_response_identity(soup, course_code, semester_code,
-            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)),
+            department_label=getattr(self, "_course_department_labels", {}).get(str(department_code)))
 
         return prereqs
 
@@ -1007,7 +1025,8 @@ class SAISClient:
         if not replacement_table_found and not _explicit_empty_result(soup, "replacement"):
             raise ValueError("SAIS replacement table could not be read")
         _verify_course_rule_response_identity(soup, course_code, semester_code,
-            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+            semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)),
+            department_label=getattr(self, "_course_department_labels", {}).get(str(department_code)))
         return replacements
 
     async def get_thesis_courses(

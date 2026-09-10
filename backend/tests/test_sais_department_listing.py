@@ -146,3 +146,44 @@ def test_a_thesis_page_with_a_blank_identity_is_still_refused(sais):
         )
     # ...and there are no rows either, so nothing is lost by refusing it.
     assert soup.find_all("tr")[1:] == []
+
+
+def test_a_prerequisite_page_that_never_names_the_course_is_accepted(sais):
+    """The page every course with a prerequisite actually returns.
+
+    METU prints "Prerequisite Courses for" and then does not repeat the code -
+    the requested seven digits appear nowhere in the HTML, and the course list
+    the check would otherwise fall back to is replaced by the rule table. So
+    the guard refused every prerequisite METU has, which is why
+    catalog_prerequisite_groups is empty. What the page does carry - its
+    department and its semester - is what gets verified.
+    """
+    soup = BeautifulSoup(
+        "<html><body><p>Department : Mathematics/Matematik Semester : 20261 "
+        "Prerequisite Courses for</p><table><tr><th>Course Code</th><th>Set No</th>"
+        "<th>Min Grade</th></tr><tr><td>2360120</td><td>1</td><td>DD</td></tr></table>"
+        "</body></html>",
+        "html.parser",
+    )
+    sais._verify_course_rule_response_identity(
+        soup, "2360219", "20261", department_label="Mathematics/Matematik"
+    )
+
+
+def test_that_page_is_still_refused_when_it_is_another_department(sais):
+    soup = BeautifulSoup(
+        "<html><body><p>Department : Physics/Fizik Semester : 20261 "
+        "Prerequisite Courses for</p><table><tr><th>Course Code</th></tr></table></body></html>",
+        "html.parser",
+    )
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_rule_response_identity(
+            soup, "2360219", "20261", department_label="Mathematics/Matematik"
+        )
+
+
+def test_a_page_with_neither_a_heading_nor_the_course_list_is_refused(sais):
+    """Accepting "no code" only goes as far as a page that says what it is."""
+    soup = BeautifulSoup("<html><body><p>Semester : 20261</p></body></html>", "html.parser")
+    with pytest.raises(ValueError, match="identity"):
+        sais._verify_course_rule_response_identity(soup, "2360219", "20261")
