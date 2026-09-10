@@ -444,13 +444,15 @@ async def _empty_demand(_term):
 
 
 async def test_a_department_that_cannot_be_listed_does_not_end_the_import(monkeypatch):
-    """One unreadable programme is one programme, not a failed import.
+    """One unreadable page is one page, not a failed import.
 
     METU's directory lists Actuarial Science; its course app answers
     "Information about the department could not be found." The parser refuses a
     page it cannot identify, which is right - but that refusal used to end the
     pass, and that programme sorts first, so the other 206 departments were
-    never fetched and the reviewed catalog stayed empty.
+    never fetched and the reviewed catalog stayed empty. The same thing then
+    happened 429 steps into the next attempt, on one section's restriction
+    table, with 2467 courses already read.
     """
     from app.academic_catalog.service import enqueue_import
 

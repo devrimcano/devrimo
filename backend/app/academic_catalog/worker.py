@@ -519,22 +519,22 @@ async def run_once() -> CatalogPassResult:
             listing_refusal_step: dict | None = None
             while offset < len(steps) and fetched < settings.catalog_warm_batch:
                 step = steps[offset]
-                # A department METU lists but its course app will not serve is
-                # one department, not a broken import. The parser is right to
-                # refuse a page it cannot identify; what was wrong is that the
-                # refusal ended the pass, and the offending programme sorts
-                # first, so 206 departments were never fetched. The failure is
-                # recorded against that step and the plan moves on. Anything
-                # that is not a listing, and anything that is not a parse
-                # refusal - a lost lease, an authentication failure, a
-                # deferral - still belongs to the caller below.
+                # A page METU will not give us is one page, not a broken
+                # import. The parser is right to refuse what it cannot read or
+                # identify; what was wrong is that the refusal ended the pass.
+                # Twice now that has cost a whole school: a programme with no
+                # course list sorts first among 207 departments, and later a
+                # single section's restriction table stopped an import 429 steps
+                # in, with 2467 courses already read. The failure is recorded
+                # against its own step - it shows on that course in the panel -
+                # and the plan moves on. Only a parse refusal: a lost lease, an
+                # authentication failure and a deferral still belong to the
+                # caller below, because those are not about one page.
                 try:
                     payload = await source.read(step["tool"], step["values"])
                 except ValueError as exc:
-                    if step["tool"] not in {"list_program_courses", "get_thesis_courses"}:
-                        raise
                     logger.warning(
-                        "catalog_listing_skipped",
+                        "catalog_step_skipped",
                         job_id=str(job.id),
                         step_tool=step["tool"],
                         step_values=step["values"],
@@ -597,11 +597,10 @@ async def run_once() -> CatalogPassResult:
                     )
                     retry_pending = False
             if succeeded == 0 and listing_refusal is not None:
-                # Every listing refused and none answered: that is a source
-                # that is not working, not a programme METU does not serve, and
-                # it belongs in the job's error where someone will see it -
-                # rather than in an import that reports success and imports
-                # nothing.
+                # Every page refused and none answered: that is a source that is
+                # not working, not one page METU will not give us, and it
+                # belongs in the job's error where someone will see it - rather
+                # than in an import that reports success and imports nothing.
                 raise listing_refusal
             done = offset >= len(steps)
             await _save_offset(
