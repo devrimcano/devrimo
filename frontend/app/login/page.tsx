@@ -23,7 +23,13 @@ export default function LoginPage() {
         <LocaleSwitcher />
       </div>
       <div className="motion-enter relative mx-auto grid min-h-[calc(100svh-1.5rem)] min-w-0 max-w-6xl overflow-hidden rounded-2xl border bg-card/90 shadow-[0_24px_80px_rgb(55_37_26/14%)] backdrop-blur-sm dark:shadow-[0_24px_80px_rgb(0_0_0/45%)] sm:min-h-[calc(100svh-4rem)] sm:rounded-[2rem] lg:grid-cols-[1.08fr_0.92fr]">
-        <section className="relative flex min-w-0 flex-col justify-between overflow-hidden bg-secondary p-5 text-foreground dark:bg-[#181513] dark:text-white sm:p-10 lg:p-14">
+        {/* Second on a phone, first from lg up. Measured on the live page: at
+            375x667 the sign-in card began at 636px of a 667px viewport and its
+            button sat 185px below the fold, so someone opening the login page
+            on a small phone saw the pitch and no form at all, and had to
+            discover by scrolling that there was one. The wide layout is
+            unchanged - there the two sit side by side. */}
+        <section className="relative order-2 flex min-w-0 flex-col justify-between overflow-hidden bg-secondary p-5 text-foreground lg:order-1 dark:bg-[#181513] dark:text-white sm:p-10 lg:p-14">
           <div className="absolute -bottom-28 -right-24 size-80 rounded-full border-[42px] border-primary/30" />
           <div className="motion-enter relative flex items-center gap-3 [animation-delay:80ms]">
             <BrandMark />
@@ -60,7 +66,7 @@ export default function LoginPage() {
           </div>
         </section>
 
-        <section className="flex min-w-0 items-center justify-center p-4 py-8 sm:p-10 lg:p-14">
+        <section className="order-1 flex min-w-0 items-center justify-center p-4 py-8 lg:order-2 sm:p-10 lg:p-14">
           <div className="motion-enter min-w-0 w-full max-w-md [animation-delay:180ms]">
             {isSupabaseConfigured() ? (
               <Suspense>

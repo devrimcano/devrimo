@@ -39,7 +39,16 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname.startsWith("/auth") ||
     request.nextUrl.pathname.startsWith("/api");
 
-  if (!hasVerifiedUser && !isPublic) {
+  // The pages this application actually serves. Everything else is a typo or a
+  // scan, and sending those to the sign-in screen made the 404 unreachable
+  // while signed out: /nope answered "sign in first", and signing in then
+  // landed on the 404 anyway. A visitor should be asked to sign in for a page
+  // that exists, and told it does not exist when it does not.
+  const served = new Set(["", "schedule", "settings", "updates", "admin"]);
+  const firstSegment = request.nextUrl.pathname.split("/")[1] ?? "";
+  const isServedPage = served.has(firstSegment);
+
+  if (!hasVerifiedUser && !isPublic && isServedPage) {
     const url = request.nextUrl.clone();
     const requestedNext = `${request.nextUrl.pathname}${request.nextUrl.search}`;
     url.pathname = "/login";

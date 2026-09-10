@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { EyeIcon, EyeOffIcon, Loader2Icon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { currentOrigin, localPath } from "@/lib/safe-next";
 import { getSiteUrl } from "@/lib/env";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,8 +16,7 @@ import { captureError, captureProductEvent, identifyStudent } from "@/components
 export function LoginForm() {
   const { pick } = useLocale();
   const searchParams = useSearchParams();
-  const requestedNext = searchParams.get("next") || "/";
-  const next = requestedNext.startsWith("/") && !requestedNext.startsWith("//") ? requestedNext : "/";
+  const next = localPath(searchParams.get("next"), currentOrigin());
   const [mode, setMode] = useState<"login" | "signup" | "reset">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -199,7 +199,11 @@ export function LoginForm() {
                 type={passwordVisible ? "text" : "password"}
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
                 required
-                minLength={6}
+                // Only where a password is being chosen. On the sign-in field this
+                // was the browser refusing to submit an account's existing
+                // password, with a message that explains nothing to whoever set
+                // it before the rule existed.
+                minLength={mode === "signup" ? 6 : undefined}
                 className="h-11 pr-12"
                 aria-invalid={Boolean(error)}
                 // The rule is described, not placeheld: a placeholder disappears

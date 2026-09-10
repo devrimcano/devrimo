@@ -81,7 +81,7 @@ jobs:
         run: |
           npm ci
           npm run contracts:check
-          node --test lib/api/*.test.mjs lib/planning-sync.test.mjs
+          node --test lib/api/*.test.mjs lib/planning-sync.test.mjs lib/safe-next.test.mjs
           npm run lint
           npm run build
 
