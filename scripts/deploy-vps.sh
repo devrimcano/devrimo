@@ -217,9 +217,26 @@ pg_dump_bin="/usr/lib/postgresql/$server_major/bin/pg_dump"
 if [ ! -x "$pg_dump_bin" ]; then
   pg_dump_bin="$(command -v pg_dump)"
 fi
-"$pg_dump_bin" --format=custom --no-owner --no-acl \
+# The dump goes through the same pooler everything else does, and the pooler
+# drops a long COPY often enough to be a deploy's most common cause of death:
+# "PQgetCopyData() failed ... SSL error: unexpected eof while reading", mid
+# table, on a change that had nothing to do with the database. Three attempts
+# with a pause, because the next one usually works; if none does, the deploy
+# still stops, since a release without a rollback point is exactly what this
+# dump exists to prevent.
+dump_attempt=1
+until "$pg_dump_bin" --format=custom --no-owner --no-acl \
   --schema=public --schema=ai --schema=extensions --extension=vector --extension=pg_trgm \
-  --enable-row-security --file="$BACKUP_DIR/devrimo-$stamp.dump"
+  --enable-row-security --file="$BACKUP_DIR/devrimo-$stamp.dump"; do
+  if [ "$dump_attempt" -ge 3 ]; then
+    echo "::error::The pre-release database dump failed three times; not deploying without a rollback point" >&2
+    exit 1
+  fi
+  echo "Pre-release dump attempt $dump_attempt failed; retrying" >&2
+  rm -f "$BACKUP_DIR/devrimo-$stamp.dump"
+  dump_attempt=$((dump_attempt + 1))
+  sleep $((dump_attempt * 10))
+done
 chmod 600 "$BACKUP_DIR/devrimo-$stamp.dump"
 unset PGPASSWORD PGUSER PGHOST PGPORT PGDATABASE PGSSLMODE PGSSLROOTCERT PGSSLCERT PGSSLKEY PGOPTIONS PGCONNECT_TIMEOUT
 

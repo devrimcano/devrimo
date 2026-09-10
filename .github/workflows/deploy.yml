@@ -118,8 +118,22 @@ jobs:
           test -n "$VPS_HOST" || { echo "::error::VPS_SSH_HOST is not configured"; exit 1; }
           test -n "$VPS_PORT" || { echo "::error::VPS_SSH_PORT is not configured"; exit 1; }
           test -n "$VPS_USER" || { echo "::error::VPS_SSH_USER is not configured"; exit 1; }
-          scp -i ~/.ssh/devrimo_deploy -P "$VPS_PORT" \
-            devrimo-release.tar.gz "$VPS_USER@$VPS_HOST:/tmp/devrimo-release-${GITHUB_SHA}.tar.gz"
+          # Three of the last eighteen failed runs died here, on the network
+          # between GitHub and the host rather than on anything in the change:
+          # "connect to host port: Connection timed out" and "client_loop:
+          # send disconnect: Broken pipe". Keepalives so an idle moment is not
+          # read as a dead link, and two more tries before calling it.
+          for attempt in 1 2 3; do
+            scp -i ~/.ssh/devrimo_deploy -P "$VPS_PORT" \
+              -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+              devrimo-release.tar.gz "$VPS_USER@$VPS_HOST:/tmp/devrimo-release-${GITHUB_SHA}.tar.gz" && break
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not upload the release to the host after three attempts"
+              exit 1
+            fi
+            echo "Upload attempt $attempt failed; retrying"
+            sleep $((attempt * 15))
+          done
 
       - name: Deploy and verify
         env:
@@ -127,6 +141,12 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_SSH_PORT }}
           VPS_USER: ${{ secrets.VPS_SSH_USER }}
         run: |
-          ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" \
+          # Not retried: this half restarts services and migrates a database,
+          # and running it twice because a socket went quiet is worse than
+          # failing once. Keepalives only, so a long build is not mistaken for
+          # a dead connection - which is how one deploy died mid-npm-install.
+          ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" \
+            -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
+            "$VPS_USER@$VPS_HOST" \
             "DEPLOY_SHA='$GITHUB_SHA' RELEASE_ARCHIVE='/tmp/devrimo-release-${GITHUB_SHA}.tar.gz' bash -s" \
             < scripts/deploy-vps.sh

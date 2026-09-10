@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, case, delete, func, or_, select, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.audit import record_event
@@ -103,10 +104,27 @@ async def _token_usage(principal: AdminPrincipal, db: AsyncSession) -> dict:
     return await asyncio.to_thread(read_usage)
 
 
+def _agno_runs_readable(db) -> bool:
+    """Whether this connection can read the Agno run table at all.
+
+    ``to_regclass`` answers NULL for a table that is not there, which is what
+    this check wanted - but it *raises* for a schema the caller may not enter,
+    and the runtime identity may not enter ``ai``. So the check written to
+    return "no data" became the most frequent error this product reports:
+    "permission denied for schema ai", every time an administrator opened the
+    overview. A schema we cannot look into holds no numbers we can show, which
+    is the same answer as a table that does not exist.
+    """
+    try:
+        return bool(db.scalar(text("SELECT to_regclass('ai.agno_runs') IS NOT NULL")))
+    except ProgrammingError:
+        return False
+
+
 def _token_usage_from_connection(principal, db, runtime) -> dict:
     """Aggregate Agno run metrics without loading prompts or responses."""
     table = "ai.agno_runs"
-    if not bool(db.scalar(text("SELECT to_regclass('ai.agno_runs') IS NOT NULL"))):
+    if not _agno_runs_readable(db):
         return {
             "runs": 0,
             "input_tokens": 0,
