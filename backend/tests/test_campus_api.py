@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.api.v1 import campus as campus_routes
 from app.campus import service as campus_service
+from app.campus import throttle as campus_throttle
 from app.campus.session_pool import session_count
 from app.campus.verify import VerificationResult
 from app.config import get_settings
@@ -26,6 +27,19 @@ async def _specs_for(user_id):
     """
     async with SessionLocal() as db:
         return await campus_service.campus_server_specs(db, user_id)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_verification_budget():
+    """How often METU may be asked about a password is per-process state.
+
+    Without this, a test that spends the budget would be answered 429 in the
+    next test, for something the next test did not do — and which test failed
+    would depend on collection order.
+    """
+    campus_throttle.reset()
+    yield
+    campus_throttle.reset()
 
 
 @pytest.fixture
@@ -90,6 +104,50 @@ async def test_rejected_credentials_are_not_stored(client, reject_credentials):
 
     after = await client.get("/api/v1/campus/connection", headers=auth_header(user_id))
     assert after.json()["connected"] is False
+
+
+async def test_password_checking_is_not_an_unlimited_oracle(client, reject_credentials):
+    """The endpoint answers "was that password right" for any username given.
+
+    It is authenticated, but the username never had to be the caller's own, and
+    METU sees the attempts as this host's. Left unlimited, one signed-up account
+    could walk a list of student credentials through it. The counter is tested
+    in tests/test_campus_throttle.py; this is about the endpoint being wired to
+    it at all.
+    """
+    user_id = new_user_id()
+    for _ in range(campus_throttle.PER_USER_ATTEMPTS):
+        allowed = await client.post(
+            "/api/v1/campus/connection/verify",
+            headers=auth_header(user_id),
+            json={"metu_username": "e123456", "metu_password": "guess"},
+        )
+        assert allowed.status_code == 200
+
+    refused = await client.post(
+        "/api/v1/campus/connection/verify",
+        headers=auth_header(user_id),
+        json={"metu_username": "e123457", "metu_password": "guess"},
+    )
+    assert refused.status_code == 429
+    assert refused.headers.get("Retry-After")
+
+    # The other door onto the same oracle draws on the same budget, or the
+    # limit on this one is decoration.
+    other_door = await client.put(
+        "/api/v1/campus/connection",
+        headers=auth_header(user_id),
+        json={"metu_username": "e123458", "metu_password": "guess"},
+    )
+    assert other_door.status_code == 429
+
+    # And it is this account that is out of budget, not the service.
+    someone_else = await client.post(
+        "/api/v1/campus/connection/verify",
+        headers=auth_header(new_user_id()),
+        json={"metu_username": "e999999", "metu_password": "guess"},
+    )
+    assert someone_else.status_code == 200
 
 
 async def test_unreachable_sso_saves_unverified_rather_than_blocking(client, monkeypatch):

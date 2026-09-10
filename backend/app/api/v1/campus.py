@@ -14,6 +14,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
 from app.campus import service as campus_service
 from app.campus.credentials import secrets_for
+from app.campus.throttle import retry_after_seconds
 from app.campus.verify import normalize_username, verify_metu_credentials
 from app.config import get_settings
 from app.db.models import AgentStatus
@@ -49,12 +50,40 @@ async def get_connection(
     return await _connection_out(db, user.id)
 
 
+def _spend_a_verification(user: AuthenticatedUser, username: str | None) -> None:
+    """Charge this account for asking METU whether a password is correct.
+
+    Every path that reaches ``verify_metu_credentials`` from an HTTP request
+    goes through here, because the endpoint is otherwise a credential-testing
+    oracle against METU's central login, answered from this host's IP: the
+    username never had to be the caller's own, and nothing limited the rate.
+    See app/campus/throttle.py.
+    """
+    wait = retry_after_seconds(str(user.id))
+    if wait is None:
+        return
+    logger.warning(
+        "campus_verification_throttled",
+        user_id=str(user.id),
+        # The attempted username, not the password, and only because a burst of
+        # attempts across many usernames is the thing worth seeing in a log.
+        username=normalize_username(username or "") or None,
+        retry_after=wait,
+    )
+    raise HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "Too many password checks. Please wait a few minutes and try again.",
+        headers={"Retry-After": str(wait)},
+    )
+
+
 @router.post("/connection/verify", response_model=CampusVerifyOut)
 async def verify_connection(
     body: CampusVerifyIn,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> CampusVerifyOut:
     """Check credentials without storing them, so the form can validate inline."""
+    _spend_a_verification(user, body.metu_username)
     result = await verify_metu_credentials(body.metu_username, body.metu_password)
     return CampusVerifyOut(ok=result.ok, unreachable=result.unreachable, detail=result.detail)
 
@@ -78,6 +107,11 @@ async def put_connection(
     verified = False
     verification_error: str | None = None
     if body.metu_password and not body.skip_verification:
+        # The same oracle as /connection/verify, reached by a different door:
+        # this one also answers "was that password right" for any username the
+        # caller supplies, and it must draw on the same budget or the limit on
+        # the other endpoint is decoration.
+        _spend_a_verification(user, username)
         result = await verify_metu_credentials(username, body.metu_password)
         verified = result.ok
         if not result.ok and not result.unreachable:
