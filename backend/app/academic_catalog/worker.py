@@ -516,6 +516,7 @@ async def run_once() -> CatalogPassResult:
             # nothing at all. These two tell those apart.
             succeeded = 0
             listing_refusal: ValueError | None = None
+            listing_refusal_step: dict | None = None
             while offset < len(steps) and fetched < settings.catalog_warm_batch:
                 step = steps[offset]
                 # A department METU lists but its course app will not serve is
@@ -549,6 +550,7 @@ async def run_once() -> CatalogPassResult:
                     # The first one, which is the one that says what went wrong;
                     # the ones after it are usually the same thing again.
                     listing_refusal = listing_refusal or exc
+                    listing_refusal_step = listing_refusal_step or step
                     offset += 1
                     fetched += 1
                     await _save_offset(job.id, job.lease_token, offset)
@@ -661,7 +663,9 @@ async def run_once() -> CatalogPassResult:
             attempts = int(job.attempts or 0) + 1
             auth = type(exc).__name__ == "SAISAuthError"
             retry_at = (datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()
-            failed_step = steps[offset] if offset < len(steps) else None
+            # Past the end of the plan when every listing was skipped, so the
+            # step that first refused is the one worth naming.
+            failed_step = steps[offset] if offset < len(steps) else listing_refusal_step
             error_code = "source_authentication_failed" if auth else type(exc).__name__
             error_detail = None if auth else _failure_detail(exc, failed_step)
             await _save_offset(
