@@ -17,6 +17,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { ChatSession } from "@/lib/types";
 import { useLocale } from "@/components/locale-provider";
+import { prefetchSessionMessages } from "@/hooks/useChat";
 
 export function SessionSidebar({
   sessions,
@@ -115,6 +116,15 @@ export function SessionSidebar({
                     type="button"
                     className="relative z-10 flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                     onClick={() => onSelect(session.id)}
+                    // Opening a conversation costs about half a second of
+                    // server time, most of it waiting on a database in another
+                    // country. A pointer arriving on the row is a reliable
+                    // signal that it is about to be clicked, and the fetch has
+                    // nothing else to wait for - so it starts here and is
+                    // usually done by the time the button comes back up.
+                    // Focus counts too, for anyone arriving by keyboard.
+                    onPointerEnter={() => prefetchSessionMessages(session.id)}
+                    onFocus={() => prefetchSessionMessages(session.id)}
                     aria-current={active ? "page" : undefined}
                   >
                     <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg transition-colors duration-300", active ? "bg-primary/10 text-primary" : "bg-sidebar-accent/55 text-muted-foreground group-hover:text-foreground")}>
