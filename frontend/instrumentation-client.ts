@@ -16,9 +16,21 @@
  */
 
 import { applyConsent } from "@/lib/analytics";
-import { consentSnapshot, parseConsent } from "@/lib/consent";
+import { clearMeasurementStorage, consentSnapshot, parseConsent } from "@/lib/consent";
 
 const consent = parseConsent(consentSnapshot());
 if (consent?.decided) {
   applyConsent(consent);
+} else if (consent) {
+  // Everyone who visited before the question existed is still carrying the
+  // identifier that was written without asking them. Measured on the live site
+  // after this shipped: the banner shows, the SDK never starts, nothing is sent
+  // — and the old `ph_…` cookie is still there, holding a $device_id and a
+  // distinct_id from before consent was a thing.
+  //
+  // Nothing is leaking while it sits there. It matters because of what happens
+  // next: without this, a later "yes" would quietly re-attach the person to an
+  // identity collected without one, which is not the fresh start that answering
+  // the question should be. So the slate is cleared while the question is open.
+  clearMeasurementStorage();
 }
