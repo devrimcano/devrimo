@@ -515,6 +515,10 @@ async def run_once() -> CatalogPassResult:
             # Skipping one department is not the same as a source answering
             # nothing at all. These two tell those apart.
             succeeded = 0
+            # Where this pass began, which is how "the source has never
+            # answered" is told apart from "this batch happened to be
+            # unreadable". See the guard below.
+            started_offset = offset
             listing_refusal: ValueError | None = None
             listing_refusal_step: dict | None = None
             while offset < len(steps) and fetched < settings.catalog_warm_batch:
@@ -601,11 +605,31 @@ async def run_once() -> CatalogPassResult:
                         attempts=0,
                     )
                     retry_pending = False
-            if succeeded == 0 and listing_refusal is not None:
-                # Every page refused and none answered: that is a source that is
-                # not working, not one page METU will not give us, and it
-                # belongs in the job's error where someone will see it - rather
-                # than in an import that reports success and imports nothing.
+            if succeeded == 0 and listing_refusal is not None and started_offset == 0:
+                # A source that never answered at all belongs in the job's
+                # error, rather than in an import that reports success and
+                # imports nothing. But only when it never answered *at all*.
+                #
+                # This used to fire whenever a single batch refused end to end,
+                # and a batch is fifteen steps. Fifteen consecutive unreadable
+                # restriction tables is an ordinary thing for METU to have -
+                # a department whose tables are not published, a run of
+                # cross-listed service courses - and it killed the import.
+                #
+                # Measured: a whole-term job walked 4817 of 10048 steps over
+                # roughly twenty-four hours, hit a run of refusals in
+                # get_section_constraints, raised, exhausted its three attempts
+                # and was marked failed - discarding forty-eight per cent of a
+                # day's work. The job's own record disproves the inference the
+                # code was making: a source that "is not working" does not
+                # answer 4817 times first.
+                #
+                # A parse refusal is now what it says it is: this page could not
+                # be read. It is recorded on its own observation and shows
+                # against that course in the panel, and the pass moves on. The
+                # failures that really are about the source - a lost lease, an
+                # authentication failure, a deferral - have their own exception
+                # types and still end the pass above.
                 raise listing_refusal
             done = offset >= len(steps)
             await _save_offset(

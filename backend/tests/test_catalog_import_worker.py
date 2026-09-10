@@ -296,6 +296,71 @@ async def test_catalog_import_failed_job_stores_value_error_detail(monkeypatch):
         assert updated.error_detail == "Bad response payload from source"
 
 
+async def test_refusals_do_not_discard_an_import_that_has_already_answered(monkeypatch):
+    """Fifteen unreadable pages must not throw away a day of work.
+
+    The guard that fires when a pass answers nothing used to look only at the
+    pass, and a pass is fifteen steps. A run of fifteen unreadable restriction
+    tables is an ordinary thing for METU to have, and it killed the job: a
+    whole-term import walked 4817 of 10048 steps over about twenty-four hours,
+    hit such a run, exhausted its three attempts and was marked failed.
+
+    A source that has answered 4817 times is not a source that is down, so a
+    parse refusal after real progress is now recorded against its own step and
+    the pass moves on.
+    """
+    from app.academic_catalog.service import enqueue_import
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    class Refusing:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, _tool, _values):
+            raise ValueError("SAIS section restriction table could not be read")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Refusing)
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        job = await enqueue_import(
+            db,
+            METU_ID,
+            "20261",
+            course_codes=["2400201", "2400213"],
+            requested_by=uuid4(),
+        )
+        await db.commit()
+        job_id = job.id
+
+    # Stand the job up mid-plan: this one has already answered for earlier
+    # steps, which is the whole difference from the test above.
+    async with SessionLocal() as db:
+        started = await db.get(CatalogImportJob, job_id)
+        assert len(worker.initial_steps(started)) > 3, "this test needs a plan it can start partway through"
+        started.checkpoint_offset = 3
+        await db.commit()
+
+    result = await worker.run_once()
+
+    assert result.outcome != "failed", f"a refusal after real progress ended the job: {result.error_detail}"
+
+    async with SessionLocal() as db:
+        updated = await db.get(CatalogImportJob, job_id)
+        assert updated.status != "failed"
+        # The cursor moved past the pages that would not be read, rather than
+        # the job stopping on them.
+        assert updated.checkpoint_offset > 3
+
+
 async def test_a_failure_with_no_message_still_says_where_it_happened(monkeypatch):
     """What every catalog import on production actually did.
 
