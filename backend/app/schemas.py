@@ -34,17 +34,53 @@ class AgentOut(BaseModel):
         )
 
 
+# What a chat turn is allowed to weigh.
+#
+# Measured against the deployed edge: a 20 MB POST to /api/v1/chat/completions
+# was accepted in full — all 20971567 bytes uploaded — and only then refused for
+# being unauthenticated. Caddy sets no request body limit (unlike nginx, which
+# defaults to 1 MB), `content` had no maximum length, `messages` had no maximum
+# count, and there is no rate limiting anywhere in this service. So any signed-in
+# student could hand a 2-core, 1.9 GB host an arbitrarily large body to parse
+# into memory, and an arbitrarily large prompt to pay an LLM for.
+#
+# The numbers are deliberately generous rather than tight: only text parts reach
+# `content` (attachments are filtered out in the web layer), so 32 000 characters
+# is several times the longest message anyone writes by hand, and the whole
+# conversation is resent each turn, so the thread bound has to fit a term's worth
+# of one. They exist to make the ceiling finite, not to be felt.
+MAX_MESSAGE_CHARACTERS = 32_000
+MAX_MESSAGES_PER_TURN = 500
+MAX_TURN_CHARACTERS = 400_000
+
+
 class ChatMessageIn(BaseModel):
     role: ChatRole
-    content: str
+    content: str = Field(max_length=MAX_MESSAGE_CHARACTERS)
 
 
 class ChatCompletionsRequestIn(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
-    messages: list[ChatMessageIn]
+    messages: list[ChatMessageIn] = Field(max_length=MAX_MESSAGES_PER_TURN)
     session_id: str | None = Field(default=None, min_length=1, max_length=64)
     stream: bool | None = None
     model: str | None = None
+
+    @field_validator("messages")
+    @classmethod
+    def _within_turn_budget(cls, messages: list[ChatMessageIn]) -> list[ChatMessageIn]:
+        """The per-message and per-thread caps multiply; this is the product.
+
+        Five hundred messages of thirty-two thousand characters is sixteen
+        million, which is the same unbounded body wearing two bounded ones.
+        """
+        total = sum(len(message.content) for message in messages)
+        if total > MAX_TURN_CHARACTERS:
+            raise ValueError(
+                f"This conversation is too long to send ({total} characters; "
+                f"the limit is {MAX_TURN_CHARACTERS})."
+            )
+        return messages
 
 
 class ChatConfirmationIn(BaseModel):

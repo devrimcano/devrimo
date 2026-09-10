@@ -9,6 +9,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { createPortal } from "react-dom";
+import { isSafeMediaUrl } from "@/lib/safe-media-url";
 import { cva, type VariantProps } from "class-variance-authority";
 import {
   CopyIcon,
@@ -74,6 +75,18 @@ const downloadImagePart = (
   part: Pick<ImageMessagePart, "image" | "filename">,
 ): void => {
   if (typeof document === "undefined") return;
+  // The URL in a message part is content this app did not write: the assistant
+  // reads course pages, ODTÜClass and webmail, and anything in its output can
+  // land here. `a.href = "javascript:…"` followed by `a.click()` runs that
+  // script in this origin, where the session cookie is script-readable because
+  // @supabase/ssr needs it to be. components/file.tsx already refused this for
+  // file parts; image parts did not.
+  //
+  // A return rather than a throw: the renderer already refuses to draw an
+  // unsafe part, so reaching here means a consumer used the exported actions
+  // directly, and an uncaught error inside an onClick is a worse answer than
+  // a button that declines to do anything.
+  if (!isSafeMediaUrl(part.image)) return;
   const ext = extensionForMimeType(mimeFromImage(part.image));
   const filename = part.filename ?? `image.${ext}`;
   const isDataUri = /^data:/i.test(part.image);
@@ -101,6 +114,10 @@ const copyImagePart = async (
   ) {
     throw new Error("Clipboard API is not available in this environment.");
   }
+  // Same reason as the download path, plus one of its own: this `fetch` is
+  // same-origin by default, so a part whose "image" is "/api/…" would copy this
+  // student's own API response to their clipboard as if it were a picture.
+  if (!isSafeMediaUrl(part.image)) throw new Error("This image has an address it is not safe to open.");
   const blob = /^data:/i.test(part.image)
     ? dataUriToBlob(part.image)
     : await fetch(part.image).then((r) => r.blob());
@@ -488,6 +505,17 @@ const ImageImpl: ImageMessagePartComponent = (props) => {
     return (
       <ImageRoot>
         <ImageContentFilterError reason="The provider blocked this image." />
+      </ImageRoot>
+    );
+  }
+
+  // Refused here rather than in the buttons, so an unsafe address never reaches
+  // a control at all: no download to click, no copy to trigger, and the shape
+  // on screen says what happened instead of silently showing nothing.
+  if (!isSafeMediaUrl(image)) {
+    return (
+      <ImageRoot>
+        <ImageContentFilterError reason="This image has an address Devrimo will not open." />
       </ImageRoot>
     );
   }
