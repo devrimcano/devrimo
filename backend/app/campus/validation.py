@@ -39,6 +39,14 @@ def validate_odtuclass_base_url(value: str | None) -> str | None:
     if port not in {None, 443}:
         raise ValueError("ODTUClass base URL must use the default HTTPS port")
 
-    # Keep a caller's supported path, while removing a trailing slash so the
-    # upstream client does not receive a doubled separator.
-    return normalized.rstrip("/")
+    # Rebuilt from the parts that were actually checked, rather than handed back
+    # as typed. The check lowercases the host and drops a trailing root dot;
+    # returning the raw string meant "https://ODTUCLASS.METU.EDU.TR./" passed
+    # validation and then travelled to the upstream client exactly like that —
+    # the same host as far as DNS is concerned, and a hostname some TLS stacks
+    # will not match against the certificate's SAN, which surfaces to a student
+    # as an ODTÜClass connection that inexplicably will not handshake.
+    #
+    # A caller's path is still kept, minus a trailing slash so the upstream
+    # client does not build a doubled separator.
+    return f"https://{host}{parsed.path.rstrip('/')}"

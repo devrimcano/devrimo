@@ -140,6 +140,15 @@ def test_spec_repr_does_not_leak_the_password():
         ("https://odtuclass2025sum.metu.edu.tr", "https://odtuclass2025sum.metu.edu.tr"),
         (None, None),
         ("", None),
+        # Normalised, not echoed back as typed. The host check already lowercases
+        # and drops a trailing root dot; returning the raw string sent
+        # "ODTUCLASS.METU.EDU.TR." on to the upstream client, which is the same
+        # host to DNS and a name some TLS stacks will not match against the
+        # certificate — reaching the student as a connection that simply will
+        # not handshake, for a reason nothing on screen could explain.
+        ("https://ODTUCLASS.METU.EDU.TR./", "https://odtuclass.metu.edu.tr"),
+        # A caller's path still survives, minus the trailing separator.
+        ("https://odtuclass.metu.edu.tr/moodle/", "https://odtuclass.metu.edu.tr/moodle"),
     ],
 )
 def test_odtuclass_base_url_accepts_only_published_hosts(value, expected):
