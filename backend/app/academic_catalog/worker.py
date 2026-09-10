@@ -553,7 +553,12 @@ async def run_once() -> CatalogPassResult:
                     listing_refusal_step = listing_refusal_step or step
                     offset += 1
                     fetched += 1
-                    await _save_offset(job.id, job.lease_token, offset)
+                    # Cleared like any other step that finished: a page METU
+                    # would not give us is recorded on its own observation, and
+                    # leaving it in the job's error left the admin panel showing
+                    # a red line on a job that was walking along fine. A pass
+                    # where nothing answered still fails, below.
+                    await _save_offset(job.id, job.lease_token, offset, error_code=None, error_detail=None)
                     continue
                 observed = datetime.now(UTC)
                 async with SessionLocal() as db:
