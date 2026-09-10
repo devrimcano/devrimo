@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { getSiteUrl } from "@/lib/env";
+import { LEGAL_DOCUMENTS } from "@/lib/legal/documents";
 
 /**
  * What a crawler is invited to read, which here is one page.
@@ -21,10 +22,21 @@ export default function robots(): MetadataRoute.Robots {
     rules: [
       {
         userAgent: "*",
-        // The two pages that exist for someone who is not signed in: the door,
-        // and the notice explaining what the door sets on their machine. A
-        // privacy notice nobody can find is not a notice.
-        allow: ["/login", "/gizlilik"],
+        // What exists for someone who is not signed in: the door, the notice
+        // explaining what the door sets on their machine, and whichever legal
+        // texts are finished. A privacy notice nobody can find is not a notice.
+        //
+        // Derived from the registry rather than listed here, so a text becomes
+        // findable by being published and not by someone remembering to edit
+        // this file — and, more importantly, so a draft cannot become findable
+        // by the same oversight.
+        allow: [
+          "/login",
+          "/gizlilik",
+          ...LEGAL_DOCUMENTS.filter((document) => document.status === "published").map(
+            (document) => `/belgeler/${document.slug}`,
+          ),
+        ],
         disallow: [
           "/", // the assistant, and the only page a signed-out visitor is sent from
           "/schedule",
@@ -33,6 +45,11 @@ export default function robots(): MetadataRoute.Robots {
           "/admin",
           "/api/",
           "/auth/",
+          // Every draft, by name. The pages also carry `noindex`; this is the
+          // half a crawler reads before requesting them at all.
+          ...LEGAL_DOCUMENTS.filter((document) => document.status === "draft").map(
+            (document) => `/belgeler/${document.slug}`,
+          ),
         ],
       },
     ],
