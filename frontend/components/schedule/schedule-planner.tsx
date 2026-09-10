@@ -656,6 +656,22 @@ function canonicalSectionsFromLocal(
  * free-day-heavy, gap-free ones first are a genuine choice. Free days come
  * before gaps because that is the trade students actually ask for.
  */
+/**
+ * The identity of a schedule, for asking "is this one already a favourite?".
+ *
+ * Not the canonical fingerprint: that includes each entry's id, and ids are
+ * minted fresh every time a section is added, so the same week generated twice
+ * never matched itself. What makes two weeks the same week is what is taught,
+ * when, and where.
+ */
+function scheduleKey(entries: Entry[]): string {
+  return entries
+    .map((entry) => `${entry.code}|${entry.section}|${entry.day}|${entry.start}|${entry.duration}|${entry.room?.trim() ?? ""}`)
+    .sort()
+    .join("~");
+}
+
+
 function scheduleShape(entries: Entry[]) {
   const used = new Set(entries.map((entry) => entry.day));
   let gaps = 0;
@@ -950,6 +966,12 @@ export function SchedulePlanner() {
   const dayLabel = useCallback((day: Day) => ({ Mon: t("Pzt", "Mon"), Tue: t("Sal", "Tue"), Wed: t("Çar", "Wed"), Thu: t("Per", "Thu"), Fri: t("Cum", "Fri") })[day], [t]);
   // What distinguishes one alternative from the next, in the terms a student
   // is choosing on: which days it leaves free.
+  // Whether the week on screen is one of the saved ones, by what it teaches
+  // rather than by object identity - see scheduleKey.
+  const isFavorited = useMemo(
+    () => entries.length > 0 && favorites.some((saved) => scheduleKey(saved) === scheduleKey(entries)),
+    [entries, favorites],
+  );
   const currentShape = useMemo(() => (entries.length ? scheduleShape(entries) : null), [entries]);
   // Recomputed only when the timetable changes, not per cell: the grid has
   // fifty cells and this is a whole-week assignment.
@@ -1689,10 +1711,30 @@ export function SchedulePlanner() {
 
   // --- sharing and export -------------------------------------------------
 
+  /**
+   * Add this week to the favourites, or take it out again.
+   *
+   * It only ever added. Pressing the heart twice on the same week stored it
+   * twice, nothing showed whether the week on screen was already saved, and
+   * there was no way at all to remove one - the list only shrank when an
+   * eleventh push silently dropped the oldest.
+   */
   function favorite() {
     if (!entries.length) return;
+    const key = scheduleKey(entries);
+    const existing = favorites.findIndex((saved) => scheduleKey(saved) === key);
+    if (existing >= 0) {
+      const next = favorites.filter((_, index) => index !== existing);
+      setFavorites(next);
+      // Keep pointing at the same saved week where there still is one, so the
+      // "next favourite" walk does not jump after a removal.
+      setFavoriteIndex(next.length ? Math.min(existing, next.length - 1) : -1);
+      toast.success(t("Program favorilerden çıkarıldı.", "Schedule removed from favorites."));
+      return;
+    }
     const next = [...favorites, entries].slice(-10);
-    setFavorites(next); setFavoriteIndex(next.length - 1);
+    setFavorites(next);
+    setFavoriteIndex(next.length - 1);
     toast.success(t("Program favorilere eklendi.", "Schedule added to favorites."));
   }
 
@@ -2088,8 +2130,20 @@ export function SchedulePlanner() {
                   ) : null}
                   <Button size="icon-sm" variant="ghost" aria-label={t("CSV olarak indir", "Download as CSV")} onClick={exportCsv}><DownloadIcon /></Button>
                   <Button size="icon-sm" variant="ghost" aria-label={t("4K duvar kâğıdı olarak indir", "Download as a 4K wallpaper")} onClick={exportWallpaper}><ImageIcon /></Button>
-                  {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={nextFavorite}>{t("Sonraki favori", "Next favorite")}</Button> : null}
-                  <Button size="icon-sm" variant="ghost" aria-label={t("Favoriye ekle", "Favorite")} onClick={favorite}><HeartIcon /></Button>
+                  {favorites.length ? <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={nextFavorite}>{t(`Sonraki favori (${favorites.length})`, `Next favorite (${favorites.length})`)}</Button> : null}
+                  {/* A heart that only ever added was a lie about its own
+                      shape. It now says which way it will go, and shows
+                      whether the week on screen is one of the saved ones. */}
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-pressed={isFavorited}
+                    aria-label={isFavorited ? t("Favorilerden çıkar", "Remove from favorites") : t("Favoriye ekle", "Favorite")}
+                    title={isFavorited ? t("Favorilerden çıkar", "Remove from favorites") : t("Favoriye ekle", "Favorite")}
+                    onClick={favorite}
+                  >
+                    <HeartIcon className={isFavorited ? "fill-current text-primary" : undefined} />
+                  </Button>
                   <Button size="icon-sm" variant="ghost" aria-label={t("Özeti kopyala", "Copy summary")} onClick={() => void copySummary()}><ClipboardIcon /></Button>
                 </div>
               </div>
