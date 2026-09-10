@@ -142,7 +142,8 @@ prune_frontend_releases() {
     name="$(basename "$directory")"
     [[ "$name" =~ ^([0-9a-f]{40}|previous)-[0-9]{8}-[0-9]{6}$ ]] || continue
     [ "$resolved" = "$active" ] && continue
-    if [ -z "$rollback" ] && [ -s "$directory/.next/BUILD_ID" ] && [ -d "$directory/node_modules/next" ]; then
+    if [ -z "$rollback" ] && [ -s "$directory/.next/BUILD_ID" ] \
+      && { [ -f "$directory/server.js" ] || [ -d "$directory/node_modules/next" ]; }; then
       rollback="$resolved"
       continue
     fi
@@ -173,10 +174,20 @@ report_storage
 # Failed workflows upload a uniquely named archive and cannot reach the normal
 # success cleanup. The current archive is retained; every other file matching
 # the workflow's exact release prefix is stale and safe to remove.
-current_archive="$(basename "$RELEASE_ARCHIVE")"
+current_archives=" $(basename "$RELEASE_ARCHIVE") "
+# Written as an `if` rather than `test && assign`: under `set -e` a bare test
+# that fails is the script's exit status, so the ordinary case of "no frontend
+# archive" would end the deploy here, two lines into it, saying nothing.
+if [ -n "${FRONTEND_ARCHIVE:-}" ]; then
+  current_archives="$current_archives$(basename "$FRONTEND_ARCHIVE") "
+fi
 while IFS= read -r -d '' archive; do
-  [ "$(basename "$archive")" = "$current_archive" ] || rm -f -- "$archive"
-done < <(find /tmp -maxdepth 1 -type f -name 'devrimo-release-*.tar.gz' -print0)
+  case "$current_archives" in
+    (*" $(basename "$archive") "*) ;;
+    (*) rm -f -- "$archive" ;;
+  esac
+done < <(find /tmp -maxdepth 1 -type f \
+  '(' -name 'devrimo-release-*.tar.gz' -o -name 'devrimo-frontend-*.tar.gz' ')' -print0)
 
 # Keep a compact source rollback snapshot. Runtime dependencies, caches,
 # credentials, campus state, and databases are deliberately excluded.
@@ -246,12 +257,62 @@ tar -xzf "$RELEASE_ARCHIVE" -C "$stage_dir"
 frontend_tool="$stage_dir/scripts/frontend_release.py"
 # Build and exercise HTML/assets before touching any serving files or backend.
 # Database credentials have been removed from the build environment above.
+# The frontend is built by whoever can build it fastest. This host has two
+# cores and 1.9G of RAM shared with the API, the workers and a Postgres client,
+# and `npm ci` plus `next build` on it is the largest part of a deploy - so the
+# workflow builds a standalone bundle on a runner and sends it. When it did not
+# (a hand-run deploy, or a workflow older than this) the host still builds,
+# because a deploy path with only one way to work has no way to work.
+prebuilt_args=()
+if [ -n "${FRONTEND_ARCHIVE:-}" ] && [ -f "$FRONTEND_ARCHIVE" ]; then
+  prebuilt_frontend="$stage_dir/.frontend-prebuilt"
+  mkdir -p "$prebuilt_frontend"
+  tar -xzf "$FRONTEND_ARCHIVE" -C "$prebuilt_frontend"
+  # The bundle names the commit it was built from. A bundle built from a
+  # different commit than the source being deployed would serve one version's
+  # pages against another version's API, so it is refused rather than
+  # reconciled: the host can still build the right one itself.
+  built_sha="$(cat "$prebuilt_frontend/.built-sha" 2>/dev/null || true)"
+  if [ "$built_sha" != "$DEPLOY_SHA" ]; then
+    echo "::error::Prebuilt frontend is from ${built_sha:-an unnamed commit}, not $DEPLOY_SHA" >&2
+    exit 1
+  fi
+  rm -f "$prebuilt_frontend/.built-sha"
+  echo "Installing the frontend built for $DEPLOY_SHA ($(du -sh "$prebuilt_frontend" | cut -f1))"
+  prebuilt_args=(--prebuilt "$prebuilt_frontend")
+fi
 python3 "$frontend_tool" prepare --source "$stage_dir/frontend" \
   --release "$frontend_release" --env-file "$DEPLOY_DIR/frontend/.env.local" \
-  --node-bin "$NODE_BIN" --sha "$DEPLOY_SHA"
+  --node-bin "$NODE_BIN" --sha "$DEPLOY_SHA" \
+  "${prebuilt_args[@]}"
 mkdir -p "$DEPLOY_DIR/scripts"
 install -m 0644 "$stage_dir/scripts/frontend_release.py" "$DEPLOY_DIR/scripts/frontend_release.py"
 install -m 0644 "$stage_dir/scripts/web_error_observer.py" "$DEPLOY_DIR/scripts/web_error_observer.py"
+install -m 0755 "$stage_dir/scripts/start-frontend.sh" "$DEPLOY_DIR/scripts/start-frontend.sh"
+
+# The web unit is version-controlled, and installed from the release rather
+# than edited by hand on the host. It has to be in place before the switch
+# below: a standalone release has no next binary for the old unit to run, so a
+# host still holding the old unit would take the new release and then fail to
+# start it - and would fail the rollback the same way, because rollback runs
+# the same unit. Installing it here means that failure, if it comes, comes
+# before anything serving has been touched.
+#
+# The unit is deliberately indirect (see scripts/start-frontend.sh): it starts
+# whichever kind of release is linked, so it is correct both for the standalone
+# release going in and for the pre-standalone release retained behind it.
+web_unit_src="$stage_dir/deployment/devrimo-web.service"
+web_unit_dst="/etc/systemd/system/devrimo-web.service"
+if [ -f "$web_unit_src" ] && ! cmp -s "$web_unit_src" "$web_unit_dst"; then
+  if [ ! -w "$(dirname "$web_unit_dst")" ]; then
+    echo "::error::devrimo-web.service needs updating and $(dirname "$web_unit_dst") is not writable by $(id -un)" >&2
+    exit 1
+  fi
+  cp -n "$web_unit_dst" "$web_unit_dst.pre-$stamp" 2>/dev/null || true
+  install -m 0644 "$web_unit_src" "$web_unit_dst"
+  systemctl daemon-reload
+  echo "Installed devrimo-web.service from the release"
+fi
 
 # Deploy an exact source tree instead of extracting over the previous release.
 # Runtime state and secrets are preserved; stale source files are removed.
@@ -387,7 +448,7 @@ for attempt in {1..45}; do
     prune_deploy_files "$BACKUP_DIR" 'source-*.tar.gz' 1
     prune_deploy_files "$BACKUP_DIR" 'devrimo-*.dump' 1
     prune_frontend_releases
-    rm -f "$RELEASE_ARCHIVE"
+    rm -f "$RELEASE_ARCHIVE" ${FRONTEND_ARCHIVE:+"$FRONTEND_ARCHIVE"}
     report_storage
     echo "Devrimo deployment $DEPLOY_SHA is healthy"
     exit 0

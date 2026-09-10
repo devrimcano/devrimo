@@ -96,6 +96,12 @@ jobs:
       - name: Create release archive
         run: git archive --format=tar.gz --output=devrimo-release.tar.gz HEAD
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -109,6 +115,76 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      # The values Next bakes into the browser bundle at build time. They
+      # live on the host, in the file systemd already hands the running
+      # server, and they are read from there rather than copied into GitHub
+      # so that there is one place to change a Supabase key and one answer
+      # to what the deployment is configured with. Nothing new is trusted to
+      # the runner by doing this: it holds the SSH key to the host already.
+      #
+      # Only these names are taken. Everything else in that file - and every
+      # other file on the host - stays there.
+      - name: Read the frontend's build configuration from the host
+        env:
+          VPS_HOST: ${{ secrets.VPS_SSH_HOST }}
+          VPS_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_USER: ${{ secrets.VPS_SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" -o ConnectTimeout=30 \
+            "$VPS_USER@$VPS_HOST" \
+            "grep -E '^(NEXT_PUBLIC_[A-Z0-9_]+|POSTHOG_PERSONAL_API_KEY|POSTHOG_PROJECT_ID)=' /opt/devrimo/frontend/.env.local" \
+            > frontend/.env.local
+          # Masked before anything else can echo them. The PostHog personal
+          # key is a real secret; the NEXT_PUBLIC ones ship to every browser
+          # anyway, and are masked for the sake of not having to think about
+          # which is which in a log.
+          while IFS='=' read -r _name value; do
+            if [ -n "${value:-}" ]; then echo "::add-mask::$value"; fi
+          done < frontend/.env.local
+          # A build missing these produces a site that loads and cannot sign
+          # anyone in, and says nothing about why. Fail here instead.
+          grep -q '^NEXT_PUBLIC_SUPABASE_URL=.' frontend/.env.local \
+            || { echo '::error::The host did not supply NEXT_PUBLIC_SUPABASE_URL'; exit 1; }
+          grep -qE '^NEXT_PUBLIC_SUPABASE_(ANON|PUBLISHABLE)_KEY=.' frontend/.env.local \
+            || { echo '::error::The host did not supply a Supabase browser key'; exit 1; }
+          echo "read $(wc -l < frontend/.env.local) build variables from the host"
+
+      # The host has two cores and 1.9G of RAM, shared with the API, the
+      # workers and a Postgres client, and it was spending most of a deploy
+      # on `npm ci` and `next build` - while this runner had already built
+      # the same commit in the verify job and thrown the result away. It is
+      # built here now, once, and sent.
+      - name: Build the frontend
+        working-directory: frontend
+        env:
+          NODE_ENV: production
+          NEXT_TELEMETRY_DISABLED: "1"
+          GIT_COMMIT_SHA: ${{ github.sha }}
+          NEXT_PUBLIC_RELEASE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          npm ci --include=dev
+          npm run build
+
+      # Next traces what the server imports and writes it to .next/standalone;
+      # the two things it deliberately leaves out are the browser assets and
+      # public/, because it cannot know whether a CDN serves them. Here the
+      # Node server serves them, so they go in. Measured: 77M, against the
+      # 1.2G release this replaces.
+      - name: Bundle the standalone server
+        run: |
+          set -euo pipefail
+          out=frontend/.next/standalone
+          test -f "$out/server.js" || { echo '::error::next build produced no standalone server'; exit 1; }
+          cp -r frontend/.next/static "$out/.next/static"
+          cp -r frontend/public "$out/public"
+          # Named so the host can refuse a bundle from a different commit
+          # rather than serve one version's pages against another's API.
+          printf '%s' "$GITHUB_SHA" > "$out/.built-sha"
+          tar -czf devrimo-frontend.tar.gz -C "$out" .
+          echo "standalone bundle: $(du -sh "$out" | cut -f1) ($(du -h devrimo-frontend.tar.gz | cut -f1) compressed)"
+
       - name: Upload release
         env:
           VPS_HOST: ${{ secrets.VPS_SSH_HOST }}
@@ -118,6 +194,8 @@ jobs:
           test -n "$VPS_HOST" || { echo "::error::VPS_SSH_HOST is not configured"; exit 1; }
           test -n "$VPS_PORT" || { echo "::error::VPS_SSH_PORT is not configured"; exit 1; }
           test -n "$VPS_USER" || { echo "::error::VPS_SSH_USER is not configured"; exit 1; }
+          mv devrimo-release.tar.gz "devrimo-release-${GITHUB_SHA}.tar.gz"
+          mv devrimo-frontend.tar.gz "devrimo-frontend-${GITHUB_SHA}.tar.gz"
           # Three of the last eighteen failed runs died here, on the network
           # between GitHub and the host rather than on anything in the change:
           # "connect to host port: Connection timed out" and "client_loop:
@@ -126,7 +204,8 @@ jobs:
           for attempt in 1 2 3; do
             scp -i ~/.ssh/devrimo_deploy -P "$VPS_PORT" \
               -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
-              devrimo-release.tar.gz "$VPS_USER@$VPS_HOST:/tmp/devrimo-release-${GITHUB_SHA}.tar.gz" && break
+              devrimo-release-${GITHUB_SHA}.tar.gz devrimo-frontend-${GITHUB_SHA}.tar.gz \
+              "$VPS_USER@$VPS_HOST:/tmp/" && break
             if [ "$attempt" = 3 ]; then
               echo "::error::Could not upload the release to the host after three attempts"
               exit 1
@@ -148,5 +227,7 @@ jobs:
           ssh -i ~/.ssh/devrimo_deploy -p "$VPS_PORT" \
             -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
             "$VPS_USER@$VPS_HOST" \
-            "DEPLOY_SHA='$GITHUB_SHA' RELEASE_ARCHIVE='/tmp/devrimo-release-${GITHUB_SHA}.tar.gz' bash -s" \
+            "DEPLOY_SHA='$GITHUB_SHA'"\
+            " RELEASE_ARCHIVE='/tmp/devrimo-release-${GITHUB_SHA}.tar.gz'"\
+            " FRONTEND_ARCHIVE='/tmp/devrimo-frontend-${GITHUB_SHA}.tar.gz' bash -s" \
             < scripts/deploy-vps.sh

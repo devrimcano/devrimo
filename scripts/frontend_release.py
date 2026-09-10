@@ -55,6 +55,23 @@ def check_http(base: str) -> None:
                 raise RuntimeError("Frontend static asset is empty")
 
 
+def server_command(release: Path, node: str, host: str, port: int) -> list[str]:
+    """How this release is started, which is a property of the release.
+
+    A standalone build carries its own server.js and only the dependencies that
+    server imports; there is no next binary in it to call, and no CLI to pass
+    --port to - it reads PORT and HOSTNAME from the environment. A release built
+    the old way has the whole toolchain and starts through it. Both shapes exist
+    on the host at once during a cutover, and for as long as the previous
+    release is retained as the rollback target, so the question is answered by
+    looking rather than by assuming.
+    """
+    if (release / "server.js").is_file():
+        return [node, str(release / "server.js")]
+    return [node, str(release / "node_modules/next/dist/bin/next"), "start",
+            "--hostname", host, "--port", str(port)]
+
+
 def smoke(release: Path, node: str) -> None:
     validate_build(release)
     passed = False
@@ -63,9 +80,9 @@ def smoke(release: Path, node: str) -> None:
         port = sock.getsockname()[1]
     with (release / "smoke.log").open("w") as log:
         process = subprocess.Popen(
-            [node, str(release / "node_modules/next/dist/bin/next"), "start", "--hostname",
-             "127.0.0.1", "--port", str(port)], cwd=release,
-            env={**os.environ, "NODE_ENV": "production"}, stdout=log, stderr=log,
+            server_command(release, node, "127.0.0.1", port), cwd=release,
+            env={**os.environ, "NODE_ENV": "production",
+                 "PORT": str(port), "HOSTNAME": "127.0.0.1"}, stdout=log, stderr=log,
         )
         try:
             for _ in range(30):
@@ -89,18 +106,32 @@ def smoke(release: Path, node: str) -> None:
                 (release / "smoke.log").unlink(missing_ok=True)
 
 
-def prepare(source: Path, release: Path, env_file: Path, node_bin: Path, sha: str) -> None:
+def prepare(source: Path, release: Path, env_file: Path, node_bin: Path, sha: str,
+            prebuilt: Path | None = None) -> None:
     # A release is built at its permanent path: generated absolute paths stay valid.
     if source.resolve() == release.resolve() or release.exists():
         raise RuntimeError("Frontend release must be a new directory")
-    shutil.copytree(source, release, ignore=shutil.ignore_patterns(".next", "node_modules", ".env*"))
+    if prebuilt is not None:
+        # The build already happened, on a machine with cores to spare. This
+        # host's job is to put it in place and prove it serves - the same proof
+        # as before, because smoke() is the same check either way.
+        if not (prebuilt / "server.js").is_file():
+            raise RuntimeError("Prebuilt frontend has no server.js; expected a standalone build")
+        # symlinks=True: node_modules is full of links, and resolving them
+        # would both duplicate their targets and turn a link the build left
+        # dangling into a failure here rather than a file that is never read.
+        shutil.copytree(prebuilt, release, symlinks=True,
+                        ignore=shutil.ignore_patterns(".env*"))
+    else:
+        shutil.copytree(source, release, ignore=shutil.ignore_patterns(".next", "node_modules", ".env*"))
     shutil.copyfile(env_file, release / ".env.local")
     (release / ".env.local").chmod(0o600)
     (release / ".release-sha").write_text(sha + "\n")
-    env = {**os.environ, "PATH": str(node_bin) + os.pathsep + os.environ.get("PATH", ""),
-           "GIT_COMMIT_SHA": sha, "NEXT_PUBLIC_RELEASE": sha, "NEXT_TELEMETRY_DISABLED": "1"}
-    subprocess.run([str(node_bin / "npm"), "ci"], cwd=release, env=env, check=True)
-    subprocess.run([str(node_bin / "npm"), "run", "build"], cwd=release, env=env, check=True)
+    if prebuilt is None:
+        env = {**os.environ, "PATH": str(node_bin) + os.pathsep + os.environ.get("PATH", ""),
+               "GIT_COMMIT_SHA": sha, "NEXT_PUBLIC_RELEASE": sha, "NEXT_TELEMETRY_DISABLED": "1"}
+        subprocess.run([str(node_bin / "npm"), "ci"], cwd=release, env=env, check=True)
+        subprocess.run([str(node_bin / "npm"), "run", "build"], cwd=release, env=env, check=True)
     smoke(release, str(node_bin / "node"))
     # Root-led recovery and the ordinary devrimo deploy account both retain the
     # existing runtime owner's access to the copied private environment/cache.
@@ -134,11 +165,13 @@ def main():
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--node-bin", type=Path, default=Path("/opt/devrimo/node/bin"))
     parser.add_argument("--sha")
+    parser.add_argument("--prebuilt", type=Path,
+                        help="A standalone build to install instead of building here")
     parser.add_argument("--current", type=Path)
     parser.add_argument("--url", default="http://127.0.0.1:3000")
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare(args.source, args.release, args.env_file, args.node_bin, args.sha)
+        prepare(args.source, args.release, args.env_file, args.node_bin, args.sha, args.prebuilt)
     elif args.command == "validate":
         validate_build(args.release)
     elif args.command == "smoke":

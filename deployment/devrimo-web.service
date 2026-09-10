@@ -1,0 +1,27 @@
+[Unit]
+Description=Devrimo Web Frontend
+After=network-online.target devrimo-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devrimo
+Group=devrimo
+WorkingDirectory=/opt/devrimo/current-frontend
+EnvironmentFile=/opt/devrimo/current-frontend/.env.local
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
+Environment=PATH=/opt/devrimo/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Indirected through a script so a release chooses how it is started; see
+# scripts/start-frontend.sh for why the unit must not name either server.
+ExecStart=/bin/sh /opt/devrimo/scripts/start-frontend.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/devrimo
+
+[Install]
+WantedBy=multi-user.target

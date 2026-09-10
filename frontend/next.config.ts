@@ -33,6 +33,21 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  /**
+   * Ship the server, not the toolchain.
+   *
+   * A release used to be the whole working tree: 1023M of node_modules and a
+   * 180M .next, 1.2G on a host with 2 cores and 1.9G of RAM, built there
+   * because that is where the build was run. Standalone traces what the server
+   * actually imports at runtime and copies only that: measured on this app,
+   * 77M for the entire release - server, dependencies, static assets and all -
+   * which is the same site sixteen times smaller.
+   *
+   * It also decouples the build from the host, which is what the 20-minute
+   * deploys were: `npm ci` and `next build` competing with the API, the
+   * workers and Postgres for two cores.
+   */
+  output: "standalone",
   // Generate browser maps only when the uploader can remove them after upload.
   productionBrowserSourceMaps: Boolean(personalApiKey && projectId),
   // The version banner is a free hint to anyone scanning for a known Next bug.

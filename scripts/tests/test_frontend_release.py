@@ -88,6 +88,55 @@ class FrontendReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "new directory"):
             release.prepare(self.root, self.root, self.root / ".env.local", Path("/bin"), "abc")
 
+    def test_release_is_started_the_way_that_release_can_be_started(self):
+        """The unit runs one launcher for two shapes of release; this is the choice it makes."""
+        standalone, legacy = self.root / "standalone", self.root / "legacy"
+        standalone.mkdir()
+        (standalone / "server.js").write_text("// the server itself")
+        (legacy / "node_modules/next/dist/bin").mkdir(parents=True)
+        (legacy / "node_modules/next/dist/bin/next").write_text("// the CLI")
+
+        self.assertEqual(release.server_command(standalone, "node", "127.0.0.1", 3100),
+                         ["node", str(standalone / "server.js")])
+        # A standalone build has no --port to give; PORT and HOSTNAME carry it.
+        self.assertNotIn("--port", release.server_command(standalone, "node", "127.0.0.1", 3100))
+        self.assertIn("--port", release.server_command(legacy, "node", "127.0.0.1", 3100))
+
+    def test_prebuilt_release_is_installed_rather_than_built(self):
+        prebuilt, target = self.root / "prebuilt", self.root / "target"
+        prebuilt.mkdir()
+        build(prebuilt)
+        (prebuilt / "server.js").write_text("// the server itself")
+        (prebuilt / ".env.local").write_text("LEAKED=from the builder")
+        env_file = self.root / "host.env"
+        env_file.write_text("NEXT_PUBLIC_SITE_URL=https://devrimo.com")
+
+        with (
+            patch.object(release, "smoke") as smoked,
+            patch.object(release, "subprocess") as ran,
+            # Deploys run as root and chown the release to the runtime owner;
+            # this test is about what gets copied, and runs anywhere.
+            patch.object(release.os, "geteuid", create=True, return_value=1000),
+        ):
+            release.prepare(self.root / "source", target, env_file, Path("/bin"), "abc", prebuilt)
+
+        smoked.assert_called_once()
+        # Nothing was built here: that is the entire point of the path.
+        ran.run.assert_not_called()
+        self.assertTrue((target / "server.js").is_file())
+        # The host's own configuration wins; the builder's copy never travels.
+        self.assertEqual((target / ".env.local").read_text(), "NEXT_PUBLIC_SITE_URL=https://devrimo.com")
+        self.assertEqual((target / ".release-sha").read_text().strip(), "abc")
+
+    def test_prebuilt_without_a_server_is_refused(self):
+        prebuilt = self.root / "prebuilt"
+        prebuilt.mkdir()
+        build(prebuilt)
+        env_file = self.root / "host.env"
+        env_file.write_text("")
+        with self.assertRaisesRegex(RuntimeError, "standalone"):
+            release.prepare(self.root / "source", self.root / "target", env_file, Path("/bin"), "abc", prebuilt)
+
     def test_healthy_login_with_missing_asset_fails_health_check(self):
         response = io.BytesIO(b'<html><script src="/_next/static/missing.js"></script></html>')
         response.status = 200
