@@ -55,6 +55,8 @@ export type CatalogSourceConflict = {
 
 export type CatalogCourseRow = {
   course_code: string;
+  /** "CENG 331": the spelling students, timetables and doors use. */
+  display_code?: string | null;
   department: string | null;
   title: string | null;
   local_credits: number | null;

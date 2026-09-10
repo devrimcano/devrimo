@@ -426,6 +426,9 @@ class CatalogCourseRowOut(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     course_code: str
+    #: "CENG 331" - the spelling on a timetable, a transcript and a door, as
+    #: opposed to 5670331, which is the catalog's key and nobody's vocabulary.
+    display_code: str | None = None
     department: str | None = None
     title: str | None = None
     local_credits: float | None = None

@@ -832,8 +832,8 @@ function CourseFilters({
       </CardHeader>
       <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label={pick({ tr: "Dönem", en: "Term" })} value={term} onChange={setTerm} placeholder="20261" />
-        <Field label={pick({ tr: "Bölüm", en: "Department" })} value={department} onChange={setDepartment} placeholder="CNG" />
-        <Field label={pick({ tr: "Ders ara", en: "Search courses" })} value={search} onChange={setSearch} placeholder={pick({ tr: "Kod veya başlık", en: "Code or title" })} />
+        <Field label={pick({ tr: "Bölüm", en: "Department" })} value={department} onChange={setDepartment} placeholder={pick({ tr: "CENG veya 567", en: "CENG or 567" })} />
+        <Field label={pick({ tr: "Ders ara", en: "Search courses" })} value={search} onChange={setSearch} placeholder={pick({ tr: "CENG 331, CENG veya başlık", en: "CENG 331, CENG or title" })} />
         <div className="min-w-0 space-y-1.5">
           <Label htmlFor="catalog-state-filter" className="text-xs text-muted-foreground">{pick({ tr: "Durum", en: "State" })}</Label>
           <select id="catalog-state-filter" value={state} onChange={(event) => setState(event.target.value)} className="h-9 w-full rounded-lg border bg-background px-3 text-sm focus-visible:outline-2 focus-visible:outline-primary">
@@ -943,7 +943,14 @@ function CourseTable({
           const conflicts = conflictCount(row.source_conflicts);
           return <TableRow key={row.course_code} data-state={selected.has(row.course_code) ? "selected" : undefined}>
             <TableCell><input aria-label={pick({ tr: `${row.course_code} seç`, en: `Select ${row.course_code}` })} type="checkbox" checked={selected.has(row.course_code)} onChange={() => onSelect(row.course_code)} /></TableCell>
-            <TableCell><button type="button" className="text-left hover:underline" onClick={() => onOpen(row)}><span className="font-mono font-semibold">{row.course_code}</span><span className="mt-0.5 block max-w-[20rem] truncate text-xs text-muted-foreground">{row.title}</span></button></TableCell>
+            <TableCell><button type="button" className="text-left hover:underline" onClick={() => onOpen(row)}>
+              {/* Both spellings, because both get used: the lettered one is what
+                  a student says and a timetable prints, the seven digits are the
+                  catalog's key and what an import or a bug report quotes. */}
+              <span className="font-mono font-semibold">{row.display_code || row.course_code}</span>
+              {row.display_code ? <span className="text-muted-foreground ml-2 font-mono text-xs">{row.course_code}</span> : null}
+              <span className="mt-0.5 block max-w-[20rem] truncate text-xs text-muted-foreground">{row.title}</span>
+            </button></TableCell>
             <TableCell>{row.department ?? "—"}</TableCell>
             <TableCell><div className="flex flex-wrap gap-1"><StatusBadge value={completenessStatus(row.completeness)} /><span className="text-xs text-muted-foreground">{row.section_count} {pick({ tr: "şube", en: "sections" })}</span></div></TableCell>
             <TableCell><div className="flex flex-wrap gap-1"><StatusBadge value={row.state} /><StatusBadge value={row.freshness} />{conflicts ? <Badge variant="destructive">{conflicts} {pick({ tr: "çakışma", en: "conflicts" })}</Badge> : null}</div></TableCell>

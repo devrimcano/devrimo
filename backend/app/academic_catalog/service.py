@@ -50,6 +50,8 @@ from app.academic_catalog.models import (
     CatalogTermActiveRelease,
 )
 from app.academic_catalog.schemas import normalize_course_code, normalize_term
+from app.campus import departments as department_directory
+from app.campus.prerequisites import display_code
 
 
 CATALOG_TOOLS = frozenset(
@@ -2638,6 +2640,10 @@ def _course_summary(
 ) -> dict[str, Any]:
     return {
         "course_code": course.course_code,
+        # The spelling on the timetable, the transcript and the door of the
+        # room: "CENG 331", not 5670331. The numeric code stays because it is
+        # the catalog's key; this is what a person searches and reads.
+        "display_code": display_code(course.course_code),
         "department": course.department,
         "title": revision.title,
         "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
@@ -2686,16 +2692,43 @@ async def list_course_rows(
     release = await _release_for_term(db, organization_id, term, required=False)
 
     def _text_match(course_code: Any, title: Any, department_value: Any, value: str | None) -> Any:
+        """Match what a person types, not only what the catalog stores.
+
+        The catalog's key is 5670331 and its department is 567; nobody calls
+        the course that. Typing "CENG 331" or "ceng331" found nothing, and
+        typing "CENG" found nothing either, so the only way to search this
+        panel was to already know the seven digits. The words are resolved
+        against METU's own department directory - the same one the planner
+        uses - and the numeric spellings they mean are matched alongside the
+        raw text, which still matches titles.
+        """
         if not value:
             return literal(True)
         haystack = func.lower(func.concat_ws(" ", course_code, title, department_value))
-        return func.strpos(haystack, literal(value)) > 0
+        matches = [func.strpos(haystack, literal(value)) > 0]
+        lettered = department_directory.expand_course_code(value)
+        if lettered is not None:
+            matches.append(course_code == literal(lettered[0]))
+        else:
+            # A bare abbreviation or department name lists the department.
+            found = department_directory.resolve(value)
+            if found is not None and not value.strip().isdigit():
+                matches.append(department_value == literal(found.code))
+        return or_(*matches) if len(matches) > 1 else matches[0]
 
     def _filters(stmt: Any, *, course_code: Any, title: Any, department_value: Any, state_value: Any) -> Any:
         department_query = str(department or "").strip().casefold()
         text_query = str(query or "").strip().casefold()
         if department_query:
-            stmt = stmt.where(func.strpos(func.lower(department_value), literal(department_query)) > 0)
+            # The field's own placeholder says "CNG", and until now the column
+            # behind it held 567, so the one thing it invited you to type was
+            # the one thing that never matched. An abbreviation or a name is
+            # resolved to its code; digits still work as they always did.
+            named = department_directory.resolve(department_query)
+            if named is not None and not department_query.isdigit():
+                stmt = stmt.where(department_value == literal(named.code))
+            else:
+                stmt = stmt.where(func.strpos(func.lower(department_value), literal(department_query)) > 0)
         if text_query:
             stmt = stmt.where(_text_match(course_code, title, department_value, text_query))
         if state:
@@ -2969,6 +3002,7 @@ async def list_course_rows(
         rows.append(
             {
                 "course_code": row["course_code"],
+                "display_code": display_code(row["course_code"]),
                 "department": row["department"],
                 "title": row["title"],
                 "local_credits": _number(row["local_credits"]),

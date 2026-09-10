@@ -2090,6 +2090,8 @@ export interface components {
         CatalogCourseRowOut: {
             /** Course Code */
             course_code: string;
+            /** Display Code */
+            display_code?: string | null;
             /** Department */
             department?: string | null;
             /** Title */
