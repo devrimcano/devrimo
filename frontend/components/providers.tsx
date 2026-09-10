@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { LocaleProvider } from "@/components/locale-provider";
 import { ThemeProvider } from "next-themes";
 import { captureRequestFailure, PostHogAnalytics } from "@/components/posthog-analytics";
+import { CookieConsent } from "@/components/cookie-consent";
 
 /**
  * The name a failed request is reported under.
@@ -62,6 +63,9 @@ export function Providers({ children }: { children: ReactNode }) {
             <TooltipProvider>
               {children}
               <Toaster />
+              {/* Inside LocaleProvider because it asks a question, and a
+                  question has to be asked in the reader's language. */}
+              <CookieConsent />
             </TooltipProvider>
           </QueryClientProvider>
         </LocaleProvider>

@@ -21,7 +21,10 @@ export default function robots(): MetadataRoute.Robots {
     rules: [
       {
         userAgent: "*",
-        allow: "/login",
+        // The two pages that exist for someone who is not signed in: the door,
+        // and the notice explaining what the door sets on their machine. A
+        // privacy notice nobody can find is not a notice.
+        allow: ["/login", "/gizlilik"],
         disallow: [
           "/", // the assistant, and the only page a signed-out visitor is sent from
           "/schedule",

@@ -1,8 +1,26 @@
 # Written by scripts/deploy-vps.sh next to the deployed tree so the running
 # services know which commit they are. Never committed.
 .release-sha
+
+# Environment files hold real credentials — the repository root already carries
+# an untracked .env.local with live values — and nothing here ignored them, so
+# a single `git add .` was all that stood between those keys and a public
+# commit. The example files are the exception: they carry names, not values.
+.env
+.env.*
+!.env.example
+!*/.env.example
+
 __pycache__/
 /frontend/node_modules
 /frontend/.next/
 /frontend/tsconfig.tsbuildinfo
 /backend/.pytest_cache/
+
+# Per-worktree development state written by `node scripts/dev.mjs`: this
+# worktree's identity, its allocated loopback ports, its generated stack
+# configuration, and its verification reports. Every one of these is specific
+# to one checkout on one machine — committing them would hand another worktree
+# this one's ports and Compose project name, which is exactly the collision the
+# identity exists to prevent.
+.devrimo/

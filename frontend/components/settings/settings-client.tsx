@@ -17,6 +17,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConsentPreference } from "@/components/consent-preference";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -77,6 +78,7 @@ export function SettingsClient() {
     { href: "#personalization", icon: SparklesIcon, label: pick({ tr: "Kişiselleştirme", en: "Personalization" }) },
     { href: "#memory", icon: BrainIcon, label: pick({ tr: "Hatırlananlar", en: "Remembered items" }) },
     { href: "#setup", icon: RotateCcwIcon, label: pick({ tr: "Kurulum", en: "Setup" }) },
+    { href: "#cookies", icon: ShieldCheckIcon, label: pick({ tr: "Çerezler", en: "Cookies" }) },
   ];
 
   return (
@@ -181,6 +183,19 @@ export function SettingsClient() {
             </CardHeader>
             <CardContent>
               <Button variant="outline" disabled={updateProfile.isPending} onClick={() => void reopenSetup()}>{updateProfile.isPending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}{pick({ tr: "Kurulum adımlarını aç", en: "Open setup steps" })}</Button>
+            </CardContent>
+          </Card>
+
+          {/* Withdrawal has to be as easy as consent was, and "as easy" means
+              findable: the banner is answered once and never seen again, so
+              this is where the answer lives afterwards. */}
+          <Card id="cookies" className="motion-enter surface-raised scroll-mt-32 border-0 ring-1 ring-foreground/8 [animation-delay:140ms] lg:scroll-mt-24">
+            <CardHeader className="border-b bg-muted/20">
+              <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><ShieldCheckIcon className="size-4" /></span><div><CardTitle>{pick({ tr: "Çerez tercihi", en: "Cookie choice" })}</CardTitle><CardDescription className="mt-1">{pick({ tr: "Ölçüm ve hata yakalama çerezleri isteğe bağlıdır; kapatırsan site tam olarak çalışmaya devam eder.", en: "Measurement and error-tracking cookies are optional; the site works fully with them off." })}</CardDescription></div></div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <ConsentPreference />
+              <a href="/gizlilik" className="text-primary text-sm underline underline-offset-4">{pick({ tr: "Çerez ve gizlilik metni", en: "Cookie and privacy notice" })}</a>
             </CardContent>
           </Card>
         </div>
