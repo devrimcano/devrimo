@@ -183,12 +183,61 @@ def test_course_summary_shows_the_active_draft_beside_its_label():
 
 
 def test_pending_verification_marker_tracks_retained_overrides():
+    """The marker follows the evidence on each correction, not its component.
+
+    ``title`` and ``ects`` both gate ``details``, so a verified component is
+    not proof that every correction under it was checked.  Only evidence
+    recorded against the override itself retires the warning.
+    """
+
     draft = CatalogDraft(issues=[], field_overrides={"title": {"value": "x"}}, data={"component_status": {}})
     service._sync_manual_verification_issue(draft)
     assert [issue["code"] for issue in draft.issues] == ["manual_verification_required"]
+
+    # A verified component cannot stand in for the correction's own evidence.
     draft.data = {"component_status": {"details": {"verified": True}}}
     service._sync_manual_verification_issue(draft)
+    assert [issue["code"] for issue in draft.issues] == ["manual_verification_required"]
+
+    draft.field_overrides = {"title": {"value": "x", "verification_evidence": "Registrar bulletin"}}
+    service._sync_manual_verification_issue(draft)
     assert draft.issues == []
+
+    # A second correction sharing ``details`` keeps the marker until it is
+    # verified in its own right.
+    draft.field_overrides = {
+        "title": {"value": "x", "verification_evidence": "Registrar bulletin"},
+        "ects": {"value": 7.5},
+    }
+    service._sync_manual_verification_issue(draft)
+    assert [issue["code"] for issue in draft.issues] == ["manual_verification_required"]
+    draft.field_overrides["ects"]["verification_evidence"] = "Curriculum page"
+    service._sync_manual_verification_issue(draft)
+    assert draft.issues == []
+
+
+def test_component_status_needs_every_override_under_it_verified():
+    """``details`` covers six editable fields; one evidence note is not six."""
+
+    overrides = {
+        "title": {"value": "x", "verification_evidence": "Bulletin", "verified_at": "2026-01-02T00:00:00+00:00"},
+        "ects": {"value": 7.5},
+    }
+    statuses: dict = {}
+    service.apply_override_component_status(statuses, overrides, {"details"}, observed_at="2026-01-02T00:00:00+00:00")
+    assert statuses["details"]["source_status"] == "admin_pending"
+    assert statuses["details"]["verified"] is False
+    assert "verification_evidence" not in statuses["details"]
+
+    overrides["ects"]["verification_evidence"] = "Curriculum page"
+    overrides["ects"]["verified_at"] = "2026-01-03T00:00:00+00:00"
+    service.apply_override_component_status(statuses, overrides, {"details"}, observed_at="2026-01-03T00:00:00+00:00")
+    assert statuses["details"]["source_status"] == "admin_verified"
+    assert statuses["details"]["verified"] is True and statuses["details"]["fresh"] is True
+    # The most recent evidence describes the component.
+    assert statuses["details"]["verification_evidence"] == "Curriculum page"
+    # A hand-edited section roster also gates the restriction tables read for it.
+    assert service.override_components({"sections": {}})["constraints"] == ["sections"]
 
 
 def test_observation_preview_is_bounded():
