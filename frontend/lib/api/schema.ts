@@ -1720,6 +1720,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/catalog/drafts/{draft_id}/verify-overrides": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Draft Overrides
+         * @description Attach source evidence to corrections that are already in the draft.
+         *
+         *     Editing and verifying are separate acts: a correction is usually made
+         *     first and confirmed against the registrar afterwards, and the draft patch
+         *     endpoint rejects an empty patch, so verification needs its own route.
+         */
+        post: operations["verify_draft_overrides_api_v1_admin_catalog_drafts__draft_id__verify_overrides_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/catalog/observations/{observation_id}": {
         parameters: {
             query?: never;
@@ -3434,6 +3458,23 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * VerifyOverridesIn
+         * @description Confirm retained corrections against the source, without editing them.
+         *
+         *     Evidence is mandatory here for the same reason ``verify`` requires it on a
+         *     draft patch: an administrator's note cannot manufacture source freshness.
+         */
+        VerifyOverridesIn: {
+            /** Expected Revision */
+            expected_revision: number;
+            /** Fields */
+            fields: string[];
+            /** Reason */
+            reason: string;
+            /** Verification Evidence */
+            verification_evidence: string;
         };
     };
     responses: never;
@@ -6742,6 +6783,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RemoveOverridesIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogDraftOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_draft_overrides_api_v1_admin_catalog_drafts__draft_id__verify_overrides_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyOverridesIn"];
             };
         };
         responses: {

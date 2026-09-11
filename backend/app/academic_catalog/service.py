@@ -758,6 +758,76 @@ FIELD_COMPONENT_MAP = {
     "completeness": "details",
 }
 
+
+def override_components(overrides: dict[str, Any]) -> dict[str, list[str]]:
+    """Group the retained overrides by the component whose freshness they gate.
+
+    A component is only as verified as its least verified override, so the
+    grouping has to be explicit: ``details`` alone covers six editable fields.
+    ``sections`` additionally gates ``constraints``, because a hand-edited
+    section roster decides which restriction tables still describe the course.
+    """
+
+    grouped: dict[str, list[str]] = {}
+    for field in overrides:
+        grouped.setdefault(FIELD_COMPONENT_MAP.get(field, field), []).append(field)
+        if field == "sections":
+            grouped.setdefault("constraints", []).append(field)
+    return grouped
+
+
+def _override_evidence(entry: Any) -> str | None:
+    """Return the verification evidence recorded against one override."""
+
+    if not isinstance(entry, dict):
+        return None
+    evidence = str(entry.get("verification_evidence") or "").strip()
+    return evidence or None
+
+
+def apply_override_component_status(
+    component_status: dict[str, Any],
+    overrides: dict[str, Any],
+    components: Iterable[str],
+    *,
+    observed_at: str | None,
+) -> None:
+    """Re-derive the admin freshness of every component the overrides gate.
+
+    Verification is recorded per field rather than per component.  Marking the
+    component itself verified would let evidence for ``title`` certify an
+    untouched ``ects`` correction that happens to share ``details``, so a
+    component counts as verified only while every override under it carries
+    evidence, and it falls back to pending as soon as a new edit lands.
+    """
+
+    grouped = override_components(overrides)
+    for component in components:
+        fields = grouped.get(component, [])
+        entries = [overrides[field] for field in fields]
+        verified = [entry for entry in entries if _override_evidence(entry)]
+        fully_verified = bool(entries) and len(verified) == len(entries)
+        meta = dict(component_status.get(component) or {})
+        meta.update(
+            {
+                "component": component,
+                "source_status": "admin_verified" if fully_verified else "admin_pending",
+                "verified": fully_verified,
+                "fresh": fully_verified,
+                "observed_at": observed_at,
+                "source_fetched_at": None,
+            }
+        )
+        if fully_verified:
+            latest = max(verified, key=lambda entry: str(entry.get("verified_at") or ""))
+            meta["verification_evidence"] = _override_evidence(latest)
+            meta["verified_at"] = latest.get("verified_at")
+        else:
+            meta.pop("verification_evidence", None)
+            meta.pop("verified_at", None)
+        component_status[component] = meta
+
+
 _MANUAL_VERIFICATION_ISSUE = {
     "code": "manual_verification_required",
     "message": "Administrator edit requires explicit verification before publication is considered fresh",
@@ -765,10 +835,7 @@ _MANUAL_VERIFICATION_ISSUE = {
 }
 
 
-def _sync_manual_verification_issue(
-    draft: CatalogDraft,
-    component_status: dict[str, Any] | None = None,
-) -> None:
+def _sync_manual_verification_issue(draft: CatalogDraft) -> None:
     """Keep one pending-verification marker in step with the retained overrides.
 
     The marker used to be appended on every unverified edit and never removed:
@@ -777,19 +844,17 @@ def _sync_manual_verification_issue(
     described it.
     """
 
-    statuses = component_status if component_status is not None else (draft.data or {}).get("component_status")
-    statuses = statuses if isinstance(statuses, dict) else {}
     issues = [
         item
         for item in (draft.issues or [])
         if not (isinstance(item, dict) and item.get("code") == _MANUAL_VERIFICATION_ISSUE["code"])
     ]
-    pending = False
-    for field in (draft.field_overrides or {}):
-        meta = statuses.get(FIELD_COMPONENT_MAP.get(field, field))
-        if not (isinstance(meta, dict) and meta.get("verified") is True):
-            pending = True
-            break
+    # Read the evidence off each override rather than off its component.  Two
+    # corrections can share one component, and only the unverified one should
+    # keep the warning alive.
+    pending = any(
+        _override_evidence(entry) is None for entry in (draft.field_overrides or {}).values()
+    )
     if pending:
         issues.append(dict(_MANUAL_VERIFICATION_ISSUE))
     draft.issues = issues[-200:]
@@ -2374,34 +2439,27 @@ async def patch_draft(
             section["restrictions_status"] = "verified" if verify else "unknown"
             section["restrictions_observed_at"] = _iso(now) if verify else None
             section["restrictions_source_fetched_at"] = None
+    touched_components: set[str] = set()
     for key in patch:
         # Every admin edit is retained as a per-field source override.  An
         # ordinary edit remains pending verification: a reason documents why
-        # it was changed, but it cannot manufacture source freshness.  The UI
-        # must send ``verify=true`` with evidence after checking the source or
-        # an approved record.
-        overrides[key] = {
+        # it was changed, but it cannot manufacture source freshness.  The
+        # evidence is stamped on the override itself, so a later
+        # verify-overrides call can supply it without re-sending the value.
+        entry: dict[str, Any] = {
             "value": _jsonable(patch[key]),
             "reason": reason,
             "updated_by": str(updated_by) if updated_by else None,
             "updated_at": _iso(now),
         }
-        component = FIELD_COMPONENT_MAP.get(key, key)
-        meta = dict(current["component_status"].get(component, {}))
-        meta.update(
-            {
-                "component": component,
-                "source_status": "admin_verified" if verify else "admin_pending",
-                "verified": bool(verify),
-                "fresh": bool(verify),
-                "observed_at": _iso(now),
-                "source_fetched_at": None,
-            }
-        )
         if verify:
-            meta["verification_evidence"] = str(verification_evidence).strip()
-            meta["verified_at"] = _iso(now)
-        current["component_status"][component] = meta
+            entry["verification_evidence"] = str(verification_evidence).strip()
+            entry["verified_at"] = _iso(now)
+            entry["verified_by"] = str(updated_by) if updated_by else None
+        overrides[key] = entry
+        touched_components.add(FIELD_COMPONENT_MAP.get(key, key))
+        if key == "sections":
+            touched_components.add("constraints")
         old_override = await db.scalar(
             select(CatalogAdminOverride).where(
                 CatalogAdminOverride.organization_id == organization_id,
@@ -2426,12 +2484,18 @@ async def patch_draft(
                 created_by=updated_by,
             )
         )
+    # Derive component freshness once the whole patch is recorded: an edit to
+    # one ``details`` field must not inherit the evidence of another, and a new
+    # unverified correction has to pull its component back to pending.
+    apply_override_component_status(
+        current["component_status"], overrides, touched_components, observed_at=_iso(now)
+    )
     draft.data = current
     draft.field_overrides = overrides
     draft.reason = reason
     draft.updated_by = updated_by
     draft.revision = int(draft.revision) + 1
-    _sync_manual_verification_issue(draft, current["component_status"])
+    _sync_manual_verification_issue(draft)
     await db.flush()
     return draft
 

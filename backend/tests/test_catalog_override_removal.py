@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.academic_catalog import service
 from app.academic_catalog.models import CatalogCourseRevision, CatalogDraft, CatalogSourceObservation
-from app.academic_catalog.overrides import remove_overrides
+from app.academic_catalog.overrides import remove_overrides, verify_overrides
 from app.admin.directory import METU_ID, ensure_metu
 from app.config import get_settings
 from app.db.session import SessionLocal
@@ -157,3 +157,71 @@ async def test_raw_observation_inspection_is_admin_and_organization_scoped(clien
         db.add(AdminMembership(user_id=outsider, organization_id=org.id, role=AdminRole.operator, granted_by=user))
         await db.commit()
     assert (await client.get(url, headers=other_headers)).status_code == 404
+
+
+async def test_verify_overrides_needs_every_field_of_a_shared_component():
+    """Evidence is recorded per correction, not per component.
+
+    ``title`` and ``ects`` both gate ``details``.  Verifying one of them must
+    not certify the other, and the pending-verification warning has to survive
+    until every retained correction carries evidence.  This is also the only
+    route to verifying a correction made earlier: the draft editor sends only
+    the fields it changed, so re-saving an unchanged value supplies nothing.
+    """
+
+    user = uuid4()
+    now = datetime.now(UTC)
+    args = {"semester": "20261", "department": "240", "course": "2402201"}
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        observed = await service.ingest_observation(db, METU_ID, "get_course_info", args,
+            {"course_code": "2402201", "title": "Source title", "credit": 3},
+            now, source_fetched_at=now)
+        draft = await db.get(CatalogDraft, observed["draft_id"])
+        await service.patch_draft(db, METU_ID, draft.id, expected_revision=draft.revision,
+            patch={"title": "Admin title", "ects": 7.5}, reason="Registrar bulletin differs",
+            updated_by=user)
+        assert set(draft.field_overrides) == {"title", "ects"}
+        assert draft.data["component_status"]["details"]["source_status"] == "admin_pending"
+        assert any(issue["code"] == "manual_verification_required" for issue in draft.issues)
+
+        # A stale revision is rejected before anything is written.
+        with pytest.raises(service.CatalogConflict):
+            await verify_overrides(db, METU_ID, draft.id, expected_revision=draft.revision - 1,
+                fields=["title"], reason="Checked the bulletin",
+                verification_evidence="Registrar bulletin 2026-01", updated_by=user)
+        # So is a field that is not an active override.
+        with pytest.raises(HTTPException) as unknown:
+            await verify_overrides(db, METU_ID, draft.id, expected_revision=draft.revision,
+                fields=["campus"], reason="Checked the bulletin",
+                verification_evidence="Registrar bulletin 2026-01", updated_by=user)
+        assert unknown.value.status_code == 422
+
+        await verify_overrides(db, METU_ID, draft.id, expected_revision=draft.revision,
+            fields=["title"], reason="Checked the bulletin",
+            verification_evidence="Registrar bulletin 2026-01", updated_by=user)
+        assert draft.field_overrides["title"]["verification_evidence"] == "Registrar bulletin 2026-01"
+        assert "verification_evidence" not in draft.field_overrides["ects"]
+        # One verified field cannot certify the component it shares.
+        assert draft.data["component_status"]["details"]["source_status"] == "admin_pending"
+        assert draft.data["component_status"]["details"]["verified"] is False
+        assert any(issue["code"] == "manual_verification_required" for issue in draft.issues)
+
+        await verify_overrides(db, METU_ID, draft.id, expected_revision=draft.revision,
+            fields=["ects"], reason="Checked the bulletin",
+            verification_evidence="Departmental curriculum page", updated_by=user)
+        details = draft.data["component_status"]["details"]
+        assert details["source_status"] == "admin_verified"
+        assert details["verified"] is True and details["fresh"] is True
+        assert details["verification_evidence"] == "Departmental curriculum page"
+        assert not any(issue["code"] == "manual_verification_required" for issue in draft.issues)
+        # Verification never rewrites the correction it describes.
+        assert draft.data["title"] == "Admin title"
+        assert draft.field_overrides["title"]["value"] == "Admin title"
+
+        # A later unverified edit pulls the shared component back to pending.
+        await service.patch_draft(db, METU_ID, draft.id, expected_revision=draft.revision,
+            patch={"level": "Graduate"}, reason="Bulletin lists it as graduate", updated_by=user)
+        assert draft.data["component_status"]["details"]["source_status"] == "admin_pending"
+        assert any(issue["code"] == "manual_verification_required" for issue in draft.issues)
+        await db.rollback()

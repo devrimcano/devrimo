@@ -554,6 +554,28 @@ function draftOverrideValues(detail: CatalogCourseDetail): Record<string, unknow
     : {};
 }
 
+/**
+ * A retained override is stored as `{ value, reason, ... }` and carries its
+ * verification evidence once an administrator has checked it against the
+ * source.  Older rows are bare values, so unwrap defensively.
+ */
+type CatalogOverrideEntry = {
+  value?: unknown;
+  reason?: string | null;
+  verification_evidence?: string | null;
+  verified_at?: string | null;
+};
+
+function overrideEntry(value: unknown): CatalogOverrideEntry {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as CatalogOverrideEntry
+    : { value };
+}
+
+function overrideIsVerified(value: unknown): boolean {
+  return String(overrideEntry(value).verification_evidence ?? "").trim().length > 0;
+}
+
 function importItems(data: CatalogImportsResponse | undefined): CatalogImportJob[] {
   return data?.imports ?? [];
 }
@@ -1372,7 +1394,9 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
   const expectedRevision = detail.draft?.revision ?? detail.draft_revision ?? null;
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [reason, setReason] = useState("");
+  const [evidence, setEvidence] = useState("");
   const selectedOverrideFields = overrideFields.filter((field) => selectedFields.has(field));
+  const pendingFields = overrideFields.filter((field) => !overrideIsVerified(overrideValues[field]));
 
   const removeOverrides = useMutation({
     mutationFn: () => {
@@ -1398,6 +1422,35 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
     onError: (error) => toast.error(error.message),
   });
 
+  // Verifying is deliberately its own call rather than a re-save of the same
+  // value: the editor only sends fields it changed, so an unchanged value is
+  // not a route to supplying evidence for a correction made earlier.
+  const verifyOverrides = useMutation({
+    mutationFn: () => {
+      const fields = selectedOverrideFields;
+      if (!draftId) throw new Error(pick({ tr: "Önce bir taslak oluşturun.", en: "Create a draft before verifying overrides." }));
+      if (expectedRevision === null) throw new Error(pick({ tr: "Taslak sürümü bulunamadı.", en: "The draft revision is unavailable." }));
+      if (!fields.length) throw new Error(pick({ tr: "Doğrulanacak alanları seçin.", en: "Select at least one override to verify." }));
+      if (reason.trim().length < 3) throw new Error(pick({ tr: "Gerekçe en az 3 karakter olmalı.", en: "A reason must be at least 3 characters." }));
+      if (evidence.trim().length < 3) throw new Error(pick({ tr: "Doğrulama kanıtı en az 3 karakter olmalı.", en: "Verification evidence must be at least 3 characters." }));
+      return adminMutate<CatalogDraft>(`catalog/drafts/${encodeURIComponent(draftId)}/verify-overrides`, "POST", {
+        expected_revision: expectedRevision,
+        fields,
+        reason: reason.trim(),
+        verification_evidence: evidence.trim(),
+      });
+    },
+    onSuccess: () => {
+      toast.success(pick({ tr: "Seçilen düzeltmeler kaynağa karşı doğrulandı.", en: "Selected overrides were verified against the source." }));
+      setSelectedFields(new Set());
+      setReason("");
+      setEvidence("");
+      void client.invalidateQueries({ queryKey: ["admin", "catalog"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const busy = removeOverrides.isPending || verifyOverrides.isPending;
+
   return (
     <Card size="sm" className={overrideFields.length ? "border-amber-500/40" : undefined}>
       <CardHeader>
@@ -1417,13 +1470,21 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
                     if (next.has(field)) next.delete(field); else next.add(field);
                     return next;
                   })}
-                  disabled={!canWrite || removeOverrides.isPending}
+                  disabled={!canWrite || busy}
                   aria-label={pick({ tr: `${field} düzeltmesini seç`, en: `Select ${field} override` })}
                   className="mt-0.5"
                 />
                 <span className="min-w-0 flex-1">
-                  <span className="block break-words font-mono">{field}</span>
-                  <span className="mt-1 block break-words text-xs text-muted-foreground">{valueLabel(overrideValues[field])}</span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="break-words font-mono">{field}</span>
+                    {overrideIsVerified(overrideValues[field])
+                      ? <Badge variant="outline" className="gap-1 text-emerald-700 dark:text-emerald-300"><CheckCircle2Icon className="size-3" />{pick({ tr: "Doğrulandı", en: "Verified" })}</Badge>
+                      : <Badge variant="outline" className="text-amber-700 dark:text-amber-300">{pick({ tr: "Doğrulama bekliyor", en: "Pending verification" })}</Badge>}
+                  </span>
+                  <span className="mt-1 block break-words text-xs text-muted-foreground">{valueLabel(overrideEntry(overrideValues[field]).value)}</span>
+                  {overrideIsVerified(overrideValues[field])
+                    ? <span className="mt-1 block break-words text-xs text-muted-foreground">{pick({ tr: "Kanıt", en: "Evidence" })}: {overrideEntry(overrideValues[field]).verification_evidence}</span>
+                    : null}
                 </span>
               </label>
             ))}
@@ -1431,29 +1492,46 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
         ) : <p className="text-sm text-muted-foreground">{pick({ tr: "Bu taslakta kayıtlı düzeltme yok.", en: "This draft has no recorded overrides." })}</p>}
         {overrideFields.length && canWrite ? (
           <div className="space-y-2 border-t pt-3">
-            <Label htmlFor="catalog-override-removal-reason" className="text-xs text-muted-foreground">{pick({ tr: "Kaldırma gerekçesi", en: "Removal reason" })}</Label>
+            <Label htmlFor="catalog-override-reason" className="text-xs text-muted-foreground">{pick({ tr: "Gerekçe", en: "Reason" })}</Label>
             <Textarea
-              id="catalog-override-removal-reason"
+              id="catalog-override-reason"
               value={reason}
               onChange={(event) => setReason(event.target.value)}
-              placeholder={pick({ tr: "Kaynak değerine dönme nedeninizi yazın", en: "Explain why the source value should be restored" })}
-              disabled={removeOverrides.isPending}
+              placeholder={pick({ tr: "Kaldırma veya doğrulama nedeninizi yazın", en: "Explain why these overrides are being removed or verified" })}
+              disabled={busy}
               maxLength={1000}
             />
-            <p className="text-xs text-muted-foreground">{pick({ tr: "Seçilen düzeltmeler taslaktan kaldırılır; değişikliklerin yayına girmesi için ayrıca yayınlayın. En az 3 karakter.", en: "Selected overrides are removed from the draft; publish separately for the change to take effect. At least 3 characters." })}</p>
-            <div className="flex justify-end">
+            <p className="text-xs text-muted-foreground">{pick({ tr: "Her iki işlem de yalnızca taslağı değiştirir; yayına girmesi için ayrıca yayınlayın. En az 3 karakter.", en: "Both actions change the draft only; publish separately for them to take effect. At least 3 characters." })}</p>
+            <Label htmlFor="catalog-override-evidence" className="text-xs text-muted-foreground">{pick({ tr: "Doğrulama kanıtı", en: "Verification evidence" })}</Label>
+            <Textarea
+              id="catalog-override-evidence"
+              value={evidence}
+              onChange={(event) => setEvidence(event.target.value)}
+              placeholder={pick({ tr: "Kaynak URL’si, kayıt adı veya inceleme notu", en: "Source URL, record name, or review note" })}
+              disabled={busy}
+              maxLength={4000}
+            />
+            <p className="text-xs text-muted-foreground">{pick({ tr: `Yalnızca doğrulama için gerekir. ${pendingFields.length} düzeltme doğrulama bekliyor.`, en: `Required to verify only. ${pendingFields.length} override(s) awaiting verification.` })}</p>
+            <div className="flex flex-wrap justify-end gap-2">
               <Button
                 variant="destructive"
-                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || !draftId || expectedRevision === null || removeOverrides.isPending}
+                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || !draftId || expectedRevision === null || busy}
                 onClick={() => removeOverrides.mutate()}
               >
                 {removeOverrides.isPending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}
                 {pick({ tr: "Seçilen düzeltmeleri kaldır", en: "Remove selected overrides" })}
               </Button>
+              <Button
+                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || evidence.trim().length < 3 || !draftId || expectedRevision === null || busy}
+                onClick={() => verifyOverrides.mutate()}
+              >
+                {verifyOverrides.isPending ? <Loader2Icon className="animate-spin" /> : <CheckCircle2Icon />}
+                {pick({ tr: "Seçilenleri doğrula", en: "Verify selected overrides" })}
+              </Button>
             </div>
           </div>
         ) : null}
-        {!canWrite && overrideFields.length ? <p className="text-xs text-muted-foreground">{pick({ tr: "Düzeltmeleri kaldırmak için katalog yazma yetkisi gerekir.", en: "Catalog write permission is required to remove overrides." })}</p> : null}
+        {!canWrite && overrideFields.length ? <p className="text-xs text-muted-foreground">{pick({ tr: "Düzeltmeleri kaldırmak veya doğrulamak için katalog yazma yetkisi gerekir.", en: "Catalog write permission is required to remove or verify overrides." })}</p> : null}
       </CardContent>
     </Card>
   );
