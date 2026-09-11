@@ -752,6 +752,78 @@ class BulkSectionsRequest(BaseModel):
     department: str | None = Field(default=None, max_length=20)
 
 
+@router.post("/planner-inputs")
+async def planner_inputs(
+    body: BulkSectionsRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return section times and student verdicts in one pool-sized read.
+
+    The published catalog is already a durable shared cache. Reading it once
+    for the requested courses avoids the previous course-by-course SQL loop
+    and keeps sections and verdicts pinned to the same immutable release.
+    """
+
+    if not published_catalog_reads_enabled():
+        sections = await bulk_course_sections(body, user, db)
+        constraints = await bulk_constraints(
+            BulkConstraintsRequest(**body.model_dump()), user, db
+        )
+        return {"sections": sections["courses"], "constraints": constraints["courses"]}
+
+    expanded: dict[str, str] = {}
+    async with catalog_session(db, user.id) as catalog:
+        for raw in dict.fromkeys(code.strip() for code in body.courses if code.strip()):
+            try:
+                compact, _ = await _expand_course(
+                    db, user.id, raw, body.department or "", session=catalog
+                )
+                expanded[raw] = compact
+            except HTTPException:
+                continue
+
+    from app.academic_catalog.service import published_plan_inputs
+
+    offerings, _, metadata = await published_plan_inputs(
+        db, user.id, body.semester, list(expanded.values())
+    )
+    by_course: dict[str, list[dict[str, Any]]] = {}
+    for offering in offerings:
+        key = re.sub(r"[^A-Z0-9]", "", str(offering.get("course_code") or "").upper())
+        by_course.setdefault(key, []).append(offering)
+
+    section_results: dict[str, Any] = {}
+    constraint_results: dict[str, Any] = {}
+    for raw in body.courses:
+        compact = expanded.get(raw)
+        rows = by_course.get(re.sub(r"[^A-Z0-9]", "", (compact or "").upper()), [])
+        if not compact or not rows:
+            section_results[raw] = {"error": "course is not in the published catalog", "sections": []}
+            constraint_results[raw] = {"course": raw, "error": "course is not in the published catalog", "sections": {}}
+            continue
+        section_results[raw] = {"sections": normalize_sections({"sections": rows, "_catalog": metadata})}
+        verdicts: dict[str, Any] = {}
+        for row in rows:
+            section = str(row.get("section") or row.get("section_code") or "")
+            verdicts[section] = {
+                "rows": row.get("restrictions") or [],
+                "eligible": row.get("eligible"),
+                "reason": row.get("eligibility_reason") or "",
+                "eligibility_status": row.get("eligibility_status") or "unknown",
+                "constraints_verified": row.get("eligible") is not None,
+                "data_status": row.get("data_status") or "unknown",
+                "meetings_status": row.get("meetings_status") or "unknown",
+                "catalog_release_id": row.get("catalog_release_id"),
+            }
+        constraint_results[raw] = {"course": compact, "sections": verdicts}
+    return {
+        "sections": section_results,
+        "constraints": constraint_results,
+        "catalog_release_id": metadata.get("catalog_release_id"),
+    }
+
+
 @router.post("/sections")
 async def bulk_course_sections(
     body: BulkSectionsRequest,

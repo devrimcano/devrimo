@@ -16,7 +16,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,7 +34,8 @@ import { formatMetuCourseCode } from "@/lib/metu-course-code";
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
 // students' browsers and must keep loading.
-type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string; tentative?: boolean; verification_status?: "verified" | "tentative"; catalog_release_id?: string | null };
+type VerificationStatus = "verified" | "tentative" | "unverified_constraints" | "restriction_overridden";
+type Entry = { id: string; code: string; name: string; section: string; day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string; credits: number; color: number; kind: "course" | "block"; instructor?: string; tentative?: boolean; verification_status?: VerificationStatus; verification_reason?: string; restriction_override_scope?: "section" | "global" | null; catalog_release_id?: string | null };
 type CatalogCourse = {
   code: string;
   name: string;
@@ -44,6 +45,9 @@ type CatalogCourse = {
   selected?: boolean;
   timing_status?: string | null;
   selected_section?: string | null;
+  verification_status?: VerificationStatus;
+  verification_reason?: string;
+  restriction_override_scope?: "section" | "global" | null;
 };
 type CatalogSection = { section: string; instructor: string; meetings: { day: Day; start: number; duration: number; startMinute?: number; durationMinutes?: number; room: string }[]; constraint: string; eligible: boolean | null; reason?: string; eligibility_status?: string; data_status?: string; meetings_status?: string; catalog_release_id?: string | null };
 type ApiCatalogSection = { section?: unknown; instructor?: unknown; meetings?: unknown; constraint?: unknown; eligible?: unknown; reason?: unknown; eligibility_status?: unknown; data_status?: unknown; meetings_status?: unknown; catalog_release_id?: unknown };
@@ -61,6 +65,10 @@ type PrerequisiteRejection = {
   prerequisite_course_labels?: string[];
 };
 type SubmittedMutation = { term: string; fingerprint: string; idempotencyKey: string };
+type RestrictionConfirmation =
+  | { kind: "enable-global" }
+  | { kind: "catalog"; course: CatalogCourse; section: CatalogSection; reason: string }
+  | { kind: "manual"; entry: Entry; reason: string };
 type PlanningMetadata = {
   status: "complete" | "blocked" | "needs_verification" | "partial" | "unknown";
   blockedCourses: string[];
@@ -448,6 +456,8 @@ function toCanonicalEntry(entry: Entry): PlanEntry {
     room: entry.room ?? "",
     tentative: entry.tentative === true,
     verification_status: entry.verification_status ?? (entry.tentative ? "tentative" : "verified"),
+    verification_reason: entry.verification_reason ?? "",
+    restriction_override_scope: entry.restriction_override_scope ?? null,
     catalog_release_id: entry.catalog_release_id ?? null,
   };
 }
@@ -459,8 +469,10 @@ function fromCanonicalEntry(entry: PlanEntry): Entry {
     duration: Math.max(1, Math.ceil(entry.duration_minutes / 60)),
     startMinute: entry.start_minute,
     durationMinutes: entry.duration_minutes,
-    tentative: entry.tentative === true || entry.verification_status === "tentative",
-    verification_status: entry.verification_status === "tentative" ? "tentative" : "verified",
+    tentative: entry.tentative === true || (entry.verification_status ?? "verified") !== "verified",
+    verification_status: (["tentative", "unverified_constraints", "restriction_overridden"].includes(entry.verification_status ?? "") ? entry.verification_status : "verified") as VerificationStatus,
+    verification_reason: entry.verification_reason ?? "",
+    restriction_override_scope: entry.restriction_override_scope === "section" || entry.restriction_override_scope === "global" ? entry.restriction_override_scope : null,
     catalog_release_id: entry.catalog_release_id ?? null,
   };
 }
@@ -526,8 +538,10 @@ function canonicalStateFingerprint(state: PlanState): string {
     start_minute: value.start_minute,
     duration_minutes: value.duration_minutes,
     room: value.room,
-    tentative: value.tentative === true || value.verification_status === "tentative",
+    tentative: value.tentative === true || (value.verification_status ?? "verified") !== "verified",
     verification_status: value.verification_status ?? (value.tentative ? "tentative" : "verified"),
+    verification_reason: value.verification_reason ?? "",
+    restriction_override_scope: value.restriction_override_scope ?? null,
     catalog_release_id: value.catalog_release_id ?? null,
   });
   const section = (value: Record<string, unknown>) => ({
@@ -722,6 +736,7 @@ export function SchedulePlanner() {
   const [emptyDays, setEmptyDays] = useState<Day[]>([]);
   const [avoidConflicts, setAvoidConflicts] = useState(true);
   const [ignoreConstraints, setIgnoreConstraints] = useState(false);
+  const [restrictionConfirmation, setRestrictionConfirmation] = useState<RestrictionConfirmation | null>(null);
   const [catalogCourses, setCatalogCourses] = useState<CatalogCourse[]>([]);
   const [sectionsByCourse, setSectionsByCourse] = useState<SectionMap>({});
   const [expandedCourse, setExpandedCourse] = useState<string | null>(null);
@@ -1065,19 +1080,17 @@ export function SchedulePlanner() {
         const verdict = verdicts[section];
         if (verdict?.eligible === false && !ignoreConstraints) {
           const reason = localizedRestrictionReason(verdict.reason, t);
-          return toast.error(verdict.reason
-            ? t(`Şube ${section} sana kapalı: ${reason}. Yine de eklemek için "Şube kısıtlarını yok say"ı aç.`,
-                `Section ${section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
-            : t(`Şube ${section} kısıtlarına uymuyorsun.`, `You do not meet section ${section}'s restrictions.`));
+          setRestrictionConfirmation({ kind: "manual", entry: next, reason });
+          return;
         }
         if (verdict?.eligible === false) {
           toast.warning(t(`Şube ${section} kısıtlara uymuyor, kısıtlar yok sayıldığı için eklendi.`,
             `Section ${section} does not meet its restrictions; added because restrictions are ignored.`));
-          next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
+          next = { ...next, tentative: true, verification_status: "restriction_overridden", verification_reason: localizedRestrictionReason(verdict.reason, t), restriction_override_scope: "global", catalog_release_id: null };
         } else if (!verdict || verdict.eligible === null) {
           toast.warning(t(`Şube ${section} için kısıt tablosu okunamadı; taslak olarak eklendi.`,
             `Eligibility for section ${section} could not be verified; it was added as tentative.`));
-          next = { ...next, tentative: true, verification_status: "tentative", catalog_release_id: null };
+          next = { ...next, tentative: true, verification_status: "unverified_constraints", verification_reason: localizedRestrictionReason(verdict?.reason ?? "", t), restriction_override_scope: null, catalog_release_id: null };
         } else {
           next = { ...next, tentative: false, verification_status: "verified", catalog_release_id: verdict.catalog_release_id ?? null };
         }
@@ -1238,6 +1251,27 @@ export function SchedulePlanner() {
     }
     setSectionsByCourse((current) => ({ ...current, ...found }));
     return { ...known, ...found };
+  }, [department, term]);
+
+  const fetchPlannerInputs = useCallback(async (courses: CatalogCourse[], known: SectionMap): Promise<{ sections: SectionMap; constraints: ConstraintMap }> => {
+    const wanted = courses.map((course) => course.rawCode).filter(Boolean);
+    if (!wanted.length) return { sections: known, constraints: constraintsRef.current };
+    const response = await jsonFetch<{
+      sections?: Record<string, { sections?: unknown; error?: string }>;
+      constraints?: Record<string, { sections?: Record<string, SectionVerdict>; error?: string }>;
+    }>("/api/schedule/planner-inputs", {
+      method: "POST",
+      body: { semester: term, department: department.trim() || undefined, courses: wanted },
+    });
+    const found: SectionMap = {};
+    for (const [rawCode, payload] of Object.entries(response.sections ?? {})) {
+      if (payload?.error === undefined) found[courseIdentity(rawCode)] = fromTypedSections(payload.sections);
+    }
+    const nextSections = { ...known, ...found };
+    const nextConstraints = mergeVerdicts(constraintsRef.current, response.constraints ?? {}, poolRef.current);
+    setSectionsByCourse(nextSections);
+    setConstraints(nextConstraints);
+    return { sections: nextSections, constraints: nextConstraints };
   }, [department, term]);
 
   /**
@@ -1543,18 +1577,17 @@ export function SchedulePlanner() {
       // The verdicts this run can actually rely on. Generation used to read the
       // React state, which is a snapshot from before the fetch it just made.
       let liveVerdicts = constraintsRef.current;
-      try {
-        liveVerdicts = await fetchAllConstraints(catalogCourses);
-      } catch (error) {
-        captureRequestFailure(error, { operation: "schedule.constraints", kind: "query" });
-      }
       let known = sectionsByCourse;
       try {
-        known = await fetchPoolSections(catalogCourses, known);
+        const inputs = await fetchPlannerInputs(catalogCourses, known);
+        liveVerdicts = inputs.constraints;
+        known = inputs.sections;
       } catch (error) {
-        // Not fatal: the per-course path below still runs, so a failed batch
-        // costs speed rather than the whole attempt.
-        captureRequestFailure(error, { operation: "schedule.pool_sections", kind: "query" });
+        // Preserve the old cache-backed split path during rollout and when an
+        // older backend is still serving one deployment slot.
+        captureRequestFailure(error, { operation: "schedule.planner_inputs", kind: "query" });
+        try { liveVerdicts = await fetchAllConstraints(catalogCourses); } catch { /* unknown stays explicit */ }
+        try { known = await fetchPoolSections(catalogCourses, known); } catch { /* per-course fallback below */ }
       }
       for (const [index, course] of catalogCourses.entries()) {
         setGenerateProgress({ done: index + 1, total: catalogCourses.length });
@@ -1746,29 +1779,42 @@ export function SchedulePlanner() {
     const check = sectionAllowed(course, section);
     if (check.allowed === false && !ignoreConstraints) {
       const reason = localizedRestrictionReason(check.reason, t);
-      return toast.error(check.reason
-        ? t(`Şube ${section.section} sana kapalı: ${reason}. Yine de eklemek için "Şube kısıtlarını yok say"ı aç.`, `Section ${section.section} is closed to you: ${reason}. Turn on "Ignore section restrictions" to add it anyway.`)
-        : t(`Şube ${section.section} kısıtlarına uymuyorsun.`, `You do not meet section ${section.section}'s restrictions.`));
+      setRestrictionConfirmation({ kind: "catalog", course, section, reason });
+      return;
     }
     if (untimed) {
       // Credit planning may retain an explicitly untimed section, but only
       // after the same server eligibility verdict used by scheduled entries.
       // There is deliberately no local PlanEntry for this selection.
-      if (check.allowed !== true) {
-        return toast.warning(t(
-          `Şube ${section.section} için kredi planı uygunluğu henüz doğrulanmadı.`,
-          `Credit eligibility for section ${section.section} is not verified yet.`,
-        ));
-      }
+      const verificationStatus: VerificationStatus = check.allowed === true ? "verified" : "unverified_constraints";
       setCatalogCourses((current) => current.map((item) => (
         courseIdentity(item.rawCode) === courseIdentity(course.rawCode)
-          ? { ...item, selected: true, timing_status: "untimed", selected_section: section.section }
+          ? { ...item, selected: true, timing_status: "untimed", selected_section: section.section, verification_status: verificationStatus, verification_reason: localizedRestrictionReason(check.reason, t) }
           : item
       )));
-      toast.success(t(`${course.code} şube ${section.section} kredi planına eklendi (saat yok).`, `${course.code} section ${section.section} added to the credit plan (untimed).`));
+      if (check.allowed === null) toast.warning(t(`${course.code} şube ${section.section} kısıtı doğrulanamadan kredi planına eklendi.`, `${course.code} section ${section.section} was added to the credit plan without verified restrictions.`));
+      else toast.success(t(`${course.code} şube ${section.section} kredi planına eklendi (saat yok).`, `${course.code} section ${section.section} added to the credit plan (untimed).`));
       return;
     }
+    addCatalogSectionResolved(course, section, check, check.allowed === false ? "global" : null);
+  }
+
+  function addCatalogSectionResolved(
+    course: CatalogCourse,
+    section: CatalogSection,
+    check: { allowed: boolean | null; reason: string },
+    overrideScope: "section" | "global" | null,
+  ) {
     const tentative = check.allowed !== true;
+    if (isExplicitlyUntimed(section) && !section.meetings.length) {
+      setCatalogCourses((current) => current.map((item) => (
+        courseIdentity(item.rawCode) === courseIdentity(course.rawCode)
+          ? { ...item, selected: true, timing_status: "untimed", selected_section: section.section, verification_status: "restriction_overridden", verification_reason: localizedRestrictionReason(check.reason, t), restriction_override_scope: overrideScope }
+          : item
+      )));
+      toast.warning(t(`${course.code} şube ${section.section} kısıt uyarısıyla kredi planına eklendi.`, `${course.code} section ${section.section} was added to the credit plan with a restriction warning.`));
+      return;
+    }
     if (check.allowed === false && ignoreConstraints) {
       toast.warning(t(`Şube ${section.section} kısıtları yok sayıldığı için taslak olarak eklendi.`, `Section ${section.section} was added as tentative because its restrictions are being ignored.`));
     } else if (check.allowed === null) {
@@ -1777,10 +1823,41 @@ export function SchedulePlanner() {
     // Eligibility is checked by the canonical owner when this state is saved.
     // The browser may show the catalog verdict, but it cannot make the
     // registration decision that chat and other clients must also observe.
-    const additions = section.meetings.map((meeting, index) => ({ id: newId(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, tentative, verification_status: tentative ? "tentative" as const : "verified" as const, catalog_release_id: tentative ? null : section.catalog_release_id ?? null, ...meeting }));
+    const verificationStatus: VerificationStatus = check.allowed === true ? "verified" : check.allowed === false ? "restriction_overridden" : "unverified_constraints";
+    const additions = section.meetings.map((meeting, index) => ({ id: newId(), code: course.code, name: course.name, section: section.section, credits: index === 0 ? course.credits : 0, color: uniqueCourses % COLORS.length, kind: "course" as const, instructor: section.instructor, tentative, verification_status: verificationStatus, verification_reason: localizedRestrictionReason(check.reason, t), restriction_override_scope: overrideScope, catalog_release_id: tentative ? null : section.catalog_release_id ?? null, ...meeting }));
     if (avoidConflicts && additions.some((next) => entries.some((entry) => overlaps(entry, next)))) return toast.error(t("Bu şube mevcut programla çakışıyor.", "This section conflicts with your schedule."));
     setEntries((current) => [...current, ...additions]);
     toast.success(t(`${course.code} şube ${section.section} eklendi.`, `${course.code} section ${section.section} added.`));
+  }
+
+  function confirmRestrictionAction() {
+    const pending = restrictionConfirmation;
+    if (!pending) return;
+    setRestrictionConfirmation(null);
+    if (pending.kind === "enable-global") {
+      setIgnoreConstraints(true);
+      return;
+    }
+    if (pending.kind === "manual") {
+      const entry: Entry = {
+        ...pending.entry,
+        tentative: true,
+        verification_status: "restriction_overridden",
+        verification_reason: pending.reason,
+        restriction_override_scope: "section",
+        catalog_release_id: null,
+      };
+      setEntries((current) => [...current, entry]);
+      setDraft((current) => ({ ...current, code: "", name: "", room: "" }));
+      toast.warning(t(`${entry.code} şube ${entry.section} yalnız bu seçim için kısıt uyarısıyla eklendi.`, `${entry.code} section ${entry.section} was added with a restriction warning for this selection only.`));
+      return;
+    }
+    addCatalogSectionResolved(
+      pending.course,
+      pending.section,
+      { allowed: false, reason: pending.reason },
+      "section",
+    );
   }
 
   // --- sharing and export -------------------------------------------------
@@ -2105,6 +2182,49 @@ export function SchedulePlanner() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <AlertDialog open={restrictionConfirmation !== null} onOpenChange={(open) => { if (!open) setRestrictionConfirmation(null); }}>
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] overflow-y-auto">
+          <AlertDialogHeader>
+            <div className="mb-1 flex size-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+              <TriangleAlertIcon className="size-5" aria-hidden="true" />
+            </div>
+            <AlertDialogTitle>
+              {restrictionConfirmation?.kind === "enable-global"
+                ? t("Şube kısıtları yok sayılsın mı?", "Ignore section restrictions?")
+                : t("Bu şube sana kapalı görünüyor", "This section appears closed to you")}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2 text-left text-pretty">
+              {restrictionConfirmation?.kind === "enable-global" ? (
+                <span className="block">{t(
+                  "Program oluşturucu, kayıt koşullarını karşılamadığın şubeleri de kullanabilir. Eklenen her riskli şube programda ünlemle işaretlenir.",
+                  "The planner may use sections whose registration requirements you do not meet. Every risky section is marked with an exclamation in the schedule.",
+                )}</span>
+              ) : (
+                <>
+                  <span className="block font-medium text-foreground">
+                    {restrictionConfirmation?.kind === "catalog"
+                      ? `${restrictionConfirmation.course.code} · ${t("Şube", "Section")} ${restrictionConfirmation.section.section}`
+                      : restrictionConfirmation?.kind === "manual"
+                        ? `${restrictionConfirmation.entry.code} · ${t("Şube", "Section")} ${restrictionConfirmation.entry.section}`
+                        : ""}
+                  </span>
+                  {restrictionConfirmation?.reason ? <span className="block break-words">{restrictionConfirmation.reason}</span> : null}
+                  <span className="block">{t(
+                    "Devam edersen yalnız bu şube riskli olarak eklenir. Genel kısıt ayarı değişmez.",
+                    "If you continue, only this section is added as risky. The global restriction setting does not change.",
+                  )}</span>
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="min-h-11">{t("Vazgeç", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction className="min-h-11" variant="destructive" onClick={confirmRestrictionAction}>
+              {restrictionConfirmation?.kind === "enable-global" ? t("Yine de yok say", "Ignore anyway") : t("Riskli olarak ekle", "Add as risky")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <div className="mx-auto w-full max-w-[1500px] space-y-3 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:gap-2 xl:space-y-0">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 xl:shrink-0">
           {/* The title, what term it is, and how to use the screen, on one
@@ -2409,7 +2529,10 @@ export function SchedulePlanner() {
                   : <p className="mt-1 text-[11px] text-muted-foreground">{t("Seçmezsen fark etmez.", "Leave empty for no preference.")}</p>}
               </Field>
               <Toggle label={t("Çakışmaları engelle", "Prevent conflicts")} checked={avoidConflicts} onChange={setAvoidConflicts} />
-              <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={setIgnoreConstraints} /></span>
+              <span data-tour="rules"><Toggle label={t("Şube kısıtlarını yok say", "Ignore section restrictions")} checked={ignoreConstraints} onChange={(checked) => {
+                if (!checked) setIgnoreConstraints(false);
+                else setRestrictionConfirmation({ kind: "enable-global" });
+              }} /></span>
               </CardContent> : null}
             </Card>
 
@@ -2425,7 +2548,7 @@ export function SchedulePlanner() {
             {selectedUntimedCourses.length ? <Card><CardHeader className="pb-3"><CardTitle className="text-base">{t("Takvimde yeri olmayan dersler", "Courses with no calendar slot")}</CardTitle></CardHeader><CardContent className="max-h-[min(32vh,20rem)] space-y-2 overflow-y-auto">
               {selectedUntimedCourses.map((course) => (
                 <div key={`${course.rawCode}-untimed`} className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/35 bg-amber-500/5 px-3 py-2">
-                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{course.code} · {localizedCourseName(course.name, locale)} <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Saat yok", "Untimed")}</span></p><p className="text-xs text-muted-foreground">{course.credits} {t("kredi", "credits")} · {course.selected_section ? `${t("Şube", "Section")} ${course.selected_section} · ` : ""}{t("Takvim saati yok; kredi planında tutuluyor.", "No calendar time; retained in the credit plan.")}</p></div>
+                  <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium">{course.code} · {localizedCourseName(course.name, locale)} <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Saat yok", "Untimed")}</span>{course.verification_status && course.verification_status !== "verified" ? <span title={course.verification_reason || t("Şube kısıtını kontrol et", "Check the section restriction")} className="ml-1 inline-flex size-5 align-middle items-center justify-center rounded-full bg-amber-500/20 text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="size-3.5" aria-hidden /><span className="sr-only">{t("Kısıt uyarısı", "Restriction warning")}</span></span> : null}</p><p className="text-xs text-muted-foreground">{course.credits} {t("kredi", "credits")} · {course.selected_section ? `${t("Şube", "Section")} ${course.selected_section} · ` : ""}{t("Takvim saati yok; kredi planında tutuluyor.", "No calendar time; retained in the credit plan.")}</p></div>
                   <Button size="icon" variant="ghost" aria-label={t("Dersi havuzdan çıkar", "Remove course from pool")} onClick={() => removePoolCourse(course)}><Trash2Icon /></Button>
                 </div>
               ))}
@@ -2542,7 +2665,7 @@ export function SchedulePlanner() {
                           {formatItemRange(entry)}
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}{entry.tentative ? <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Taslak", "Tentative")}</span> : null}</span>
+                          <span className="block font-semibold">{entry.code}{entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""}{entry.tentative ? <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">{t("Kontrol et", "Check")}</span> : null}</span>
                           <span className="mt-0.5 block text-xs leading-snug opacity-85">{localizedCourseName(entry.name, locale)}</span>
                           <span className="mt-1 block text-xs opacity-75">{entry.room?.trim() || (entry.kind === "course" ? "TBA" : "—")}{entry.instructor ? ` · ${entry.instructor}` : ""}</span>
                         </span>
@@ -2636,7 +2759,7 @@ ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("
                                   somewhere unexpected showed no room at all. */}
                               <span className="flex items-baseline gap-1.5">
                                 <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{entry.code} · {entry.section}</span>
-                                {entry.tentative ? <span title={t("Katalog doğrulaması bekliyor", "Catalog verification pending")} className="shrink-0 rounded bg-amber-500/20 px-1 text-[10px] font-bold text-amber-800 dark:text-amber-200">?</span> : null}
+                                {entry.tentative ? <span title={entry.verification_reason || (entry.verification_status === "restriction_overridden" ? t("Şube kısıtı senin onayınla yok sayıldı", "The section restriction was overridden with your confirmation") : t("Şube kısıtı doğrulanamadı", "The section restriction could not be verified"))} className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-800 dark:text-amber-200"><TriangleAlertIcon className="size-3.5" aria-hidden="true" /><span className="sr-only">{t("Bu şubeyi kontrol et", "Check this section")}</span></span> : null}
                                 {entry.kind === "course" || entry.room?.trim() ? (
                                   <span className="shrink-0 text-[11px] font-medium opacity-80">{entry.room?.trim() || "TBA"}</span>
                                 ) : null}

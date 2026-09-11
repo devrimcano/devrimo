@@ -30,6 +30,8 @@ export type PlanEntry = {
   /** A section added while catalog verification was incomplete. */
   tentative?: boolean;
   verification_status?: "verified" | "tentative" | string;
+  verification_reason?: string;
+  restriction_override_scope?: "section" | "global" | null;
   catalog_release_id?: string | null;
 };
 
