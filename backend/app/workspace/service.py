@@ -194,8 +194,15 @@ class WorkspaceService:
             "uid": ref.key,
             "folder": ref.folder,
             "attachment_id": ref.attachment,
-            "semester": ref.term,
-            "term": ref.term,
+            # A catalog read with no term means this term - that is what a
+            # student means by "does MATH 219 have a prerequisite". Without
+            # this the source refused with "Course Info tool schema is
+            # unsupported; missing arguments: semester_code", which names an
+            # argument of the campus tool rather than the `term` field the
+            # caller actually controls, so there was nothing in it to act on.
+            # planning.timetable has resolved its term this way all along.
+            "semester": ref.term or current_term(),
+            "term": ref.term or current_term(),
             "category": ref.category or ref.key,
             "category_id": ref.category or ref.key,
             "program_type": ref.program_type,

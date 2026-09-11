@@ -56,3 +56,44 @@ def test_no_key_and_no_department_is_absent_rather_than_empty():
     """An empty string is an argument the source still has to reject."""
     assert department_for(kind="catalog.departments") is None
     assert department_for(kind="catalog.prerequisites", key="") is None
+
+
+async def test_a_catalog_read_without_a_term_means_this_term(monkeypatch):
+    """"Does MATH 219 have a prerequisite" is a question about this term.
+
+    Verified live: reading catalog.prerequisites with the term returns MATH 120
+    CALCULUS OF FUNCTIONS OF SEVERAL VARIABLES at DD, and reading it without
+    one answered "Course Info tool schema is unsupported; missing arguments:
+    semester_code" - which names an argument of the campus tool rather than the
+    `term` field the caller controls, so there was nothing in it to act on. The
+    assistant duly reported that it could not find the prerequisite.
+
+    planning.timetable has resolved its term this way from the start; the
+    catalog resources now do the same.
+    """
+    from uuid import uuid4
+
+    from app.planning.service import current_term
+    from app.workspace.service import WorkspaceService
+
+    sent: dict = {}
+
+    async def fake_call_course_info(_db, _user_id, method, values):
+        sent["method"] = method
+        sent.update(values)
+        return []
+
+    monkeypatch.setattr("app.campus.course_info.call_course_info", fake_call_course_info)
+
+    service = WorkspaceService(uuid4())
+    monkeypatch.setattr(service, "authorize", _noop)
+    await service.upstream(ResourceRef.model_validate({"kind": "catalog.prerequisites", "key": "2360219"}))
+
+    assert sent["method"] == "get_course_prerequisites"
+    assert sent["semester"] == current_term(), "a term-less catalog read has to resolve a term"
+    assert sent["department"] == "236", "the department still comes from the course code"
+    assert sent["course"] == "2360219"
+
+
+async def _noop(*_args, **_kwargs):
+    return None
