@@ -199,7 +199,7 @@ async def test_published_write_uses_server_credits_and_preserves_tentative_entri
         )
         await db.commit()
 
-        async def published_inputs(_db, _user_id, _term):
+        async def published_inputs(_db, _user_id, _term, _course_codes=None):
             return [offering], {}, {"catalog_release_id": "release-a"}
 
         monkeypatch.setattr(planning_service, "_published_plan_inputs", published_inputs)
