@@ -406,6 +406,19 @@ class RemoveOverridesIn(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
 
+class VerifyOverridesIn(BaseModel):
+    """Confirm retained corrections against the source, without editing them.
+
+    Evidence is mandatory here for the same reason ``verify`` requires it on a
+    draft patch: an administrator's note cannot manufacture source freshness.
+    """
+
+    expected_revision: int = Field(ge=1)
+    fields: list[str] = Field(min_length=1, max_length=50)
+    reason: str = Field(min_length=3, max_length=1000)
+    verification_evidence: str = Field(min_length=3, max_length=4000)
+
+
 class CourseListQuery(BaseModel):
     term: str
     department: str | None = None
@@ -552,6 +565,7 @@ class CatalogReleaseOut(BaseModel):
     created_at: str | None = None
     expected_release_id: str | None = None
     target_release_id: str | None = None
+    course_count: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     active: bool = False
 
@@ -588,6 +602,7 @@ class CatalogSourceObservationOut(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     payload: Any = None
     candidate_data: dict[str, Any] = Field(default_factory=dict)
+    payload_truncated: bool = False
     status: str
     observed_at: Any = None
     source_fetched_at: Any = None

@@ -740,6 +740,126 @@ def _tool_component(tool: str) -> str:
     }.get(tool, "details")
 
 
+# One canonical field -> component map.  The draft editor and the override
+# removal path must agree: an edit that marks a component nothing reads leaves
+# the real one looking fresh.  ``is_thesis`` belongs to the listing.
+FIELD_COMPONENT_MAP = {
+    "title": "details",
+    "department": "listing",
+    "local_credits": "details",
+    "ects": "details",
+    "level": "details",
+    "availability": "details",
+    "campus": "details",
+    "is_thesis": "listing",
+    "sections": "sections",
+    "prerequisite_groups": "prerequisites",
+    "replacements": "replacements",
+    "completeness": "details",
+}
+
+
+def override_components(overrides: dict[str, Any]) -> dict[str, list[str]]:
+    """Group the retained overrides by the component whose freshness they gate.
+
+    A component is only as verified as its least verified override, so the
+    grouping has to be explicit: ``details`` alone covers six editable fields.
+    ``sections`` additionally gates ``constraints``, because a hand-edited
+    section roster decides which restriction tables still describe the course.
+    """
+
+    grouped: dict[str, list[str]] = {}
+    for field in overrides:
+        grouped.setdefault(FIELD_COMPONENT_MAP.get(field, field), []).append(field)
+        if field == "sections":
+            grouped.setdefault("constraints", []).append(field)
+    return grouped
+
+
+def _override_evidence(entry: Any) -> str | None:
+    """Return the verification evidence recorded against one override."""
+
+    if not isinstance(entry, dict):
+        return None
+    evidence = str(entry.get("verification_evidence") or "").strip()
+    return evidence or None
+
+
+def apply_override_component_status(
+    component_status: dict[str, Any],
+    overrides: dict[str, Any],
+    components: Iterable[str],
+    *,
+    observed_at: str | None,
+) -> None:
+    """Re-derive the admin freshness of every component the overrides gate.
+
+    Verification is recorded per field rather than per component.  Marking the
+    component itself verified would let evidence for ``title`` certify an
+    untouched ``ects`` correction that happens to share ``details``, so a
+    component counts as verified only while every override under it carries
+    evidence, and it falls back to pending as soon as a new edit lands.
+    """
+
+    grouped = override_components(overrides)
+    for component in components:
+        fields = grouped.get(component, [])
+        entries = [overrides[field] for field in fields]
+        verified = [entry for entry in entries if _override_evidence(entry)]
+        fully_verified = bool(entries) and len(verified) == len(entries)
+        meta = dict(component_status.get(component) or {})
+        meta.update(
+            {
+                "component": component,
+                "source_status": "admin_verified" if fully_verified else "admin_pending",
+                "verified": fully_verified,
+                "fresh": fully_verified,
+                "observed_at": observed_at,
+                "source_fetched_at": None,
+            }
+        )
+        if fully_verified:
+            latest = max(verified, key=lambda entry: str(entry.get("verified_at") or ""))
+            meta["verification_evidence"] = _override_evidence(latest)
+            meta["verified_at"] = latest.get("verified_at")
+        else:
+            meta.pop("verification_evidence", None)
+            meta.pop("verified_at", None)
+        component_status[component] = meta
+
+
+_MANUAL_VERIFICATION_ISSUE = {
+    "code": "manual_verification_required",
+    "message": "Administrator edit requires explicit verification before publication is considered fresh",
+    "severity": "warning",
+}
+
+
+def _sync_manual_verification_issue(draft: CatalogDraft) -> None:
+    """Keep one pending-verification marker in step with the retained overrides.
+
+    The marker used to be appended on every unverified edit and never removed:
+    after the administrator supplied verification evidence, or removed the
+    correction again, the draft still carried a warning that no longer
+    described it.
+    """
+
+    issues = [
+        item
+        for item in (draft.issues or [])
+        if not (isinstance(item, dict) and item.get("code") == _MANUAL_VERIFICATION_ISSUE["code"])
+    ]
+    # Read the evidence off each override rather than off its component.  Two
+    # corrections can share one component, and only the unverified one should
+    # keep the warning alive.
+    pending = any(
+        _override_evidence(entry) is None for entry in (draft.field_overrides or {}).values()
+    )
+    if pending:
+        issues.append(dict(_MANUAL_VERIFICATION_ISSUE))
+    draft.issues = issues[-200:]
+
+
 def _error_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -2319,47 +2439,27 @@ async def patch_draft(
             section["restrictions_status"] = "verified" if verify else "unknown"
             section["restrictions_observed_at"] = _iso(now) if verify else None
             section["restrictions_source_fetched_at"] = None
-    field_components = {
-        "title": "details",
-        "department": "listing",
-        "local_credits": "details",
-        "ects": "details",
-        "level": "details",
-        "availability": "details",
-        "campus": "details",
-        "sections": "sections",
-        "prerequisite_groups": "prerequisites",
-        "replacements": "replacements",
-        "completeness": "details",
-    }
+    touched_components: set[str] = set()
     for key in patch:
         # Every admin edit is retained as a per-field source override.  An
         # ordinary edit remains pending verification: a reason documents why
-        # it was changed, but it cannot manufacture source freshness.  The UI
-        # must send ``verify=true`` with evidence after checking the source or
-        # an approved record.
-        overrides[key] = {
+        # it was changed, but it cannot manufacture source freshness.  The
+        # evidence is stamped on the override itself, so a later
+        # verify-overrides call can supply it without re-sending the value.
+        entry: dict[str, Any] = {
             "value": _jsonable(patch[key]),
             "reason": reason,
             "updated_by": str(updated_by) if updated_by else None,
             "updated_at": _iso(now),
         }
-        component = field_components.get(key, key)
-        meta = dict(current["component_status"].get(component, {}))
-        meta.update(
-            {
-                "component": component,
-                "source_status": "admin_verified" if verify else "admin_pending",
-                "verified": bool(verify),
-                "fresh": bool(verify),
-                "observed_at": _iso(now),
-                "source_fetched_at": None,
-            }
-        )
         if verify:
-            meta["verification_evidence"] = str(verification_evidence).strip()
-            meta["verified_at"] = _iso(now)
-        current["component_status"][component] = meta
+            entry["verification_evidence"] = str(verification_evidence).strip()
+            entry["verified_at"] = _iso(now)
+            entry["verified_by"] = str(updated_by) if updated_by else None
+        overrides[key] = entry
+        touched_components.add(FIELD_COMPONENT_MAP.get(key, key))
+        if key == "sections":
+            touched_components.add("constraints")
         old_override = await db.scalar(
             select(CatalogAdminOverride).where(
                 CatalogAdminOverride.organization_id == organization_id,
@@ -2384,20 +2484,18 @@ async def patch_draft(
                 created_by=updated_by,
             )
         )
+    # Derive component freshness once the whole patch is recorded: an edit to
+    # one ``details`` field must not inherit the evidence of another, and a new
+    # unverified correction has to pull its component back to pending.
+    apply_override_component_status(
+        current["component_status"], overrides, touched_components, observed_at=_iso(now)
+    )
     draft.data = current
     draft.field_overrides = overrides
     draft.reason = reason
     draft.updated_by = updated_by
     draft.revision = int(draft.revision) + 1
-    if not verify:
-        pending = {
-            "code": "manual_verification_required",
-            "message": "Administrator edit requires explicit verification before publication is considered fresh",
-            "severity": "warning",
-        }
-        existing_issues = [item for item in (draft.issues or []) if isinstance(item, dict)]
-        if pending not in existing_issues:
-            draft.issues = (existing_issues + [pending])[-200:]
+    _sync_manual_verification_issue(draft)
     await db.flush()
     return draft
 
@@ -2611,29 +2709,46 @@ def _effective_component_status(
     return status
 
 
-def _catalog_metadata(revision: CatalogCourseRevision, release: CatalogRelease | None) -> dict[str, Any]:
+def _evaluated_components(
+    statuses: dict[str, Any] | None,
+    *,
+    observed_at: Any = None,
+    source_fetched_at: Any = None,
+) -> dict[str, Any]:
+    """Fill missing components and evaluate their freshness at read time."""
+
     registration = _registration_window()
-    statuses = dict(revision.component_status or {})
+    result = dict(statuses or {})
     for component in COMPONENTS:
-        statuses.setdefault(
+        result.setdefault(
             component,
             {
                 "component": component,
                 "source_status": "unknown",
                 "verified": False,
                 "fresh": False,
-                "observed_at": _iso(revision.observed_at),
-                "source_fetched_at": _iso(revision.source_fetched_at),
+                "observed_at": _iso(observed_at),
+                "source_fetched_at": _iso(source_fetched_at),
             },
         )
-        statuses[component] = _effective_component_status(
-            statuses[component], component=component, registration=registration
+        result[component] = _effective_component_status(
+            result[component], component=component, registration=registration
         )
+    return result
+
+
+def _catalog_metadata(revision: CatalogCourseRevision, release: CatalogRelease | None) -> dict[str, Any]:
     return {
         "release_id": str(release.id) if release else None,
         "course_revision_id": str(revision.id),
-        "components": _jsonable(statuses),
-        "registration_window": registration,
+        "components": _jsonable(
+            _evaluated_components(
+                dict(revision.component_status or {}),
+                observed_at=revision.observed_at,
+                source_fetched_at=revision.source_fetched_at,
+            )
+        ),
+        "registration_window": _registration_window(),
     }
 
 
@@ -2718,19 +2833,16 @@ def serialize_import_job(job: CatalogImportJob) -> dict[str, Any]:
     }
 
 
-def _freshness(revision: CatalogCourseRevision) -> str:
-    statuses = revision.component_status or {}
-    registration = _registration_window()
+def _freshness_from_component_status(statuses: dict[str, Any] | None) -> str:
     decision = ("listing", "details", "sections", "constraints", "prerequisites")
-    effective = {
-        component: _effective_component_status(
-            statuses.get(component, {}), component=component, registration=registration
-        )
-        for component in decision
-    }
+    effective = _evaluated_components(statuses)
     if all(bool(effective[component].get("verified")) for component in decision):
         return "fresh" if all(bool(effective[component].get("fresh")) for component in decision) else "stale"
     return "unknown"
+
+
+def _freshness(revision: CatalogCourseRevision) -> str:
+    return _freshness_from_component_status(revision.component_status or {})
 
 
 def _has_conflicts(issues: Any) -> bool:
@@ -2792,27 +2904,47 @@ def _course_summary(
     draft: CatalogDraft | None,
     section_count: int,
 ) -> dict[str, Any]:
+    data = dict(draft.data or {}) if draft is not None else {}
+
+    def draft_field(key: str, fallback: Any) -> Any:
+        # An active draft is what the review surface acts on, so its content
+        # fields win here exactly as they do in the course detail.  Without
+        # this the row said "draft" while showing the published revision.
+        if draft is not None and key in data and data[key] is not None:
+            return data[key]
+        return fallback
+
+    draft_completeness = data.get("completeness") if draft is not None else None
+    completeness = draft_completeness if isinstance(draft_completeness, dict) else (revision.completeness or {})
+    draft_statuses = data.get("component_status") if draft is not None else None
+    component_status = draft_statuses if isinstance(draft_statuses, dict) else dict(revision.component_status or {})
+    draft_sections = data.get("sections") if draft is not None else None
+    if isinstance(draft_sections, list):
+        section_count = len(draft_sections)
+    catalog = _catalog_metadata(revision, release)
+    if draft is not None:
+        catalog["components"] = _jsonable(_evaluated_components(component_status))
     return {
         "course_code": course.course_code,
         # The spelling on the timetable, the transcript and the door of the
         # room: "CENG 331", not 5670331. The numeric code stays because it is
         # the catalog's key; this is what a person searches and reads.
         "display_code": display_code(course.course_code),
-        "department": course.department,
-        "title": revision.title,
-        "local_credits": float(revision.local_credits) if revision.local_credits is not None else None,
-        "ects": float(revision.ects) if revision.ects is not None else None,
-        "level": revision.level,
-        "availability": revision.availability,
-        "campus": revision.campus,
+        "department": draft_field("department", course.department),
+        "title": draft_field("title", revision.title),
+        "local_credits": _number(draft_field("local_credits", revision.local_credits)),
+        "ects": _number(draft_field("ects", revision.ects)),
+        "level": draft_field("level", revision.level),
+        "availability": draft_field("availability", revision.availability),
+        "campus": draft_field("campus", revision.campus),
         "state": "draft" if draft else revision.state,
-        "completeness": _jsonable(revision.completeness or {}),
-        "freshness": _freshness(revision),
+        "completeness": _jsonable(completeness),
+        "freshness": _freshness_from_component_status(component_status),
         "source_conflicts": _has_conflicts(draft.issues if draft else revision.issues),
         "draft_id": str(draft.id) if draft else None,
         "course_revision_id": str(revision.id),
         "section_count": section_count,
-        "_catalog": _catalog_metadata(revision, release),
+        "_catalog": catalog,
     }
 
 
@@ -3274,6 +3406,7 @@ async def course_detail(
     if course is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Course not found")
     release = await _release_for_term(db, organization_id, term, required=False)
+    draft = await _active_draft_for(db, organization_id, term.id, course.id)
     pair = (await _release_revisions(db, organization_id, release, course_code=course.course_code)) if release else []
     if pair:
         _, revision = pair[0]
@@ -3283,8 +3416,24 @@ async def course_detail(
         data["course_revision_id"] = str(revision.id)
         data["release_id"] = str(release.id) if release else None
         data["_catalog"] = _catalog_metadata(revision, release)
+        # Issues are admin review material, so they are attached here rather
+        # than in _revision_data, which the published reader also builds from.
+        data["issues"] = _jsonable(revision.issues or [])
+        if draft is not None:
+            # The published revision stays at the top level - content fields and
+            # release metadata - but the pending draft rides beside it.  Without
+            # this, a course that already has a release could not be edited
+            # after the next import created a draft: the editor read the
+            # published revision's number and the save was rejected.  The
+            # draft's state, issues and overrides are what the review surface
+            # acts on, so they win at the top level.
+            data["draft"] = serialize_draft(draft)
+            data["draft_id"] = str(draft.id)
+            data["draft_revision"] = int(draft.revision)
+            data["state"] = draft.state
+            data["issues"] = _jsonable(draft.issues or [])
+            data["field_overrides"] = _jsonable(draft.field_overrides or {})
     else:
-        draft = await _active_draft_for(db, organization_id, term.id, course.id)
         revision = await _latest_revision_for(db, organization_id, term.id, course.id)
         if draft is not None:
             data = await _draft_detail(db, draft, course, term, release)
@@ -3310,6 +3459,7 @@ async def course_detail(
     data["history"] = [
         {
             "id": str(item.id),
+            "action": item.state,
             "revision": item.revision,
             "state": item.state,
             "created_at": _iso(item.created_at),
@@ -4695,6 +4845,22 @@ async def list_catalog_releases(
         .limit(max(1, min(limit, 500)))
     )
     rows = (await db.scalars(stmt)).all()
+    release_ids = [row.id for row in rows]
+    course_counts: dict[UUID, int] = {}
+    if release_ids:
+        course_counts = {
+            release_id: int(count)
+            for release_id, count in (
+                await db.execute(
+                    select(CatalogReleaseItem.release_id, func.count())
+                    .where(
+                        CatalogReleaseItem.organization_id == organization_id,
+                        CatalogReleaseItem.release_id.in_(release_ids),
+                    )
+                    .group_by(CatalogReleaseItem.release_id)
+                )
+            ).all()
+        }
     return {
         "releases": [
             {
@@ -4706,6 +4872,7 @@ async def list_catalog_releases(
                 "created_at": _iso(row.created_at),
                 "expected_release_id": str(row.expected_release_id) if row.expected_release_id else None,
                 "target_release_id": str(row.target_release_id) if row.target_release_id else None,
+                "course_count": course_counts.get(row.id, 0),
                 "metadata": _jsonable(row.metadata_json or {}),
                 "active": bool(pointer and pointer.release_id == row.id),
             }

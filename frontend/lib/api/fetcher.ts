@@ -16,6 +16,20 @@ export type JsonFetchInit = Omit<RequestInit, "body"> & { body?: unknown };
 
 export function apiErrorMessage(status: number, payload: unknown): string {
   if (typeof payload === "string" && payload.trim()) return payload;
+  // FastAPI validation failures carry a list of problems under "detail".
+  // Rendering the first one with its field path turns an opaque 422 into
+  // something the operator can act on.
+  if (Array.isArray(payload)) {
+    const first = payload.find((item) => item && typeof item === "object");
+    if (first) {
+      const record = first as Record<string, unknown>;
+      const message = typeof record.msg === "string" && record.msg.trim() ? record.msg.trim() : null;
+      const location = Array.isArray(record.loc)
+        ? record.loc.filter((part) => typeof part === "string" || typeof part === "number").join(".")
+        : "";
+      if (message) return location ? `${location}: ${message}` : message;
+    }
+  }
   if (payload && typeof payload === "object") {
     const record = payload as Record<string, unknown>;
     for (const key of ["detail", "error", "message"] as const) {

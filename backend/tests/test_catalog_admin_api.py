@@ -141,6 +141,39 @@ async def test_courses_tab_draft_publish_and_read_contract(client, monkeypatch):
     drafts = (await client.get("/api/v1/admin/catalog/courses?term=20261&state=draft", headers=headers)).json()
     assert [row["course_code"] for row in drafts["courses"]] == ["2402202"]
 
+    # A draft over an already-published course must still be editable: the
+    # detail response keeps the published revision at the top level and nests
+    # the active draft beside it.  Before that, the editor read the published
+    # revision's number and every save was rejected.
+    reopened = await client.post("/api/v1/admin/catalog/drafts", headers=headers, json={
+        "term": "20261", "course_code": "2402201", "data": {"title": "Revised fixture"},
+        "reason": "Revise an already published course",
+    })
+    assert reopened.status_code == 201, reopened.text
+    revised = reopened.json()
+    detail = (await client.get("/api/v1/admin/catalog/courses/2402201?term=20261", headers=headers)).json()
+    assert detail["title"] == "Fixture Course", "the published revision stays at the top level"
+    assert detail["draft"]["id"] == revised["id"]
+    assert detail["draft_revision"] == revised["revision"]
+    assert detail["state"] == "draft"
+    edited = await client.patch(f"/api/v1/admin/catalog/drafts/{revised['id']}", headers=headers, json={
+        "expected_revision": revised["revision"],
+        "patch": {"title": "Revised fixture"},
+        "reason": "Revise an already published course",
+    })
+    assert edited.status_code == 200, edited.text
+    # The row is labelled "draft", so it must show what the draft holds rather
+    # than the published revision behind it.
+    rows = (await client.get("/api/v1/admin/catalog/courses?term=20261", headers=headers)).json()
+    revised_row = next(row for row in rows["courses"] if row["course_code"] == "2402201")
+    assert revised_row["state"] == "draft"
+    assert revised_row["draft_id"] == revised["id"]
+    assert revised_row["title"] == "Revised fixture"
+    # The release history has to say how many courses each release carries.
+    releases = (await client.get("/api/v1/admin/catalog/releases?term=20261", headers=headers)).json()
+    assert releases["releases"][0]["active"] is True
+    assert releases["releases"][0]["course_count"] == 1
+
 
 async def test_campus_admin_cannot_read_or_patch_another_organizations_draft(client, monkeypatch):
     admin = new_user_id()

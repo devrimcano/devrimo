@@ -9,16 +9,11 @@ from sqlalchemy import or_, select
 
 from app.academic_catalog import service
 from app.academic_catalog.models import (
-    CatalogAdminOverride, CatalogCourse, CatalogSourceObservation, CatalogTerm,
+    CatalogAdminOverride,
+    CatalogCourse,
+    CatalogSourceObservation,
+    CatalogTerm,
 )
-
-
-_FIELD_COMPONENT = {
-    "title": "details", "department": "listing", "local_credits": "details",
-    "ects": "details", "level": "details", "availability": "details",
-    "campus": "details", "is_thesis": "listing", "sections": "sections",
-    "prerequisite_groups": "prerequisites", "replacements": "replacements",
-}
 
 
 async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
@@ -80,7 +75,7 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
             data[field] = source.data[field]
         else:
             data.pop(field, None)
-        affected.add(_FIELD_COMPONENT.get(field, field))
+        affected.add(service.FIELD_COMPONENT_MAP.get(field, field))
         if field == "sections":
             affected.add("constraints")
         records = (await db.scalars(select(CatalogAdminOverride).where(
@@ -100,17 +95,20 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
             value={"removed_override": value, "restored_source": field in source.data},
             reason=reason, active=False, removed_at=now, created_by=updated_by,
         ))
-    remaining_components = {_FIELD_COMPONENT.get(field, field) for field in overrides}
-    if "sections" in overrides:
-        remaining_components.add("constraints")
     for component in affected:
-        meta = dict((source.data.get("component_status") or {}).get(component) or {
+        component_status[component] = dict((source.data.get("component_status") or {}).get(component) or {
             "component": component, "verified": False, "fresh": False,
             "source_status": "unknown", "source_fetched_at": None, "observed_at": None,
         })
-        if component in remaining_components:
-            meta.update(verified=False, fresh=False)
-        component_status[component] = meta
+    # A component that still carries a correction keeps its administrator
+    # status: the replayed source evidence describes the fields that came
+    # back, not the one an administrator is still overriding.  Re-deriving it
+    # also preserves a remaining override's own verification instead of
+    # blanking it because a sibling field was restored.
+    remaining_components = set(service.override_components(overrides)) & affected
+    service.apply_override_component_status(
+        component_status, overrides, remaining_components, observed_at=service._iso(now)
+    )
     data["component_status"] = component_status
     data["_source_observation_ids"] = list(dict.fromkeys(
         [*(data.get("_source_observation_ids") or []), *restored_ids]
@@ -120,6 +118,74 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
     draft.issues = [issue for issue in (draft.issues or [])
                     if not (isinstance(issue, dict) and issue.get("code") == "source_conflict"
                             and issue.get("field") in selected)]
+    service._sync_manual_verification_issue(draft)
+    draft.reason = reason
+    draft.updated_by = updated_by
+    draft.revision += 1
+    await db.flush()
+    return draft
+
+
+async def verify_overrides(db, organization_id: UUID, draft_id: UUID, *,
+                           expected_revision: int, fields: list[str], reason: str,
+                           verification_evidence: str, updated_by: UUID):
+    """Record that retained corrections were checked against the real source.
+
+    Verification is a separate operation from editing.  An administrator
+    normally corrects a value first and confirms it against the registrar
+    later, and the draft editor only sends the fields it actually changed --
+    so re-submitting an unchanged value is not a route to supplying evidence.
+    Without this the ``manual_verification_required`` warning could only be
+    cleared by deleting the correction it describes.
+    """
+
+    draft = await service.get_draft(db, organization_id, draft_id, for_update=True)
+    if draft is None:
+        raise HTTPException(404, "Draft not found")
+    if draft.state != "draft":
+        raise HTTPException(409, "Only an active draft can be edited")
+    if draft.revision != expected_revision:
+        raise service.CatalogConflict("Draft changed since it was read", current_revision=draft.revision)
+    evidence = str(verification_evidence or "").strip()
+    if len(evidence) < 3:
+        raise HTTPException(422, "Explicit verification requires source or review evidence")
+    selected = set(fields)
+    overrides = dict(draft.field_overrides or {})
+    if not selected or not selected.issubset(overrides):
+        raise HTTPException(422, "Select existing override fields")
+
+    now = datetime.now(UTC)
+    for field in selected:
+        entry = overrides[field]
+        overrides[field] = {
+            **(entry if isinstance(entry, dict) else {"value": entry}),
+            "verification_evidence": evidence,
+            "verified_at": service._iso(now),
+            "verified_by": str(updated_by) if updated_by else None,
+            "verification_reason": reason,
+        }
+        db.add(CatalogAdminOverride(
+            organization_id=organization_id, term_id=draft.term_id,
+            course_id=draft.course_id, draft_id=draft.id, field_name=field,
+            # The correction itself is untouched, so the active row still
+            # describes it.  This is the evidence record beside it.
+            value={"verified_override": (overrides[field] or {}).get("value"), "evidence": evidence},
+            reason=reason, active=False, created_by=updated_by,
+        ))
+
+    data = dict(draft.data or {})
+    component_status = dict(data.get("component_status") or {})
+    # Only the components the verified fields gate.  A component whose
+    # overrides were left alone keeps the source timestamps it already had.
+    grouped = service.override_components(overrides)
+    affected = {name for name, names in grouped.items() if selected.intersection(names)}
+    service.apply_override_component_status(
+        component_status, overrides, affected, observed_at=service._iso(now)
+    )
+    data["component_status"] = component_status
+    draft.data = data
+    draft.field_overrides = overrides
+    service._sync_manual_verification_issue(draft)
     draft.reason = reason
     draft.updated_by = updated_by
     draft.revision += 1

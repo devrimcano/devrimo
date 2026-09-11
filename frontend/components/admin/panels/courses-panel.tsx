@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useId, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BookOpenIcon,
@@ -516,6 +516,20 @@ function formToPatch(form: CourseForm): CatalogDraftPatch {
   };
 }
 
+function changedFormPatch(form: CourseForm, baseline: CourseForm): CatalogDraftPatch {
+  // A save must not pin every field as an admin override.  Sending the whole
+  // form freezes unrelated values - including published sections a sparse
+  // manual draft never held - against every later SAIS import.  Compare the
+  // normalized patches so only what the operator actually touched is sent.
+  const next = formToPatch(form) as Record<string, unknown>;
+  const previous = formToPatch(baseline) as Record<string, unknown>;
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(next)) {
+    if (JSON.stringify(value) !== JSON.stringify(previous[key])) changed[key] = value;
+  }
+  return changed as CatalogDraftPatch;
+}
+
 function sourceConflictItems(row: CatalogCourseRow | null, detail: CatalogCourseDetail | null): CatalogSourceConflict[] {
   if (detail?.source_conflicts?.length) return detail.source_conflicts;
   const issues = detail?.issues ?? [];
@@ -538,6 +552,28 @@ function draftOverrideValues(detail: CatalogCourseDetail): Record<string, unknow
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+/**
+ * A retained override is stored as `{ value, reason, ... }` and carries its
+ * verification evidence once an administrator has checked it against the
+ * source.  Older rows are bare values, so unwrap defensively.
+ */
+type CatalogOverrideEntry = {
+  value?: unknown;
+  reason?: string | null;
+  verification_evidence?: string | null;
+  verified_at?: string | null;
+};
+
+function overrideEntry(value: unknown): CatalogOverrideEntry {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as CatalogOverrideEntry
+    : { value };
+}
+
+function overrideIsVerified(value: unknown): boolean {
+  return String(overrideEntry(value).verification_evidence ?? "").trim().length > 0;
 }
 
 function importItems(data: CatalogImportsResponse | undefined): CatalogImportJob[] {
@@ -612,10 +648,16 @@ export function CoursesPanel({
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  const changeTerm = (value: string) => { setTerm(value); setOffset(0); };
-  const changeDepartment = (value: string) => { setDepartment(value); setOffset(0); };
-  const changeState = (value: string) => { setStateFilter(value); setOffset(0); };
-  const changeSearch = (value: string) => { setSearch(value); setOffset(0); };
+  const resetSelection = () => setSelectedCodes(new Set());
+  const changeTerm = (value: string) => { setTerm(value); setOffset(0); resetSelection(); };
+  const changeDepartment = (value: string) => { setDepartment(value); setOffset(0); resetSelection(); };
+  const changeState = (value: string) => { setStateFilter(value); setOffset(0); resetSelection(); };
+  const changeSearch = (value: string) => { setSearch(value); setOffset(0); resetSelection(); };
+  // The batch bar counts and the publish list are built from the rows on this
+  // page, so a selection must not survive a page or scope change: an invisible
+  // selection would either vanish from the count or be sent by "Refresh
+  // selected" for a different scope.
+  const changeOffset = (value: number) => { setOffset(value); resetSelection(); };
 
   const releases = useQuery({
     queryKey: ["admin", "catalog", "releases", term],
@@ -759,7 +801,7 @@ export function CoursesPanel({
             <CourseFilters term={term} setTerm={changeTerm} department={department} setDepartment={changeDepartment} search={search} setSearch={changeSearch} state={stateFilter} setState={changeState} />
             <CoverageSummary data={courses.data} />
             {selectedCodes.size ? <BatchBar selectedRows={selectedRows} canWrite={canWrite} canPublish={canPublish} conflictTotal={conflictTotal} onImport={() => setImportOpen(true)} onPublish={() => setPublishOpen(true)} onClear={() => setSelectedCodes(new Set())} /> : null}
-            {courses.isLoading ? <Skeleton className="h-72 rounded-xl" /> : courses.error ? <ErrorState error={courses.error} retry={() => void courses.refetch()} /> : <CourseTable rows={rows} selected={selectedCodes} onSelect={toggleSelected} onOpen={setSelectedCourse} total={courses.data?.total ?? 0} offset={offset} setOffset={setOffset} />}
+            {courses.isLoading ? <Skeleton className="h-72 rounded-xl" /> : courses.error ? <ErrorState error={courses.error} retry={() => void courses.refetch()} /> : <CourseTable rows={rows} selected={selectedCodes} onSelect={toggleSelected} onOpen={setSelectedCourse} total={courses.data?.total ?? 0} offset={offset} setOffset={changeOffset} />}
             {selectedCourse ? <CourseDetailSheet row={selectedCourse} detail={detail.data} loading={detail.isLoading} error={detail.error} term={term} canRead={canRead} canWrite={canWrite} canPublish={canPublish} onClose={() => setSelectedCourse(null)} onRefresh={refresh} onCreateDraft={() => setCreateOpen(true)} /> : null}
           </>
         ) : view === "imports" ? (
@@ -784,6 +826,7 @@ function Field({
   placeholder,
   className,
   min,
+  max,
   step,
   maxLength,
 }: {
@@ -794,6 +837,7 @@ function Field({
   placeholder?: string;
   className?: string;
   min?: string;
+  max?: number;
   step?: string;
   maxLength?: number;
 }) {
@@ -802,7 +846,7 @@ function Field({
   return (
     <div className={cn("min-w-0 space-y-1.5", className)}>
       <Label htmlFor={id} className="text-xs text-muted-foreground">{label}</Label>
-      <Input id={id} value={value} onChange={(event) => onChange(event.target.value)} type={type} placeholder={placeholder} min={min} step={step} maxLength={maxLength} />
+      <Input id={id} value={value} onChange={(event) => onChange(event.target.value)} type={type} placeholder={placeholder} min={min} max={max} step={step} maxLength={maxLength} />
     </div>
   );
 }
@@ -925,6 +969,11 @@ function CourseTable({
 }) {
   const { pick } = useLocale();
   const allSelected = rows.length > 0 && rows.every((row) => selected.has(row.course_code));
+  const someSelected = rows.some((row) => selected.has(row.course_code));
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected && !allSelected;
+  }, [allSelected, someSelected]);
   const toggleAll = () => rows.forEach((row) => {
     const isSelected = selected.has(row.course_code);
     if (allSelected === isSelected) onSelect(row.course_code);
@@ -934,7 +983,7 @@ function CourseTable({
     <Card className="overflow-hidden">
       <Table>
         <TableHeader><TableRow>
-          <TableHead className="w-10"><input aria-label={pick({ tr: "Sayfadaki tüm dersleri seç", en: "Select all courses on page" })} type="checkbox" checked={allSelected} onChange={toggleAll} /></TableHead>
+          <TableHead className="w-10"><input ref={selectAllRef} aria-label={pick({ tr: "Sayfadaki tüm dersleri seç", en: "Select all courses on page" })} aria-checked={someSelected && !allSelected ? "mixed" : allSelected} type="checkbox" checked={allSelected} onChange={toggleAll} /></TableHead>
           <TableHead>{pick({ tr: "Ders", en: "Course" })}</TableHead>
           <TableHead>{pick({ tr: "Bölüm", en: "Department" })}</TableHead>
           <TableHead>{pick({ tr: "Kapsam", en: "Coverage" })}</TableHead>
@@ -994,6 +1043,10 @@ function CourseDetailSheet({
   onCreateDraft: () => void;
 }) {
   const { pick } = useLocale();
+  // The active tab lives beside the revision-keyed content: removing an
+  // override bumps the draft revision, and a tab held inside the keyed child
+  // would snap back to "overview" while the operator is still on Sources.
+  const [tab, setTab] = useState<CourseTab>("overview");
   return (
     <Card className="border-primary/30 shadow-sm">
       <CardHeader className="flex flex-wrap items-start justify-between gap-3 border-b">
@@ -1004,7 +1057,7 @@ function CourseDetailSheet({
         <div className="flex gap-2"><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}><RefreshCwIcon className={cn(loading && "animate-spin")} />{pick({ tr: "Yenile", en: "Refresh" })}</Button><Button variant="ghost" size="sm" onClick={onClose}>{pick({ tr: "Kapat", en: "Close" })}</Button></div>
       </CardHeader>
       <CardContent className="pt-4">
-        {loading ? <div className="space-y-3"><Skeleton className="h-8 w-1/2" /><Skeleton className="h-32" /></div> : error ? <ErrorState error={error} retry={onRefresh} /> : detail ? <CourseDetailContent key={`${detail.course_code}:${detail.draft_revision ?? detail.draft?.revision ?? "base"}`} row={row} detail={detail} canRead={canRead} canWrite={canWrite} canPublish={canPublish} onRefresh={onRefresh} onCreateDraft={onCreateDraft} /> : <EmptyState title={pick({ tr: "Ders ayrıntısı yok", en: "Course details unavailable" })} />}
+        {loading ? <div className="space-y-3"><Skeleton className="h-8 w-1/2" /><Skeleton className="h-32" /></div> : error ? <ErrorState error={error} retry={onRefresh} /> : detail ? <CourseDetailContent key={`${detail.course_code}:${detail.draft_revision ?? detail.draft?.revision ?? "base"}`} row={row} detail={detail} canRead={canRead} canWrite={canWrite} canPublish={canPublish} onRefresh={onRefresh} onCreateDraft={onCreateDraft} tab={tab} onTabChange={setTab} /> : <EmptyState title={pick({ tr: "Ders ayrıntısı yok", en: "Course details unavailable" })} />}
       </CardContent>
     </Card>
   );
@@ -1018,6 +1071,8 @@ function CourseDetailContent({
   canPublish,
   onRefresh,
   onCreateDraft,
+  tab,
+  onTabChange,
 }: {
   row: CatalogCourseRow;
   detail: CatalogCourseDetail;
@@ -1026,26 +1081,30 @@ function CourseDetailContent({
   canPublish: boolean;
   onRefresh: () => void;
   onCreateDraft: () => void;
+  tab: CourseTab;
+  onTabChange: (value: CourseTab) => void;
 }) {
   const { pick, locale } = useLocale();
-  const [tab, setTab] = useState<CourseTab>("overview");
   const [editing, setEditing] = useState(false);
   const draftDetail = draftDetailFrom(detail);
   const [form, setForm] = useState<CourseForm>(() => formFromDetail(draftDetail));
+  const [baseline] = useState<CourseForm>(() => formFromDetail(draftDetail));
+  const changedPatch = changedFormPatch(form, baseline);
+  const dirty = Object.keys(changedPatch).length > 0;
   const [reason, setReason] = useState("");
   const [verify, setVerify] = useState(false);
   const [verificationEvidence, setVerificationEvidence] = useState("");
-  const draft = detail.draft ?? null;
-  const draftId = row.draft_id ?? detail.draft_id ?? draft?.id ?? null;
-  const expectedRevision = detail.draft_revision ?? draft?.revision ?? 0;
+  const draftId = detail.draft?.id ?? detail.draft_id ?? row.draft_id ?? null;
+  const expectedRevision = detail.draft?.revision ?? detail.draft_revision ?? null;
   const conflicts = sourceConflictItems(row, detail);
   const updateDraft = useMutation({
     mutationFn: () => {
       if (!draftId) throw new Error(pick({ tr: "Önce bir taslak oluşturun.", en: "Create a draft before editing." }));
+      if (expectedRevision === null) throw new Error(pick({ tr: "Taslak sürümü bulunamadı.", en: "The draft revision is unavailable." }));
       if (reason.trim().length < 3) throw new Error(pick({ tr: "Değişiklik nedeni en az 3 karakter olmalı.", en: "A change reason must be at least 3 characters." }));
       return adminMutate<CatalogDraft>(`catalog/drafts/${encodeURIComponent(draftId)}`, "PATCH", {
         expected_revision: expectedRevision,
-        patch: formToPatch(form),
+        patch: changedPatch,
         reason: reason.trim(),
         verify,
         verification_evidence: verify ? verificationEvidence.trim() : undefined,
@@ -1078,8 +1137,8 @@ function CourseDetailContent({
         {conflicts.length ? <Badge variant="destructive" className="gap-1"><ShieldAlertIcon />{conflicts.length} {pick({ tr: "kaynak çakışması", en: "source conflicts" })}</Badge> : null}
         <span className="ml-auto flex gap-2">{canWrite ? <Button size="sm" variant={editing ? "secondary" : "outline"} onClick={startEditing} disabled={updateDraft.isPending}><BookOpenIcon />{draftId ? pick({ tr: editing ? "Düzenleniyor" : "Düzenle", en: editing ? "Editing" : "Edit" }) : pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button> : null}{canPublish && draftId ? <Badge variant="secondary">{pick({ tr: "Yayın yetkisi var", en: "Can publish" })}</Badge> : null}</span>
       </div>
-      {editing ? <CourseEditForm form={form} setForm={setForm} reason={reason} setReason={setReason} verify={verify} setVerify={setVerify} verificationEvidence={verificationEvidence} setVerificationEvidence={setVerificationEvidence} pending={updateDraft.isPending} onCancel={() => setEditing(false)} onSave={() => updateDraft.mutate()} /> : null}
-      <SectionNav value={tab} onChange={(value) => setTab(value as CourseTab)} items={[
+      {editing ? <CourseEditForm form={form} setForm={setForm} reason={reason} setReason={setReason} verify={verify} setVerify={setVerify} verificationEvidence={verificationEvidence} setVerificationEvidence={setVerificationEvidence} pending={updateDraft.isPending} dirty={dirty} onCancel={() => setEditing(false)} onSave={() => updateDraft.mutate()} /> : null}
+      <SectionNav value={tab} onChange={(value) => onTabChange(value as CourseTab)} items={[
         { id: "overview", label: pick({ tr: "Genel bakış", en: "Overview" }) },
         { id: "sections", label: pick({ tr: "Şubeler / toplantılar", en: "Sections / meetings" }) },
         { id: "rules", label: pick({ tr: "Kurallar", en: "Rules" }) },
@@ -1317,6 +1376,7 @@ function ObservationInspector({ observation, canRead }: { observation: CatalogSo
                 <JsonBlock label={pick({ tr: "Ayrıştırılmış aday", en: "Parsed candidate" })} value={detail.data.candidate_data} />
               </div>
               {detail.data.issues.length ? <JsonBlock label={pick({ tr: "Ayrıştırma sorunları", en: "Parser issues" })} value={detail.data.issues} /> : null}
+              {detail.data.payload_truncated ? <p className="text-xs text-amber-700 dark:text-amber-300">{pick({ tr: "Ham yük 64.000 karaktere kısaltıldı; tamamı veritabanında saklıdır.", en: "The raw payload was shortened to 64,000 characters; the full copy remains stored." })}</p> : null}
             </div>
           ) : <p className="text-xs text-muted-foreground">{pick({ tr: "Gözlem ayrıntısı yok.", en: "Observation details unavailable." })}</p>}
         </div>
@@ -1330,11 +1390,13 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
   const client = useQueryClient();
   const overrideValues = draftOverrideValues(detail);
   const overrideFields = Object.keys(overrideValues).sort();
-  const draftId = row.draft_id ?? detail.draft_id ?? detail.draft?.id ?? null;
-  const expectedRevision = detail.draft_revision ?? detail.draft?.revision ?? null;
+  const draftId = detail.draft?.id ?? detail.draft_id ?? row.draft_id ?? null;
+  const expectedRevision = detail.draft?.revision ?? detail.draft_revision ?? null;
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [reason, setReason] = useState("");
+  const [evidence, setEvidence] = useState("");
   const selectedOverrideFields = overrideFields.filter((field) => selectedFields.has(field));
+  const pendingFields = overrideFields.filter((field) => !overrideIsVerified(overrideValues[field]));
 
   const removeOverrides = useMutation({
     mutationFn: () => {
@@ -1360,6 +1422,35 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
     onError: (error) => toast.error(error.message),
   });
 
+  // Verifying is deliberately its own call rather than a re-save of the same
+  // value: the editor only sends fields it changed, so an unchanged value is
+  // not a route to supplying evidence for a correction made earlier.
+  const verifyOverrides = useMutation({
+    mutationFn: () => {
+      const fields = selectedOverrideFields;
+      if (!draftId) throw new Error(pick({ tr: "Önce bir taslak oluşturun.", en: "Create a draft before verifying overrides." }));
+      if (expectedRevision === null) throw new Error(pick({ tr: "Taslak sürümü bulunamadı.", en: "The draft revision is unavailable." }));
+      if (!fields.length) throw new Error(pick({ tr: "Doğrulanacak alanları seçin.", en: "Select at least one override to verify." }));
+      if (reason.trim().length < 3) throw new Error(pick({ tr: "Gerekçe en az 3 karakter olmalı.", en: "A reason must be at least 3 characters." }));
+      if (evidence.trim().length < 3) throw new Error(pick({ tr: "Doğrulama kanıtı en az 3 karakter olmalı.", en: "Verification evidence must be at least 3 characters." }));
+      return adminMutate<CatalogDraft>(`catalog/drafts/${encodeURIComponent(draftId)}/verify-overrides`, "POST", {
+        expected_revision: expectedRevision,
+        fields,
+        reason: reason.trim(),
+        verification_evidence: evidence.trim(),
+      });
+    },
+    onSuccess: () => {
+      toast.success(pick({ tr: "Seçilen düzeltmeler kaynağa karşı doğrulandı.", en: "Selected overrides were verified against the source." }));
+      setSelectedFields(new Set());
+      setReason("");
+      setEvidence("");
+      void client.invalidateQueries({ queryKey: ["admin", "catalog"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const busy = removeOverrides.isPending || verifyOverrides.isPending;
+
   return (
     <Card size="sm" className={overrideFields.length ? "border-amber-500/40" : undefined}>
       <CardHeader>
@@ -1379,13 +1470,21 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
                     if (next.has(field)) next.delete(field); else next.add(field);
                     return next;
                   })}
-                  disabled={!canWrite || removeOverrides.isPending}
+                  disabled={!canWrite || busy}
                   aria-label={pick({ tr: `${field} düzeltmesini seç`, en: `Select ${field} override` })}
                   className="mt-0.5"
                 />
                 <span className="min-w-0 flex-1">
-                  <span className="block break-words font-mono">{field}</span>
-                  <span className="mt-1 block break-words text-xs text-muted-foreground">{valueLabel(overrideValues[field])}</span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="break-words font-mono">{field}</span>
+                    {overrideIsVerified(overrideValues[field])
+                      ? <Badge variant="outline" className="gap-1 text-emerald-700 dark:text-emerald-300"><CheckCircle2Icon className="size-3" />{pick({ tr: "Doğrulandı", en: "Verified" })}</Badge>
+                      : <Badge variant="outline" className="text-amber-700 dark:text-amber-300">{pick({ tr: "Doğrulama bekliyor", en: "Pending verification" })}</Badge>}
+                  </span>
+                  <span className="mt-1 block break-words text-xs text-muted-foreground">{valueLabel(overrideEntry(overrideValues[field]).value)}</span>
+                  {overrideIsVerified(overrideValues[field])
+                    ? <span className="mt-1 block break-words text-xs text-muted-foreground">{pick({ tr: "Kanıt", en: "Evidence" })}: {overrideEntry(overrideValues[field]).verification_evidence}</span>
+                    : null}
                 </span>
               </label>
             ))}
@@ -1393,28 +1492,46 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
         ) : <p className="text-sm text-muted-foreground">{pick({ tr: "Bu taslakta kayıtlı düzeltme yok.", en: "This draft has no recorded overrides." })}</p>}
         {overrideFields.length && canWrite ? (
           <div className="space-y-2 border-t pt-3">
-            <Label htmlFor="catalog-override-removal-reason" className="text-xs text-muted-foreground">{pick({ tr: "Kaldırma gerekçesi", en: "Removal reason" })}</Label>
+            <Label htmlFor="catalog-override-reason" className="text-xs text-muted-foreground">{pick({ tr: "Gerekçe", en: "Reason" })}</Label>
             <Textarea
-              id="catalog-override-removal-reason"
+              id="catalog-override-reason"
               value={reason}
               onChange={(event) => setReason(event.target.value)}
-              placeholder={pick({ tr: "Kaynak değerine dönme nedeninizi yazın", en: "Explain why the source value should be restored" })}
-              disabled={removeOverrides.isPending}
+              placeholder={pick({ tr: "Kaldırma veya doğrulama nedeninizi yazın", en: "Explain why these overrides are being removed or verified" })}
+              disabled={busy}
+              maxLength={1000}
             />
-            <p className="text-xs text-muted-foreground">{pick({ tr: "Seçilen düzeltmeler taslaktan kaldırılır; değişikliklerin yayına girmesi için ayrıca yayınlayın. En az 3 karakter.", en: "Selected overrides are removed from the draft; publish separately for the change to take effect. At least 3 characters." })}</p>
-            <div className="flex justify-end">
+            <p className="text-xs text-muted-foreground">{pick({ tr: "Her iki işlem de yalnızca taslağı değiştirir; yayına girmesi için ayrıca yayınlayın. En az 3 karakter.", en: "Both actions change the draft only; publish separately for them to take effect. At least 3 characters." })}</p>
+            <Label htmlFor="catalog-override-evidence" className="text-xs text-muted-foreground">{pick({ tr: "Doğrulama kanıtı", en: "Verification evidence" })}</Label>
+            <Textarea
+              id="catalog-override-evidence"
+              value={evidence}
+              onChange={(event) => setEvidence(event.target.value)}
+              placeholder={pick({ tr: "Kaynak URL’si, kayıt adı veya inceleme notu", en: "Source URL, record name, or review note" })}
+              disabled={busy}
+              maxLength={4000}
+            />
+            <p className="text-xs text-muted-foreground">{pick({ tr: `Yalnızca doğrulama için gerekir. ${pendingFields.length} düzeltme doğrulama bekliyor.`, en: `Required to verify only. ${pendingFields.length} override(s) awaiting verification.` })}</p>
+            <div className="flex flex-wrap justify-end gap-2">
               <Button
                 variant="destructive"
-                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || !draftId || expectedRevision === null || removeOverrides.isPending}
+                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || !draftId || expectedRevision === null || busy}
                 onClick={() => removeOverrides.mutate()}
               >
                 {removeOverrides.isPending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}
                 {pick({ tr: "Seçilen düzeltmeleri kaldır", en: "Remove selected overrides" })}
               </Button>
+              <Button
+                disabled={!selectedOverrideFields.length || reason.trim().length < 3 || evidence.trim().length < 3 || !draftId || expectedRevision === null || busy}
+                onClick={() => verifyOverrides.mutate()}
+              >
+                {verifyOverrides.isPending ? <Loader2Icon className="animate-spin" /> : <CheckCircle2Icon />}
+                {pick({ tr: "Seçilenleri doğrula", en: "Verify selected overrides" })}
+              </Button>
             </div>
           </div>
         ) : null}
-        {!canWrite && overrideFields.length ? <p className="text-xs text-muted-foreground">{pick({ tr: "Düzeltmeleri kaldırmak için katalog yazma yetkisi gerekir.", en: "Catalog write permission is required to remove overrides." })}</p> : null}
+        {!canWrite && overrideFields.length ? <p className="text-xs text-muted-foreground">{pick({ tr: "Düzeltmeleri kaldırmak veya doğrulamak için katalog yazma yetkisi gerekir.", en: "Catalog write permission is required to remove or verify overrides." })}</p> : null}
       </CardContent>
     </Card>
   );
@@ -1423,7 +1540,7 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
 function HistoryView({ entries, locale }: { entries: CatalogHistoryEntry[]; locale: "tr" | "en" }) {
   const { pick } = useLocale();
   if (!entries.length) return <EmptyState title={pick({ tr: "Geçmiş kaydı yok", en: "No history yet" })} />;
-  return <div className="space-y-2">{entries.map((entry, index) => <div className="flex flex-wrap items-start gap-3 rounded-xl border p-3" key={`${entry.id ?? entry.action}-${index}`}><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted"><HistoryIcon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><StatusBadge value={entry.action} />{entry.revision !== null && entry.revision !== undefined ? <Badge variant="outline">r{entry.revision}</Badge> : null}<span className="text-xs text-muted-foreground">{formatDate(entry.created_at, locale)}</span></div><p className="mt-1 text-sm">{entry.reason ?? pick({ tr: "Neden belirtilmedi", en: "No reason provided" })}</p>{entry.actor ? <p className="text-xs text-muted-foreground">{entry.actor}</p> : null}</div></div>)}</div>;
+  return <div className="space-y-2">{entries.map((entry, index) => <div className="flex flex-wrap items-start gap-3 rounded-xl border p-3" key={`${entry.id ?? entry.action}-${index}`}><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted"><HistoryIcon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><StatusBadge value={entry.action} />{entry.revision !== null && entry.revision !== undefined ? <Badge variant="outline">r{entry.revision}</Badge> : null}<span className="text-xs text-muted-foreground">{formatDate(entry.created_at, locale)}</span></div>{entry.reason ? <p className="mt-1 text-sm">{entry.reason}</p> : null}{entry.actor ? <p className="text-xs text-muted-foreground">{entry.actor}</p> : null}</div></div>)}</div>;
 }
 
 function updateAt<T>(items: T[], index: number, patch: Partial<T>): T[] {
@@ -1448,6 +1565,7 @@ function CourseEditForm({
   verificationEvidence,
   setVerificationEvidence,
   pending,
+  dirty,
   onCancel,
   onSave,
 }: {
@@ -1460,12 +1578,13 @@ function CourseEditForm({
   verificationEvidence: string;
   setVerificationEvidence: (value: string) => void;
   pending: boolean;
+  dirty: boolean;
   onCancel: () => void;
   onSave: () => void;
 }) {
   const { pick } = useLocale();
-  const valid = form.title.trim().length > 0 && reason.trim().length >= 3 && form.sections.every((section) => section.section_code.trim().length > 0) && (!verify || verificationEvidence.trim().length >= 3);
-  return <Card className="border-primary/30 bg-primary/[0.02]"><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><BookOpenIcon className="size-4" />{pick({ tr: "Taslağı düzenle", en: "Edit draft" })}</CardTitle><CardDescription>{pick({ tr: "Alanlar türlerine göre düzenlenir; kaydetme mevcut sürüme karşı iyimserlik kontrolü yapar.", en: "Fields are edited by type; saving checks the draft against its current revision." })}</CardDescription></CardHeader><CardContent className="space-y-5"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label={pick({ tr: "Başlık", en: "Title" })} value={form.title} onChange={(value) => setForm((current) => ({ ...current, title: value }))} className="sm:col-span-2" /><Field label={pick({ tr: "Bölüm", en: "Department" })} value={form.department} onChange={(value) => setForm((current) => ({ ...current, department: value }))} /><Field label={pick({ tr: "Kredi", en: "Credits" })} type="number" step="0.5" value={form.credits} onChange={(value) => setForm((current) => ({ ...current, credits: value }))} /><Field label="ECTS" type="number" step="0.5" value={form.ects} onChange={(value) => setForm((current) => ({ ...current, ects: value }))} /><Field label={pick({ tr: "Seviye", en: "Level" })} value={form.level} onChange={(value) => setForm((current) => ({ ...current, level: value }))} /><Field label={pick({ tr: "Açılma durumu", en: "Availability" })} value={form.availability} onChange={(value) => setForm((current) => ({ ...current, availability: value }))} /><Field label={pick({ tr: "Kampüs", en: "Campus" })} value={form.campus} onChange={(value) => setForm((current) => ({ ...current, campus: value }))} /><label className="flex items-center gap-2 self-end pb-1 text-sm"><input type="checkbox" checked={form.is_thesis} onChange={(event) => setForm((current) => ({ ...current, is_thesis: event.target.checked }))} />{pick({ tr: "Tez dersi", en: "Thesis course" })}</label></div><SectionEditors sections={form.sections} onChange={(sections) => setForm((current) => ({ ...current, sections }))} /><RulesEditor groups={form.prerequisite_groups} replacements={form.replacements} onGroupsChange={(prerequisite_groups) => setForm((current) => ({ ...current, prerequisite_groups }))} onReplacementsChange={(replacements) => setForm((current) => ({ ...current, replacements }))} /><div className="space-y-1.5"><Label htmlFor="catalog-edit-reason" className="text-xs text-muted-foreground">{pick({ tr: "Değişiklik nedeni", en: "Change reason" })}</Label><Textarea id="catalog-edit-reason" value={reason} onChange={(event) => setReason(event.target.value)} placeholder={pick({ tr: "Bu düzeltmeyi neden yaptığınızı yazın", en: "Explain why this correction is needed" })} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div><label className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3 text-sm"><input type="checkbox" checked={verify} onChange={(event) => setVerify(event.target.checked)} className="mt-0.5" /><span><strong>{pick({ tr: "Bu düzeltmeyi doğrula", en: "Verify this correction" })}</strong><span className="mt-1 block text-xs text-muted-foreground">{pick({ tr: "Kaynak kontrolü veya onaylı kayıt kanıtı girildiğinde planlayıcı bu alanı doğrulanmış sayabilir.", en: "The planner can treat this field as verified after source or approved-record evidence is recorded." })}</span></span></label>{verify ? <div className="space-y-1.5"><Label htmlFor="catalog-verification-evidence" className="text-xs text-muted-foreground">{pick({ tr: "Doğrulama kanıtı", en: "Verification evidence" })}</Label><Textarea id="catalog-verification-evidence" value={verificationEvidence} onChange={(event) => setVerificationEvidence(event.target.value)} placeholder={pick({ tr: "Kaynak URL’si, kayıt adı veya inceleme notu", en: "Source URL, record name, or review note" })} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div> : null}<div className="flex flex-wrap justify-end gap-2 border-t pt-4"><Button variant="outline" onClick={onCancel} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button onClick={onSave} disabled={!valid || pending}>{pending ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}{pick({ tr: "Taslağı kaydet", en: "Save draft" })}</Button></div></CardContent></Card>;
+  const valid = dirty && form.title.trim().length > 0 && reason.trim().length >= 3 && form.sections.every((section) => section.section_code.trim().length > 0) && (!verify || verificationEvidence.trim().length >= 3);
+  return <Card className="border-primary/30 bg-primary/[0.02]"><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><BookOpenIcon className="size-4" />{pick({ tr: "Taslağı düzenle", en: "Edit draft" })}</CardTitle><CardDescription>{pick({ tr: "Alanlar türlerine göre düzenlenir; kaydetme mevcut sürüme karşı iyimserlik kontrolü yapar.", en: "Fields are edited by type; saving checks the draft against its current revision." })}</CardDescription></CardHeader><CardContent className="space-y-5"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label={pick({ tr: "Başlık", en: "Title" })} value={form.title} onChange={(value) => setForm((current) => ({ ...current, title: value }))} className="sm:col-span-2" maxLength={2000} /><Field label={pick({ tr: "Bölüm", en: "Department" })} value={form.department} onChange={(value) => setForm((current) => ({ ...current, department: value }))} maxLength={32} /><Field label={pick({ tr: "Kredi", en: "Credits" })} type="number" step="0.5" min="0" max={100} value={form.credits} onChange={(value) => setForm((current) => ({ ...current, credits: value }))} /><Field label="ECTS" type="number" step="0.5" min="0" max={100} value={form.ects} onChange={(value) => setForm((current) => ({ ...current, ects: value }))} /><Field label={pick({ tr: "Seviye", en: "Level" })} value={form.level} onChange={(value) => setForm((current) => ({ ...current, level: value }))} maxLength={64} /><Field label={pick({ tr: "Açılma durumu", en: "Availability" })} value={form.availability} onChange={(value) => setForm((current) => ({ ...current, availability: value }))} maxLength={128} /><Field label={pick({ tr: "Kampüs", en: "Campus" })} value={form.campus} onChange={(value) => setForm((current) => ({ ...current, campus: value }))} maxLength={128} /><label className="flex items-center gap-2 self-end pb-1 text-sm"><input type="checkbox" checked={form.is_thesis} onChange={(event) => setForm((current) => ({ ...current, is_thesis: event.target.checked }))} />{pick({ tr: "Tez dersi", en: "Thesis course" })}</label></div><SectionEditors sections={form.sections} onChange={(sections) => setForm((current) => ({ ...current, sections }))} /><RulesEditor groups={form.prerequisite_groups} replacements={form.replacements} onGroupsChange={(prerequisite_groups) => setForm((current) => ({ ...current, prerequisite_groups }))} onReplacementsChange={(replacements) => setForm((current) => ({ ...current, replacements }))} /><div className="space-y-1.5"><Label htmlFor="catalog-edit-reason" className="text-xs text-muted-foreground">{pick({ tr: "Değişiklik nedeni", en: "Change reason" })}</Label><Textarea id="catalog-edit-reason" value={reason} onChange={(event) => setReason(event.target.value)} placeholder={pick({ tr: "Bu düzeltmeyi neden yaptığınızı yazın", en: "Explain why this correction is needed" })} maxLength={1000} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div><label className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3 text-sm"><input type="checkbox" checked={verify} onChange={(event) => setVerify(event.target.checked)} className="mt-0.5" /><span><strong>{pick({ tr: "Bu düzeltmeyi doğrula", en: "Verify this correction" })}</strong><span className="mt-1 block text-xs text-muted-foreground">{pick({ tr: "Kaynak kontrolü veya onaylı kayıt kanıtı girildiğinde planlayıcı bu alanı doğrulanmış sayabilir.", en: "The planner can treat this field as verified after source or approved-record evidence is recorded." })}</span></span></label>{verify ? <div className="space-y-1.5"><Label htmlFor="catalog-verification-evidence" className="text-xs text-muted-foreground">{pick({ tr: "Doğrulama kanıtı", en: "Verification evidence" })}</Label><Textarea id="catalog-verification-evidence" value={verificationEvidence} onChange={(event) => setVerificationEvidence(event.target.value)} placeholder={pick({ tr: "Kaynak URL’si, kayıt adı veya inceleme notu", en: "Source URL, record name, or review note" })} maxLength={4000} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div> : null}<div className="flex flex-wrap justify-end gap-2 border-t pt-4"><Button variant="outline" onClick={onCancel} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button onClick={onSave} disabled={!valid || pending}>{pending ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}{pick({ tr: "Taslağı kaydet", en: "Save draft" })}</Button></div></CardContent></Card>;
 }
 
 function SectionEditors({ sections, onChange }: { sections: FormSection[]; onChange: (sections: FormSection[]) => void }) {
@@ -1483,8 +1602,8 @@ function SectionEditor({ section, onChange, onRemove }: { section: FormSection; 
   return (
     <div className="space-y-3 rounded-xl border p-3">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-        <Field label={pick({ tr: "Şube kodu", en: "Section code" })} value={section.section_code} onChange={(section_code) => onChange({ ...section, section_code })} />
-        <Field label={pick({ tr: "Durum", en: "Status" })} value={section.status} onChange={(status) => onChange({ ...section, status })} />
+        <Field label={pick({ tr: "Şube kodu", en: "Section code" })} value={section.section_code} onChange={(section_code) => onChange({ ...section, section_code })} maxLength={32} />
+        <Field label={pick({ tr: "Durum", en: "Status" })} value={section.status} onChange={(status) => onChange({ ...section, status })} maxLength={32} />
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">{pick({ tr: "Toplantı durumu", en: "Meeting status" })}</Label>
           <select
@@ -1501,7 +1620,7 @@ function SectionEditor({ section, onChange, onRemove }: { section: FormSection; 
           </select>
           {normalizeMeetingStatus(section.meetings_status) === "untimed" ? <p className="text-xs text-muted-foreground">{pick({ tr: "Bu değer, zaman bilgisinin eksik olduğunu değil, açıkça toplantı olmadığını belirtir.", en: "This means the section explicitly has no scheduled meetings; it does not mean the schedule is missing." })}</p> : null}
         </div>
-        <Field label={pick({ tr: "Müfredat URL'si", en: "Syllabus URL" })} value={section.syllabus_url} onChange={(syllabus_url) => onChange({ ...section, syllabus_url })} className="sm:col-span-2" />
+        <Field label={pick({ tr: "Müfredat URL'si", en: "Syllabus URL" })} value={section.syllabus_url} onChange={(syllabus_url) => onChange({ ...section, syllabus_url })} className="sm:col-span-2" maxLength={2000} />
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">{pick({ tr: "Müfredat durumu", en: "Syllabus availability" })}</Label>
           <select
@@ -1524,16 +1643,16 @@ function SectionEditor({ section, onChange, onRemove }: { section: FormSection; 
       </div>
       <div>
         <Label className="text-xs text-muted-foreground">{pick({ tr: "Notlar", en: "Notes" })}</Label>
-        <Textarea className="mt-1.5" value={section.notes} onChange={(event) => onChange({ ...section, notes: event.target.value })} />
+        <Textarea className="mt-1.5" value={section.notes} onChange={(event) => onChange({ ...section, notes: event.target.value })} maxLength={4000} />
       </div>
       <NestedList title={pick({ tr: "Toplantılar", en: "Meetings" })} onAdd={() => onChange({ ...section, meetings: [...section.meetings, emptyMeeting()] })} addLabel={pick({ tr: "Toplantı ekle", en: "Add meeting" })}>
         {section.meetings.map((meeting, index) => (
           <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-6" key={index}>
             <Field label={pick({ tr: "Gün", en: "Day" })} value={meeting.weekday} onChange={(weekday) => onChange({ ...section, meetings: updateAt(section.meetings, index, { weekday }) })} />
-            <Field label={pick({ tr: "Başlangıç (dakika)", en: "Start (minute)" })} type="number" value={meeting.start_minute} onChange={(start_minute) => onChange({ ...section, meetings: updateAt(section.meetings, index, { start_minute }) })} />
-            <Field label={pick({ tr: "Bitiş (dakika)", en: "End (minute)" })} type="number" value={meeting.end_minute} onChange={(end_minute) => onChange({ ...section, meetings: updateAt(section.meetings, index, { end_minute }) })} />
-            <Field label={pick({ tr: "Salon", en: "Room" })} value={meeting.room} onChange={(room) => onChange({ ...section, meetings: updateAt(section.meetings, index, { room }) })} />
-            <Field label={pick({ tr: "Durum", en: "Status" })} value={meeting.status} onChange={(status) => onChange({ ...section, meetings: updateAt(section.meetings, index, { status }) })} />
+            <Field label={pick({ tr: "Başlangıç (dakika)", en: "Start (minute)" })} type="number" min="0" max={1439} value={meeting.start_minute} onChange={(start_minute) => onChange({ ...section, meetings: updateAt(section.meetings, index, { start_minute }) })} />
+            <Field label={pick({ tr: "Bitiş (dakika)", en: "End (minute)" })} type="number" min="1" max={1440} value={meeting.end_minute} onChange={(end_minute) => onChange({ ...section, meetings: updateAt(section.meetings, index, { end_minute }) })} />
+            <Field label={pick({ tr: "Salon", en: "Room" })} value={meeting.room} onChange={(room) => onChange({ ...section, meetings: updateAt(section.meetings, index, { room }) })} maxLength={500} />
+            <Field label={pick({ tr: "Durum", en: "Status" })} value={meeting.status} onChange={(status) => onChange({ ...section, meetings: updateAt(section.meetings, index, { status }) })} maxLength={32} />
             <div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onChange({ ...section, meetings: section.meetings.filter((_, itemIndex) => itemIndex !== index) })}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div>
           </div>
         ))}
@@ -1541,10 +1660,10 @@ function SectionEditor({ section, onChange, onRemove }: { section: FormSection; 
       <NestedList title={pick({ tr: "Eğitmenler", en: "Instructors" })} onAdd={() => onChange({ ...section, instructors: [...section.instructors, emptyInstructor()] })} addLabel={pick({ tr: "Eğitmen ekle", en: "Add instructor" })}>
         {section.instructors.map((instructor, index) => (
           <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-5" key={index}>
-            <Field label={pick({ tr: "Ad", en: "Name" })} value={instructor.name} onChange={(name) => onChange({ ...section, instructors: updateAt(section.instructors, index, { name }) })} />
-            <Field label={pick({ tr: "Unvan", en: "Position" })} value={instructor.position} onChange={(position) => onChange({ ...section, instructors: updateAt(section.instructors, index, { position }) })} />
+            <Field label={pick({ tr: "Ad", en: "Name" })} value={instructor.name} onChange={(name) => onChange({ ...section, instructors: updateAt(section.instructors, index, { name }) })} maxLength={500} />
+            <Field label={pick({ tr: "Unvan", en: "Position" })} value={instructor.position} onChange={(position) => onChange({ ...section, instructors: updateAt(section.instructors, index, { position }) })} maxLength={500} />
             <Field label="Researcher ID" value={instructor.researcher_id} onChange={(researcher_id) => onChange({ ...section, instructors: updateAt(section.instructors, index, { researcher_id }) })} />
-            <Field label={pick({ tr: "Çözüm durumu", en: "Resolution" })} value={instructor.resolution_status} onChange={(resolution_status) => onChange({ ...section, instructors: updateAt(section.instructors, index, { resolution_status }) })} />
+            <Field label={pick({ tr: "Çözüm durumu", en: "Resolution" })} value={instructor.resolution_status} onChange={(resolution_status) => onChange({ ...section, instructors: updateAt(section.instructors, index, { resolution_status }) })} maxLength={32} />
             <div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onChange({ ...section, instructors: section.instructors.filter((_, itemIndex) => itemIndex !== index) })}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div>
           </div>
         ))}
@@ -1553,27 +1672,27 @@ function SectionEditor({ section, onChange, onRemove }: { section: FormSection; 
         {section.restrictions.map((restriction, index) => (
           <div className="space-y-3 rounded-lg border p-3" key={index}>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-              <Field label={pick({ tr: "Tür", en: "Kind" })} value={restriction.kind} onChange={(kind) => updateRestriction(index, { kind })} />
-              <Field label={pick({ tr: "Grup", en: "Group" })} value={restriction.restriction_group} onChange={(restriction_group) => updateRestriction(index, { restriction_group })} />
+              <Field label={pick({ tr: "Tür", en: "Kind" })} value={restriction.kind} onChange={(kind) => updateRestriction(index, { kind })} maxLength={32} />
+              <Field label={pick({ tr: "Grup", en: "Group" })} value={restriction.restriction_group} onChange={(restriction_group) => updateRestriction(index, { restriction_group })} maxLength={64} />
               <Field label={pick({ tr: "Satır", en: "Row" })} type="number" min="0" step="1" value={restriction.row_index} onChange={(row_index) => updateRestriction(index, { row_index })} />
-              <Field label={pick({ tr: "Metin değeri", en: "Text value" })} value={restriction.value_text} onChange={(value_text) => updateRestriction(index, { value_text })} />
+              <Field label={pick({ tr: "Metin değeri", en: "Text value" })} value={restriction.value_text} onChange={(value_text) => updateRestriction(index, { value_text })} maxLength={2000} />
               <Field label={pick({ tr: "Sayısal değer", en: "Numeric value" })} type="number" step="0.01" value={restriction.value_numeric} onChange={(value_numeric) => updateRestriction(index, { value_numeric })} />
             </div>
             <details className="rounded-lg border bg-muted/20 p-3">
               <summary className="cursor-pointer text-sm font-medium">{pick({ tr: "Uygunluk ayrıntıları", en: "Eligibility details" })}</summary>
               <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                <Field label={pick({ tr: "Operatör", en: "Operator" })} value={restriction.operator} onChange={(operator) => updateRestriction(index, { operator })} />
-                <Field label={pick({ tr: "Minimum not", en: "Minimum grade" })} value={restriction.minimum_grade} onChange={(minimum_grade) => updateRestriction(index, { minimum_grade })} />
-                <Field label={pick({ tr: "Kabul edilen bölüm", en: "Admitted department" })} value={restriction.given_department} onChange={(given_department) => updateRestriction(index, { given_department })} />
-                <Field label={pick({ tr: "Soyadı başlangıcı", en: "Surname start" })} value={restriction.start_char} onChange={(start_char) => updateRestriction(index, { start_char })} />
-                <Field label={pick({ tr: "Soyadı bitişi", en: "Surname end" })} value={restriction.end_char} onChange={(end_char) => updateRestriction(index, { end_char })} />
+                <Field label={pick({ tr: "Operatör", en: "Operator" })} value={restriction.operator} onChange={(operator) => updateRestriction(index, { operator })} maxLength={16} />
+                <Field label={pick({ tr: "Minimum not", en: "Minimum grade" })} value={restriction.minimum_grade} onChange={(minimum_grade) => updateRestriction(index, { minimum_grade })} maxLength={8} />
+                <Field label={pick({ tr: "Kabul edilen bölüm", en: "Admitted department" })} value={restriction.given_department} onChange={(given_department) => updateRestriction(index, { given_department })} maxLength={32} />
+                <Field label={pick({ tr: "Soyadı başlangıcı", en: "Surname start" })} value={restriction.start_char} onChange={(start_char) => updateRestriction(index, { start_char })} maxLength={16} />
+                <Field label={pick({ tr: "Soyadı bitişi", en: "Surname end" })} value={restriction.end_char} onChange={(end_char) => updateRestriction(index, { end_char })} maxLength={16} />
                 <Field label={pick({ tr: "Minimum CGPA", en: "Minimum CGPA" })} type="number" step="0.01" min="0" value={restriction.min_cgpa} onChange={(min_cgpa) => updateRestriction(index, { min_cgpa })} />
                 <Field label={pick({ tr: "Maksimum CGPA", en: "Maximum CGPA" })} type="number" step="0.01" min="0" value={restriction.max_cgpa} onChange={(max_cgpa) => updateRestriction(index, { max_cgpa })} />
-                <Field label={pick({ tr: "Minimum yıl", en: "Minimum year" })} type="number" step="1" min="0" value={restriction.min_year} onChange={(min_year) => updateRestriction(index, { min_year })} />
-                <Field label={pick({ tr: "Maksimum yıl", en: "Maximum year" })} type="number" step="1" min="0" value={restriction.max_year} onChange={(max_year) => updateRestriction(index, { max_year })} />
-                <Field label={pick({ tr: "Önceki ders", en: "Prior course" })} value={restriction.prior_course_code} onChange={(prior_course_code) => updateRestriction(index, { prior_course_code })} />
-                <Field label={pick({ tr: "Program kodu", en: "Program code" })} value={restriction.program_code} onChange={(program_code) => updateRestriction(index, { program_code })} />
-                <Field label={pick({ tr: "Müfredat sürümü", en: "Curriculum version" })} value={restriction.curriculum_version} onChange={(curriculum_version) => updateRestriction(index, { curriculum_version })} />
+                <Field label={pick({ tr: "Minimum yıl", en: "Minimum year" })} type="number" step="1" min="0" max={100} value={restriction.min_year} onChange={(min_year) => updateRestriction(index, { min_year })} />
+                <Field label={pick({ tr: "Maksimum yıl", en: "Maximum year" })} type="number" step="1" min="0" max={100} value={restriction.max_year} onChange={(max_year) => updateRestriction(index, { max_year })} />
+                <Field label={pick({ tr: "Önceki ders", en: "Prior course" })} value={restriction.prior_course_code} onChange={(prior_course_code) => updateRestriction(index, { prior_course_code })} maxLength={32} />
+                <Field label={pick({ tr: "Program kodu", en: "Program code" })} value={restriction.program_code} onChange={(program_code) => updateRestriction(index, { program_code })} maxLength={64} />
+                <Field label={pick({ tr: "Müfredat sürümü", en: "Curriculum version" })} value={restriction.curriculum_version} onChange={(curriculum_version) => updateRestriction(index, { curriculum_version })} maxLength={64} />
                 <Field label={pick({ tr: "Durum", en: "Status" })} value={restriction.status} onChange={(status) => updateRestriction(index, { status })} />
                 <Field label={pick({ tr: "Başlangıç not aralığı", en: "Start grade band" })} value={restriction.start_grade} onChange={(start_grade) => updateRestriction(index, { start_grade })} maxLength={128} className="sm:col-span-2" />
                 <Field label={pick({ tr: "Bitiş not aralığı", en: "End grade band" })} value={restriction.end_grade} onChange={(end_grade) => updateRestriction(index, { end_grade })} maxLength={128} className="sm:col-span-2" />
@@ -1613,7 +1732,7 @@ function RulesEditor({
   onReplacementsChange: (replacements: FormReplacement[]) => void;
 }) {
   const { pick } = useLocale();
-  return <Card size="sm"><CardHeader><CardTitle className="text-sm">{pick({ tr: "Kurallar ve eşdeğerler", en: "Rules and replacements" })}</CardTitle><CardDescription>{pick({ tr: "Ön koşullar ve yerine geçen dersler ayrı ayrı saklanır.", en: "Prerequisites and replacement courses are stored separately." })}</CardDescription></CardHeader><CardContent className="space-y-4"><NestedList title={pick({ tr: "Ön koşul grupları", en: "Prerequisite groups" })} onAdd={() => onGroupsChange([...groups, emptyGroup()])} addLabel={pick({ tr: "Grup ekle", en: "Add group" })}>{groups.map((group, index) => <div className="space-y-3 rounded-lg border p-3" key={index}><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><Field label={pick({ tr: "Grup", en: "Group" })} value={group.group_no} onChange={(group_no) => onGroupsChange(updateAt(groups, index, { group_no }))} /><Field label={pick({ tr: "Mantık", en: "Logic" })} value={group.logic} onChange={(logic) => onGroupsChange(updateAt(groups, index, { logic }))} /><Field label={pick({ tr: "Program", en: "Program" })} value={group.program_code} onChange={(program_code) => onGroupsChange(updateAt(groups, index, { program_code }))} /><Field label={pick({ tr: "Müfredat", en: "Curriculum" })} value={group.curriculum_version} onChange={(curriculum_version) => onGroupsChange(updateAt(groups, index, { curriculum_version }))} /><div className="flex items-end"><Button variant="destructive" size="sm" onClick={() => onGroupsChange(groups.filter((_, itemIndex) => itemIndex !== index))}>{pick({ tr: "Grubu kaldır", en: "Remove group" })}</Button></div></div><NestedList title={pick({ tr: "Gereksinimler", en: "Requirements" })} onAdd={() => onGroupsChange(updateAt(groups, index, { requirements: [...group.requirements, emptyRequirement()] }))} addLabel={pick({ tr: "Gereksinim ekle", en: "Add requirement" })}>{group.requirements.map((requirement, requirementIndex) => <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-4" key={requirementIndex}><Field label={pick({ tr: "Ders kodu", en: "Course code" })} value={requirement.course_code} onChange={(course_code) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { course_code }) }))} /><Field label={pick({ tr: "En düşük not", en: "Minimum grade" })} value={requirement.minimum_grade} onChange={(minimum_grade) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { minimum_grade }) }))} /><Field label={pick({ tr: "Gereksinim türü", en: "Requirement type" })} value={requirement.requirement_type} onChange={(requirement_type) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { requirement_type }) }))} /><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onGroupsChange(updateAt(groups, index, { requirements: group.requirements.filter((_, itemIndex) => itemIndex !== requirementIndex) }))}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div></div>)}</NestedList></div>)}</NestedList><NestedList title={pick({ tr: "Yerine geçen dersler", en: "Replacement courses" })} onAdd={() => onReplacementsChange([...replacements, emptyReplacement()])} addLabel={pick({ tr: "Eşdeğer ekle", en: "Add replacement" })}>{replacements.map((replacement, index) => <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-4" key={index}><Field label={pick({ tr: "Ders", en: "Course" })} value={replacement.course_code} onChange={(course_code) => onReplacementsChange(updateAt(replacements, index, { course_code }))} /><Field label={pick({ tr: "Yerine geçen", en: "Replacement" })} value={replacement.replacement_code} onChange={(replacement_code) => onReplacementsChange(updateAt(replacements, index, { replacement_code }))} /><Field label={pick({ tr: "İlişki", en: "Relation" })} value={replacement.relation} onChange={(relation) => onReplacementsChange(updateAt(replacements, index, { relation }))} /><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onReplacementsChange(replacements.filter((_, itemIndex) => itemIndex !== index))}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div></div>)}</NestedList></CardContent></Card>;
+  return <Card size="sm"><CardHeader><CardTitle className="text-sm">{pick({ tr: "Kurallar ve eşdeğerler", en: "Rules and replacements" })}</CardTitle><CardDescription>{pick({ tr: "Ön koşullar ve yerine geçen dersler ayrı ayrı saklanır.", en: "Prerequisites and replacement courses are stored separately." })}</CardDescription></CardHeader><CardContent className="space-y-4"><NestedList title={pick({ tr: "Ön koşul grupları", en: "Prerequisite groups" })} onAdd={() => onGroupsChange([...groups, emptyGroup()])} addLabel={pick({ tr: "Grup ekle", en: "Add group" })}>{groups.map((group, index) => <div className="space-y-3 rounded-lg border p-3" key={index}><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"><Field label={pick({ tr: "Grup", en: "Group" })} value={group.group_no} onChange={(group_no) => onGroupsChange(updateAt(groups, index, { group_no }))} /><Field label={pick({ tr: "Mantık", en: "Logic" })} value={group.logic} onChange={(logic) => onGroupsChange(updateAt(groups, index, { logic }))} /><Field label={pick({ tr: "Program", en: "Program" })} value={group.program_code} onChange={(program_code) => onGroupsChange(updateAt(groups, index, { program_code }))} maxLength={64} /><Field label={pick({ tr: "Müfredat", en: "Curriculum" })} value={group.curriculum_version} onChange={(curriculum_version) => onGroupsChange(updateAt(groups, index, { curriculum_version }))} maxLength={64} /><div className="flex items-end"><Button variant="destructive" size="sm" onClick={() => onGroupsChange(groups.filter((_, itemIndex) => itemIndex !== index))}>{pick({ tr: "Grubu kaldır", en: "Remove group" })}</Button></div></div><NestedList title={pick({ tr: "Gereksinimler", en: "Requirements" })} onAdd={() => onGroupsChange(updateAt(groups, index, { requirements: [...group.requirements, emptyRequirement()] }))} addLabel={pick({ tr: "Gereksinim ekle", en: "Add requirement" })}>{group.requirements.map((requirement, requirementIndex) => <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-4" key={requirementIndex}><Field label={pick({ tr: "Ders kodu", en: "Course code" })} value={requirement.course_code} onChange={(course_code) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { course_code }) }))} /><Field label={pick({ tr: "En düşük not", en: "Minimum grade" })} value={requirement.minimum_grade} onChange={(minimum_grade) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { minimum_grade }) }))} maxLength={8} /><Field label={pick({ tr: "Gereksinim türü", en: "Requirement type" })} value={requirement.requirement_type} onChange={(requirement_type) => onGroupsChange(updateAt(groups, index, { requirements: updateAt(group.requirements, requirementIndex, { requirement_type }) }))} maxLength={16} /><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onGroupsChange(updateAt(groups, index, { requirements: group.requirements.filter((_, itemIndex) => itemIndex !== requirementIndex) }))}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div></div>)}</NestedList></div>)}</NestedList><NestedList title={pick({ tr: "Yerine geçen dersler", en: "Replacement courses" })} onAdd={() => onReplacementsChange([...replacements, emptyReplacement()])} addLabel={pick({ tr: "Eşdeğer ekle", en: "Add replacement" })}>{replacements.map((replacement, index) => <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-2 lg:grid-cols-4" key={index}><Field label={pick({ tr: "Ders", en: "Course" })} value={replacement.course_code} onChange={(course_code) => onReplacementsChange(updateAt(replacements, index, { course_code }))} maxLength={32} /><Field label={pick({ tr: "Yerine geçen", en: "Replacement" })} value={replacement.replacement_code} onChange={(replacement_code) => onReplacementsChange(updateAt(replacements, index, { replacement_code }))} maxLength={32} /><Field label={pick({ tr: "İlişki", en: "Relation" })} value={replacement.relation} onChange={(relation) => onReplacementsChange(updateAt(replacements, index, { relation }))} maxLength={32} /><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => onReplacementsChange(replacements.filter((_, itemIndex) => itemIndex !== index))}>{pick({ tr: "Kaldır", en: "Remove" })}</Button></div></div>)}</NestedList></CardContent></Card>;
 }
 
 function CreateDraftDialog({
@@ -1635,7 +1754,7 @@ function CreateDraftDialog({
   const [reason, setReason] = useState("");
   const normalizedCourseCode = courseCode.trim().replace(/[\s-]/g, "");
   const valid = /^\d{7}$/.test(normalizedCourseCode) && reason.trim().length >= 3;
-  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Ders taslağı oluştur", en: "Create course draft" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için typed bir başlangıç taslağı oluşturun.`, en: `Create a typed starter draft for term ${term}.` })}</DialogDescription></DialogHeader><div className="space-y-3"><Field label={pick({ tr: "Ders kodu (7 haneli ODTÜ kodu)", en: "Course code (7-digit METU code)" })} value={courseCode} onChange={setCourseCode} placeholder="2402201" /><Field label={pick({ tr: "Başlık (isteğe bağlı)", en: "Title (optional)" })} value={title} onChange={setTitle} /><div className="grid gap-3 sm:grid-cols-2"><Field label={pick({ tr: "Kredi", en: "Credits" })} type="number" step="0.5" value={credits} onChange={setCredits} /><Field label="ECTS" type="number" step="0.5" value={ects} onChange={setEcts} /></div><div className="space-y-1.5"><Label htmlFor="create-draft-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="create-draft-reason" value={reason} onChange={(event) => setReason(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ course_code: normalizedCourseCode, data: { title: title.trim() || undefined, local_credits: asNumber(credits), ects: asNumber(ects) }, reason: reason.trim() })}>{pending ? <Loader2Icon className="animate-spin" /> : <BookOpenIcon />}{pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Ders taslağı oluştur", en: "Create course draft" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için typed bir başlangıç taslağı oluşturun.`, en: `Create a typed starter draft for term ${term}.` })}</DialogDescription></DialogHeader><div className="space-y-3"><Field label={pick({ tr: "Ders kodu (7 haneli ODTÜ kodu)", en: "Course code (7-digit METU code)" })} value={courseCode} onChange={setCourseCode} placeholder="2402201" /><Field label={pick({ tr: "Başlık (isteğe bağlı)", en: "Title (optional)" })} value={title} onChange={setTitle} maxLength={2000} /><div className="grid gap-3 sm:grid-cols-2"><Field label={pick({ tr: "Kredi", en: "Credits" })} type="number" step="0.5" min="0" max={100} value={credits} onChange={setCredits} /><Field label="ECTS" type="number" step="0.5" min="0" max={100} value={ects} onChange={setEcts} /></div><div className="space-y-1.5"><Label htmlFor="create-draft-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="create-draft-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ course_code: normalizedCourseCode, data: { title: title.trim() || undefined, local_credits: asNumber(credits), ects: asNumber(ects) }, reason: reason.trim() })}>{pending ? <Loader2Icon className="animate-spin" /> : <BookOpenIcon />}{pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function ImportDialog({
@@ -1657,7 +1776,7 @@ function ImportDialog({
   const [reason, setReason] = useState("");
   const [forceRefresh, setForceRefresh] = useState(false);
   const valid = reason.trim().length >= 3 && (scope === "selected" ? selectedCodes.length > 0 : department.trim().length > 0);
-  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Katalog yenilemesi iste", en: "Request catalog refresh" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için kaynaklardan yeniden alım bir arka plan işi olarak çalışır.`, en: `The source refresh for ${term} runs as a background job.` })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="catalog-import-scope">{pick({ tr: "Kapsam", en: "Scope" })}</Label><select id="catalog-import-scope" value={scope} onChange={(event) => setScope(event.target.value)} className="h-9 w-full rounded-lg border bg-background px-3 text-sm"><option value="selected" disabled={!selectedCodes.length}>{selectedCodes.length ? pick({ tr: `Seçilen dersler (${selectedCodes.length})`, en: `Selected courses (${selectedCodes.length})` }) : pick({ tr: "Seçilen ders yok", en: "No courses selected" })}</option><option value="department">{pick({ tr: "Bölüm", en: "Department" })}</option></select></div>{scope === "department" ? <Field label={pick({ tr: "Bölüm kodu", en: "Department code" })} value={department} onChange={setDepartment} placeholder="CNG" /> : <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{selectedCodes.join(", ")}</p>}<div className="space-y-1.5"><Label htmlFor="catalog-import-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="catalog-import-reason" value={reason} onChange={(event) => setReason(event.target.value)} /></div><label className="flex items-start gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" checked={forceRefresh} onChange={(event) => setForceRefresh(event.target.checked)} className="mt-0.5" /><span>{pick({ tr: "Son alınan verileri yok say (zorla yenile)", en: "Ignore recently fetched data (force refresh)" })}</span></label></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ department: scope === "department" ? department : "", course_codes: scope === "selected" ? selectedCodes : [], reason: reason.trim(), force_refresh: forceRefresh })}>{pending ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}{pick({ tr: "Yenilemeyi sıraya al", en: "Queue refresh" })}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Katalog yenilemesi iste", en: "Request catalog refresh" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için kaynaklardan yeniden alım bir arka plan işi olarak çalışır.`, en: `The source refresh for ${term} runs as a background job.` })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="catalog-import-scope">{pick({ tr: "Kapsam", en: "Scope" })}</Label><select id="catalog-import-scope" value={scope} onChange={(event) => setScope(event.target.value)} className="h-9 w-full rounded-lg border bg-background px-3 text-sm"><option value="selected" disabled={!selectedCodes.length}>{selectedCodes.length ? pick({ tr: `Seçilen dersler (${selectedCodes.length})`, en: `Selected courses (${selectedCodes.length})` }) : pick({ tr: "Seçilen ders yok", en: "No courses selected" })}</option><option value="department">{pick({ tr: "Bölüm", en: "Department" })}</option></select></div>{scope === "department" ? <Field label={pick({ tr: "Bölüm kodu", en: "Department code" })} value={department} onChange={setDepartment} placeholder="CNG" maxLength={32} /> : <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{selectedCodes.join(", ")}</p>}<div className="space-y-1.5"><Label htmlFor="catalog-import-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="catalog-import-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div><label className="flex items-start gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" checked={forceRefresh} onChange={(event) => setForceRefresh(event.target.checked)} className="mt-0.5" /><span>{pick({ tr: "Son alınan verileri yok say (zorla yenile)", en: "Ignore recently fetched data (force refresh)" })}</span></label></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ department: scope === "department" ? department : "", course_codes: scope === "selected" ? selectedCodes : [], reason: reason.trim(), force_refresh: forceRefresh })}>{pending ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}{pick({ tr: "Yenilemeyi sıraya al", en: "Queue refresh" })}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function PublishDialog({
@@ -1678,7 +1797,7 @@ function PublishDialog({
   const [reason, setReason] = useState("");
   const draftRows = selectedRows.filter((row) => Boolean(row.draft_id));
   const valid = draftRows.length > 0 && reason.trim().length >= 3 && (!conflictTotal || acknowledge);
-  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Yayınlamayı incele", en: "Review publish" })}</DialogTitle><DialogDescription>{pick({ tr: "Yalnızca seçtiğiniz taslaklar yayınlanır. Yayın sürümünü değiştirecek işlemi onaylayın.", en: "Only the selected drafts will be published. Review the release change before confirming." })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="rounded-lg border p-3 text-sm"><p className="font-medium">{pick({ tr: `${draftRows.length} taslak`, en: `${draftRows.length} drafts` })}</p><p className="mt-1 text-muted-foreground">{draftRows.map((row) => row.course_code).join(", ") || pick({ tr: "Seçilenlerde taslak yok.", en: "The selection has no drafts." })}</p></div>{conflictTotal ? <label className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.06] p-3 text-sm"><input type="checkbox" checked={acknowledge} onChange={(event) => setAcknowledge(event.target.checked)} className="mt-0.5" /><span><strong>{conflictTotal} {pick({ tr: "kaynak çakışmasını", en: "source conflicts" })}</strong> {pick({ tr: "incelediğimi ve mevcut override'ları koruduğumu onaylıyorum.", en: "reviewed and want to retain the current overrides." })}</span></label> : null}<div className="space-y-1.5"><Label htmlFor="catalog-publish-reason">{pick({ tr: "Yayın nedeni", en: "Publish reason" })}</Label><Textarea id="catalog-publish-reason" value={reason} onChange={(event) => setReason(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ reason: reason.trim(), acknowledge_conflicts: acknowledge })}>{pending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}{pick({ tr: "Yayınla", en: "Publish" })}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Yayınlamayı incele", en: "Review publish" })}</DialogTitle><DialogDescription>{pick({ tr: "Yalnızca seçtiğiniz taslaklar yayınlanır. Yayın sürümünü değiştirecek işlemi onaylayın.", en: "Only the selected drafts will be published. Review the release change before confirming." })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="rounded-lg border p-3 text-sm"><p className="font-medium">{pick({ tr: `${draftRows.length} taslak`, en: `${draftRows.length} drafts` })}</p><p className="mt-1 text-muted-foreground">{draftRows.map((row) => row.course_code).join(", ") || pick({ tr: "Seçilenlerde taslak yok.", en: "The selection has no drafts." })}</p></div>{conflictTotal ? <label className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.06] p-3 text-sm"><input type="checkbox" checked={acknowledge} onChange={(event) => setAcknowledge(event.target.checked)} className="mt-0.5" /><span><strong>{conflictTotal} {pick({ tr: "kaynak çakışmasını", en: "source conflicts" })}</strong> {pick({ tr: "incelediğimi ve mevcut override'ları koruduğumu onaylıyorum.", en: "reviewed and want to retain the current overrides." })}</span></label> : null}<div className="space-y-1.5"><Label htmlFor="catalog-publish-reason">{pick({ tr: "Yayın nedeni", en: "Publish reason" })}</Label><Textarea id="catalog-publish-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ reason: reason.trim(), acknowledge_conflicts: acknowledge })}>{pending ? <Loader2Icon className="animate-spin" /> : <SendIcon />}{pick({ tr: "Yayınla", en: "Publish" })}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function RollbackDialog({
@@ -1695,7 +1814,7 @@ function RollbackDialog({
   const { pick, locale } = useLocale();
   const [reason, setReason] = useState("");
   const valid = reason.trim().length >= 3;
-  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Kataloğu geri al", en: "Rollback catalog" })}</DialogTitle><DialogDescription>{pick({ tr: "Bu işlem seçilen sürümü yeniden etkinleştirir ve denetim kaydı oluşturur.", en: "This reactivates the selected release and creates an audit record." })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] p-3 text-sm"><p className="font-medium">{release.id}</p><p className="mt-1 text-muted-foreground">{formatDate(release.created_at, locale)} · {release.course_count ?? "—"} {pick({ tr: "ders", en: "courses" })}</p></div><div className="space-y-1.5"><Label htmlFor="catalog-rollback-reason">{pick({ tr: "Geri alma nedeni", en: "Rollback reason" })}</Label><Textarea id="catalog-rollback-reason" value={reason} onChange={(event) => setReason(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button variant="destructive" disabled={!valid || pending} onClick={() => onSubmit({ target_release_id: release.id, reason: reason.trim() })}>{pending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}{pick({ tr: "Geri al", en: "Rollback" })}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Kataloğu geri al", en: "Rollback catalog" })}</DialogTitle><DialogDescription>{pick({ tr: "Bu işlem seçilen sürümü yeniden etkinleştirir ve denetim kaydı oluşturur.", en: "This reactivates the selected release and creates an audit record." })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] p-3 text-sm"><p className="font-medium">{release.id}</p><p className="mt-1 text-muted-foreground">{formatDate(release.created_at, locale)} · {release.course_count ?? "—"} {pick({ tr: "ders", en: "courses" })}</p></div><div className="space-y-1.5"><Label htmlFor="catalog-rollback-reason">{pick({ tr: "Geri alma nedeni", en: "Rollback reason" })}</Label><Textarea id="catalog-rollback-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button variant="destructive" disabled={!valid || pending} onClick={() => onSubmit({ target_release_id: release.id, reason: reason.trim() })}>{pending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}{pick({ tr: "Geri al", en: "Rollback" })}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function ImportJobsPanel({

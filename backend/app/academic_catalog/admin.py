@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,6 +26,7 @@ from app.academic_catalog.schemas import (
     PublishIn,
     RemoveOverridesIn,
     RollbackIn,
+    VerifyOverridesIn,
 )
 from app.admin.audit import record_event
 from app.admin.auth import AdminPermission, AdminPrincipal, require
@@ -438,6 +440,72 @@ async def remove_draft_overrides(
         raise _as_error(exc) from exc
 
 
+@router.post("/drafts/{draft_id}/verify-overrides", response_model=CatalogDraftOut)
+async def verify_draft_overrides(
+    draft_id: UUID,
+    body: VerifyOverridesIn,
+    principal: AdminPrincipal = Depends(require(AdminPermission.catalog_write)),
+    db: AsyncSession = Depends(get_db),
+) -> CatalogDraftOut:
+    """Attach source evidence to corrections that are already in the draft.
+
+    Editing and verifying are separate acts: a correction is usually made
+    first and confirmed against the registrar afterwards, and the draft patch
+    endpoint rejects an empty patch, so verification needs its own route.
+    """
+
+    from app.academic_catalog.overrides import verify_overrides
+
+    try:
+        draft = await verify_overrides(
+            db, _organization(principal), draft_id,
+            expected_revision=body.expected_revision, fields=body.fields,
+            reason=body.reason, verification_evidence=body.verification_evidence,
+            updated_by=principal.user.id,
+        )
+        await db.refresh(draft)
+        term = await db.get(CatalogTerm, draft.term_id)
+        course = await db.get(CatalogCourse, draft.course_id)
+        payload = service.serialize_draft(draft, term=term.term_code if term else None,
+                                          course_code=course.course_code if course else None)
+        await db.commit()
+        await _record_catalog_event(
+            db,
+            principal,
+            action="catalog.overrides.verify",
+            result="success",
+            term=payload.get("term"),
+            draft_id=str(draft_id),
+            status_value=payload.get("state"),
+            item_count=len(body.fields),
+        )
+        return payload
+    except HTTPException:
+        await db.rollback()
+        raise
+    except ValueError as exc:
+        await db.rollback()
+        raise _as_error(exc) from exc
+
+
+#: A raw source payload is retained so an administrator can audit it, but the
+#: inspector is a review surface and must not stream an arbitrarily large MCP
+#: response into the browser.  Larger payloads come back as a bounded preview.
+_OBSERVATION_PAYLOAD_MAX_CHARS = 64_000
+
+
+def _bounded_json(value: object) -> tuple[object, bool]:
+    if value is None:
+        return None, False
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        rendered = str(value)
+    if len(rendered) <= _OBSERVATION_PAYLOAD_MAX_CHARS:
+        return value, False
+    return {"truncated": True, "preview": rendered[:_OBSERVATION_PAYLOAD_MAX_CHARS]}, True
+
+
 @router.get("/observations/{observation_id}", response_model=CatalogSourceObservationOut)
 async def inspect_observation(
     observation_id: UUID,
@@ -452,9 +520,12 @@ async def inspect_observation(
     ))
     if row is None:
         raise HTTPException(404, "Source observation not found")
+    payload, payload_truncated = _bounded_json(row.payload)
+    candidate_data, candidate_truncated = _bounded_json(row.candidate_data)
     return {
         "id": str(row.id), "tool": row.tool, "arguments": row.arguments,
-        "payload": row.payload, "candidate_data": row.candidate_data,
+        "payload": payload, "candidate_data": candidate_data,
+        "payload_truncated": payload_truncated or candidate_truncated,
         "status": row.status, "observed_at": row.observed_at,
         "source_fetched_at": row.source_fetched_at,
         "parser_version": row.parser_version, "issues": row.issues,
