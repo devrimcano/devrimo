@@ -25,6 +25,14 @@ export type ChatStreamError = {
 export type ChatStreamEvent =
   | { type: "run"; runId: string }
   | { type: "text"; delta: string }
+  /**
+   * A sentence the model produced on its way to a tool call, rather than as
+   * part of its answer. The broker holds text back until it is long enough to
+   * be an answer and emits it here instead when a tool call follows it, so
+   * these belong beside the tool rows in the chain-of-thought and never in
+   * front of the reply.
+   */
+  | { type: "reasoning"; text: string }
   | { type: "confirmation"; confirmation: ChatConfirmation }
   | { type: "tool"; tool: ChatToolEvent }
   | { type: "error"; error: ChatStreamError };
@@ -118,6 +126,11 @@ export function parseSseEvent(data: string): ChatStreamEvent | null {
         message: typeof devrimo?.message === "string" ? devrimo.message : null,
       },
     };
+  }
+
+  if (type === "reasoning") {
+    if (typeof devrimo?.text !== "string" || !devrimo.text) malformed();
+    return { type: "reasoning", text: devrimo.text };
   }
 
   if (type === "error") {

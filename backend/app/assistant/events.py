@@ -10,6 +10,19 @@ from app.observability.turns import TurnObservation
 
 logger = get_logger(__name__)
 
+# How much text is held back before it is committed as the answer rather than
+# an announcement of the next tool call.
+#
+# The instructions already say "Never narrate your thinking, search process, or
+# tool-selection process"; the model narrates anyway, one short sentence before
+# each tool call. Measured on real turns, those are 30-60 characters -
+# "PHYS 213 şubelerini kontrol ediyorum." is 37 - and a real answer runs to
+# hundreds. Two hundred is far above every announcement seen and far below
+# every answer, and the cost of being wrong either way is small: a very short
+# answer arrives in one piece at the end instead of streaming, and an
+# improbably long announcement streams as text the way it does today.
+_PREAMBLE_CHARACTERS = 200
+
 
 def _chunk(model: str, *, delta: dict | None = None, extension: dict | None = None, finish: str | None = None) -> bytes:
     payload: dict = {
@@ -83,6 +96,41 @@ async def _serialize_events(
     """Agno run events -> OpenAI-compatible SSE, observed as one PostHog trace."""
     from agno.run.agent import RunEvent
 
+    # Text the model has produced that may turn out to be a preamble. See
+    # _PREAMBLE_CHARACTERS: the model announces what it is about to do before
+    # each tool call - "PHYS 213 şubelerini kontrol ediyorum." - and those
+    # announcements used to be appended to the answer and stay there, four and
+    # six deep, run together without spaces. The stored transcript never had
+    # them; only the live stream did, which is why reopening a conversation
+    # showed a clean answer and watching it arrive did not.
+    held: list[str] = []
+    # False until this segment has been committed as the answer. Once committed
+    # the rest of the segment streams through live, as it always did.
+    streaming = False
+
+    def _hold(content: str):
+        """Buffer a fragment, and hand back whatever is safe to send now."""
+        nonlocal streaming
+        if streaming:
+            return content
+        held.append(content)
+        if sum(len(part) for part in held) <= _PREAMBLE_CHARACTERS:
+            return None
+        # Longer than any announcement the model makes: this is the answer.
+        streaming = True
+        return "".join(held)
+
+    def _discard_preamble() -> str | None:
+        """Drop the held announcement, returning it for the reasoning panel."""
+        nonlocal streaming
+        if streaming or not held:
+            held.clear()
+            streaming = False
+            return None
+        preamble = "".join(held)
+        held.clear()
+        return preamble.strip() or None
+
     try:
         async for event in events:
             name = getattr(event, "event", None)
@@ -90,9 +138,17 @@ async def _serialize_events(
             if name == RunEvent.run_content.value:
                 content = getattr(event, "content", None)
                 if isinstance(content, str) and content:
-                    yield _chunk(model, delta={"role": "assistant", "content": content})
+                    sendable = _hold(content)
+                    if sendable:
+                        yield _chunk(model, delta={"role": "assistant", "content": sendable})
 
             elif name == RunEvent.tool_call_started.value:
+                # Whatever the model said just before reaching for a tool was
+                # about reaching for the tool. It belongs beside the tool row in
+                # the chain-of-thought, not in front of the answer.
+                preamble = _discard_preamble()
+                if preamble:
+                    yield _chunk(model, extension={"type": "reasoning", "text": preamble})
                 tool = _tool_name(event)
                 observation.tool_started(tool)
                 yield _chunk(model, extension={"type": "tool_call_started", "tool": tool, "server": _tool_server(tool)})
@@ -154,6 +210,11 @@ async def _serialize_events(
                 )
                 return
 
+        # A short answer never crossed the threshold, so it is still held. No
+        # tool call followed it, which is what makes it the answer rather than
+        # an announcement.
+        if held and not streaming:
+            yield _chunk(model, delta={"role": "assistant", "content": "".join(held)})
         yield _chunk(model, delta={}, finish="stop")
     finally:
         close = getattr(events, "aclose", None)

@@ -48,6 +48,7 @@ export const POST = authenticatedRoute(
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const started = Date.now();
+        let reasoningParts = 0;
         writer.write({ type: "text-start", id: textId });
         try {
           for await (const event of observeChatStream(streamChatCompletions(
@@ -68,6 +69,16 @@ export const POST = authenticatedRoute(
               writer.write({ type: "data-run", data: { runId: event.runId } });
             } else if (event.type === "text") {
               writer.write({ type: "text-delta", id: textId, delta: event.delta });
+            } else if (event.type === "reasoning") {
+              // What the model said on its way to a tool call. Its own part, so
+              // the thread groups it into the chain-of-thought beside that
+              // tool's row instead of stacking it in front of the answer -
+              // which is where four copies of "PHYS 213 şubelerini kontrol
+              // ediyorum." used to end up, run together without spaces.
+              const id = `reasoning-${reasoningParts++}`;
+              writer.write({ type: "reasoning-start", id });
+              writer.write({ type: "reasoning-delta", id, delta: event.text });
+              writer.write({ type: "reasoning-end", id });
             } else if (event.type === "confirmation") {
               writer.write({ type: "data-confirmation", data: event.confirmation });
             } else if (event.type === "tool") {
