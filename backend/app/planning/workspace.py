@@ -387,7 +387,15 @@ async def _validate_published_state(
     def mark_tentative(values: list[PlanEntry]) -> list[PlanEntry]:
         return [
             entry.model_copy(
-                update={"tentative": True, "verification_status": "tentative", "catalog_release_id": None}
+                update={
+                    "tentative": True,
+                    "verification_status": (
+                        entry.verification_status
+                        if entry.verification_status != "verified"
+                        else "tentative"
+                    ),
+                    "catalog_release_id": None,
+                }
             )
             if entry.kind == "course" and entry.tentative
             else entry
@@ -410,7 +418,15 @@ async def _validate_published_state(
     if state.sections and not state.pool and not course_entries:
         raise PlanValidationError("course sections require a published course pool")
 
-    offerings, _, metadata = await _published_plan_inputs(db, user_id, term)
+    requested_codes = list(dict.fromkeys(
+        str(code).strip()
+        for course in state.pool
+        for code in (getattr(course, "raw_code", None), getattr(course, "code", None))
+        if code and str(code).strip()
+    ))
+    offerings, _, metadata = await _published_plan_inputs(
+        db, user_id, term, requested_codes or None
+    )
     release_id = _catalog_release(metadata)
     if release_id is None:
         raise PlanValidationError("published catalog release is unavailable")
@@ -466,7 +482,7 @@ async def _validate_published_state(
             ],
             "eligible": eligible,
             "eligibility_status": eligibility_status,
-            "reason": "",
+            "reason": str(getattr(offering, "eligibility_reason", "") or ""),
             "data_status": str(getattr(offering, "data_status", "unknown") or "unknown"),
             "fresh": getattr(offering, "fresh", False) is True,
             "meetings_status": str(
@@ -502,11 +518,15 @@ async def _validate_published_state(
     def resolve(entry: PlanEntry) -> PlanEntry:
         if entry.kind == "block":
             return entry
-        if entry.tentative or entry.verification_status == "tentative":
+        if entry.tentative or entry.verification_status != "verified":
             return entry.model_copy(
                 update={
                     "tentative": True,
-                    "verification_status": "tentative",
+                    "verification_status": (
+                        entry.verification_status
+                        if entry.verification_status != "verified"
+                        else "tentative"
+                    ),
                     "catalog_release_id": None,
                 }
             )
@@ -755,6 +775,14 @@ def _section_meetings(section: dict[str, Any]) -> list[tuple[str, int, int, str]
 
 def _entry_for_choice(course: Any, section: dict[str, Any], course_index: int) -> list[PlanEntry]:
     meetings = _section_meetings(section)
+    eligible = section.get("eligible")
+    verification_status = (
+        "verified"
+        if eligible is True
+        else "restriction_overridden"
+        if eligible is False
+        else "unverified_constraints"
+    )
     output: list[PlanEntry] = []
     for meeting_index, (day, start, end, room) in enumerate(meetings):
         output.append(
@@ -771,6 +799,15 @@ def _entry_for_choice(course: Any, section: dict[str, Any], course_index: int) -
                 start_minute=start,
                 duration_minutes=end - start,
                 room=room,
+                tentative=eligible is not True,
+                verification_status=verification_status,
+                verification_reason=str(section.get("reason") or ""),
+                restriction_override_scope=("global" if eligible is False else None),
+                catalog_release_id=(
+                    str(section.get("catalog_release_id"))
+                    if eligible is True and section.get("catalog_release_id")
+                    else None
+                ),
             )
         )
     return output
@@ -810,17 +847,15 @@ def solve_plan_state(state: PlanState) -> PlanState:
         # whole solve, but must never turn it into a partial timetable.
         if not timed_sections:
             continue
-        if _published_mode():
-            # A missing verdict is unknown. It may be shown to the student for
-            # manual review, but an automatic solve can only use an explicit
-            # server-computed eligible=True section.
-            eligible_sections = [section for section in timed_sections if section.get("eligible") is True]
-        else:
-            eligible_sections = [
-                section
-                for section in timed_sections
-                if state.ignore_constraints or section.get("eligible") is not False
-            ]
+        # Unknown is a real result, not an implicit rejection. Keep it in the
+        # solve and mark the resulting entry so the student can verify it.
+        # Explicitly closed sections remain excluded unless the student has
+        # acknowledged the global override warning.
+        eligible_sections = [
+            section
+            for section in timed_sections
+            if state.ignore_constraints or section.get("eligible") is not False
+        ]
         # A course for which every timed section is closed to the student is
         # reported separately by the client. It cannot be made schedulable by
         # choosing another combination, so it must not suppress valid plans

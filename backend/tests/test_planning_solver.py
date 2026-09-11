@@ -134,6 +134,64 @@ def test_timetable_solver_omits_a_fully_restricted_course_without_returning_a_pa
     assert len(solved.alternatives) == 1
 
 
+def test_timetable_solver_keeps_unknown_constraint_as_visible_risk():
+    state = PlanState(
+        pool=[{"code": "MATH101", "name": "Math", "credits": 3}],
+        sections={"MATH101": [{
+            "section": "1",
+            "eligible": None,
+            "reason": "restriction table unavailable",
+            "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}],
+        }]},
+    )
+
+    solved = solve_plan_state(state)
+
+    assert len(solved.entries) == 1
+    assert solved.entries[0].tentative is True
+    assert solved.entries[0].verification_status == "unverified_constraints"
+    assert solved.entries[0].verification_reason == "restriction table unavailable"
+
+
+def test_timetable_solver_global_override_marks_closed_section():
+    state = PlanState(
+        ignore_constraints=True,
+        pool=[{"code": "MATH101", "name": "Math", "credits": 3}],
+        sections={"MATH101": [{
+            "section": "1",
+            "eligible": False,
+            "reason": "department restriction",
+            "meetings": [{"day": "Mon", "start_minute": 540, "duration_minutes": 60}],
+        }]},
+    )
+
+    solved = solve_plan_state(state)
+
+    assert len(solved.entries) == 1
+    assert solved.entries[0].verification_status == "restriction_overridden"
+    assert solved.entries[0].restriction_override_scope == "global"
+
+
+def test_specific_override_status_survives_legacy_round_trip():
+    state = PlanState.from_legacy_payload({"entries": [{
+        "id": "manual-1",
+        "code": "MATH101",
+        "section": "1",
+        "day": "Mon",
+        "start_minute": 540,
+        "duration_minutes": 60,
+        "tentative": True,
+        "verification_status": "restriction_overridden",
+        "verification_reason": "department restriction",
+        "restriction_override_scope": "section",
+    }]})
+
+    entry = state.entries[0]
+    assert entry.verification_status == "restriction_overridden"
+    assert entry.verification_reason == "department restriction"
+    assert entry.restriction_override_scope == "section"
+
+
 def test_a_stale_duplicate_section_list_cannot_undo_a_verdict():
     """A plan holding the same course under two keys still respects the verdicts.
 

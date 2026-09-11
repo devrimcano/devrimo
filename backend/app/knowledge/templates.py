@@ -2,18 +2,23 @@
 
 DEFAULT_SOURCE_TEMPLATES = (
     {
-        "id": "registrar-calendar",
-        "name": "METU Registrar Academic Calendar",
+        "id": "registrar-calendar-2026-2027",
+        "name": "ODTÜ 2026-2027 Akademik Takvimi",
         "kind": "html_page",
-        "url": "https://oidb.metu.edu.tr/tr/akademik-takvim",
+        "url": "https://oidb.metu.edu.tr/tr/odtu-ankara-ve-erdemli-kampusleri-2026-2027-akademik-takvim",
         "language": "tr",
         "authority": 100,
-        "audience": {},
-        "schedule_seconds": 21_600,
+        "audience": {"academic_year": "2026-2027", "campus": "Ankara ve Erdemli"},
+        "schedule_seconds": 86_400,
         "config": {
-            "content_selector": "main",
-            "title_selector": "h1",
-            "defaults": {"record_type": "calendar"},
+            "content_selector": "article .field--name-body",
+            "title_selector": "article h1, h1",
+            "external_id": "oidb-academic-calendar-2026-2027",
+            "defaults": {
+                "record_type": "calendar",
+                "campus": "Ankara ve Erdemli",
+                "audience": {"academic_year": "2026-2027"},
+            },
         },
     },
     {

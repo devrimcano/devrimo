@@ -2639,6 +2639,7 @@ async def _release_revisions(
     release: CatalogRelease,
     *,
     course_code: str | None = None,
+    course_codes: list[str] | None = None,
 ) -> list[tuple[CatalogCourse, CatalogCourseRevision]]:
     stmt = (
         select(CatalogCourse, CatalogCourseRevision)
@@ -2654,6 +2655,11 @@ async def _release_revisions(
     )
     if course_code is not None:
         stmt = stmt.where(CatalogCourse.course_code == normalize_course_code(course_code))
+    elif course_codes is not None:
+        normalized = list(dict.fromkeys(normalize_course_code(code) for code in course_codes if code))
+        if not normalized:
+            return []
+        stmt = stmt.where(CatalogCourse.course_code.in_(normalized))
     return list((await db.execute(stmt)).all())
 
 
@@ -4404,8 +4410,12 @@ async def _published_rows(
     organization_id: UUID,
     term: CatalogTerm,
     release: CatalogRelease,
+    *,
+    course_codes: list[str] | None = None,
 ) -> tuple[list[tuple[CatalogCourse, CatalogCourseRevision]], dict[str, dict[UUID, list[Any]]]]:
-    pairs = await _release_revisions(db, organization_id, release)
+    pairs = await _release_revisions(
+        db, organization_id, release, course_codes=course_codes
+    )
     revisions = [revision for _, revision in pairs]
     children = await _bulk_revision_components(db, organization_id, revisions)
     return pairs, children
@@ -4722,15 +4732,23 @@ async def published_plan_inputs(
     db: AsyncSession,
     user_id: UUID,
     term: str,
+    course_codes: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    """Return offerings and rules from one immutable release in one batch."""
+    """Return offerings and rules from one immutable release in one batch.
+
+    When ``course_codes`` is supplied, only those release revisions and their
+    children are loaded. This keeps a planner request proportional to the
+    student's pool instead of repeatedly reading the whole term catalog.
+    """
 
     organization_id = await _organization_for_user(db, user_id)
     term_row = await _term_for_read(db, organization_id, term)
     if term_row is None:
         raise CatalogUnavailable(term)
     release = await _release_for_term(db, organization_id, term_row, required=True)
-    pairs, children = await _published_rows(db, organization_id, term_row, release)
+    pairs, children = await _published_rows(
+        db, organization_id, term_row, release, course_codes=course_codes
+    )
     profile = await _student_profile_for_catalog(db, user_id, term_row)
     offerings: list[dict[str, Any]] = []
     rules: dict[str, Any] = {}

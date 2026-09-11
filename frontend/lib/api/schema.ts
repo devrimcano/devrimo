@@ -489,6 +489,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedule/planner-inputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Planner Inputs
+         * @description Return section times and student verdicts in one pool-sized read.
+         */
+        post: operations["planner_inputs_api_v1_schedule_planner_inputs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/sections": {
         parameters: {
             query?: never;
@@ -2906,7 +2926,11 @@ export interface components {
              * @default verified
              * @enum {string}
              */
-            verification_status?: "verified" | "tentative";
+            verification_status?: "verified" | "tentative" | "unverified_constraints" | "restriction_overridden";
+            /** Verification Reason */
+            verification_reason?: string;
+            /** Restriction Override Scope */
+            restriction_override_scope?: "section" | "global" | null;
             /** Catalog Release Id */
             catalog_release_id?: string | null;
         };
@@ -4364,6 +4388,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CourseSectionsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    planner_inputs_api_v1_schedule_planner_inputs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkSectionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

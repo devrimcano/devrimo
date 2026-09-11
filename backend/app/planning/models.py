@@ -134,6 +134,10 @@ def _legacy_entry(value: Any, index: int, kind: Literal["course", "block"] = "co
     verification_status = _legacy_text(
         item.get("verification_status", item.get("verificationStatus")), limit=32
     ) or ("tentative" if tentative else "verified")
+    if verification_status not in {
+        "verified", "tentative", "unverified_constraints", "restriction_overridden"
+    }:
+        verification_status = "tentative" if tentative else "verified"
     release_id = _legacy_text(
         item.get("catalog_release_id", item.get("catalogReleaseId")), limit=128
     ) or None
@@ -155,6 +159,15 @@ def _legacy_entry(value: Any, index: int, kind: Literal["course", "block"] = "co
         # treated as a verified registration/timetable fact.
         "tentative": tentative,
         "verification_status": verification_status,
+        "verification_reason": _legacy_text(
+            item.get("verification_reason", item.get("verificationReason")), limit=1000
+        ),
+        "restriction_override_scope": (
+            item.get("restriction_override_scope", item.get("restrictionOverrideScope"))
+            if item.get("restriction_override_scope", item.get("restrictionOverrideScope"))
+            in {"section", "global"}
+            else None
+        ),
         "catalog_release_id": release_id,
     }
 
@@ -250,7 +263,11 @@ class PlanEntry(BaseModel):
     duration_minutes: int = Field(ge=1, le=1440)
     room: str = Field(default="", max_length=128)
     tentative: bool = False
-    verification_status: Literal["verified", "tentative"] = "verified"
+    verification_status: Literal[
+        "verified", "tentative", "unverified_constraints", "restriction_overridden"
+    ] = "verified"
+    verification_reason: str = Field(default="", max_length=1000)
+    restriction_override_scope: Literal["section", "global"] | None = None
     catalog_release_id: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="before")
@@ -278,9 +295,12 @@ class PlanEntry(BaseModel):
         # Keep the two wire fields coherent. A browser may send either the
         # explicit flag or the status label; both describe a hand-entered
         # course that has not been verified against the published catalog.
-        if self.kind == "course" and (self.tentative or self.verification_status == "tentative"):
+        if self.kind == "course" and (
+            self.tentative or self.verification_status != "verified"
+        ):
             self.tentative = True
-            self.verification_status = "tentative"
+            if self.verification_status == "verified":
+                self.verification_status = "tentative"
         return self
 
     def to_legacy(self) -> dict[str, Any]:
@@ -301,6 +321,8 @@ class PlanEntry(BaseModel):
             "duration_minutes": self.duration_minutes,
             "tentative": self.tentative,
             "verification_status": self.verification_status,
+            "verification_reason": self.verification_reason,
+            "restriction_override_scope": self.restriction_override_scope,
             "catalog_release_id": self.catalog_release_id,
         }
 

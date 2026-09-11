@@ -504,6 +504,9 @@ def _canonical_offerings(value: Any) -> list[Any]:
                         fetched_at=section.get("fetched_at", row.get("fetched_at")),
                         eligible=section.get("eligible", row.get("eligible")),
                         eligibility_status=section.get("eligibility_status", row.get("eligibility_status")),
+                        eligibility_reason=section.get(
+                            "eligibility_reason", row.get("eligibility_reason", "")
+                        ),
                         data_status=section.get("data_status", row.get("data_status", "unknown")),
                         # The published batch contract represents freshness in
                         # the section's explicit data_status. Preserve an
@@ -540,6 +543,7 @@ def _canonical_offerings(value: Any) -> list[Any]:
                 fetched_at=row.get("fetched_at"),
                 eligible=row.get("eligible"),
                 eligibility_status=row.get("eligibility_status"),
+                eligibility_reason=row.get("eligibility_reason", ""),
                 data_status=row.get("data_status", "unknown"),
                 fresh=row.get(
                     "fresh",
@@ -597,6 +601,7 @@ async def _published_plan_inputs(
     db: AsyncSession,
     user_id: UUID,
     term: str,
+    course_codes: list[str] | None = None,
 ) -> tuple[list[Any], dict[str, Any], dict[str, Any]]:
     """Read all plan inputs from one immutable published catalog release.
 
@@ -612,7 +617,7 @@ async def _published_plan_inputs(
     except (ImportError, ModuleNotFoundError) as exc:
         raise HTTPException(503, "The published academic catalog is not available yet.") from exc
     try:
-        payload = await published_plan_inputs(db, user_id, term)
+        payload = await published_plan_inputs(db, user_id, term, course_codes)
     except HTTPException:
         raise
     except Exception as exc:

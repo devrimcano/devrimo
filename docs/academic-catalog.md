@@ -151,11 +151,19 @@ Verification with admin evidence has its own timestamp and expiry; it does not
 invent a source fetch timestamp. Updating one section cannot renew another
 section's restriction evidence.
 
-Automatic plans require verified eligibility and required meeting information.
-Unavailable requested courses are reported, not silently dropped. Manual
-tentative entries remain possible but cannot make a plan verified. A plan keeps
-its catalog provenance; later publication requires revalidation rather than
-silently rewriting a student's timetable.
+Automatic plans require meeting information. Verified-eligible sections are
+preferred; a section with an unreadable or undecidable restriction may be used
+only as an explicitly marked tentative entry. Explicitly ineligible sections
+remain excluded unless the student acknowledges a per-section or global
+override. Unavailable requested courses are reported, not silently dropped.
+Tentative entries cannot make a plan verified. A plan keeps its catalog
+provenance; later publication requires revalidation rather than silently
+rewriting a student's timetable.
+
+Planner input reads are scoped to the requested course pool and load sections,
+meetings and restrictions from one immutable release in a bounded batch. The
+published catalog is the durable shared cache; repeated generation does not
+contact the campus source or issue one catalog query per section.
 
 Only explicitly untimed, academically verified offerings may participate in
 credit planning without meetings. An empty or unreadable schedule alone does
