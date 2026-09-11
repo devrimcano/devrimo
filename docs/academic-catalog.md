@@ -133,6 +133,12 @@ correction remains an override until explicitly removed; a new source value
 is shown as a conflict instead of silently replacing it. Rollback creates
 another release referencing previous revisions, without resetting freshness.
 
+The initial production cutover publishes all currently valid `20261` drafts
+as one release through `app.academic_catalog.publish_cli`. Drafts with blocking
+validation issues remain drafts and are reported in the command output. A host
+marker makes this a one-time operation; later imports continue to require an
+explicit admin publication.
+
 The Sources view can remove selected overrides with a reason and a draft
 revision check. This replays retained source observations into the selected
 draft fields, retaining original evidence timestamps. If there is no source
