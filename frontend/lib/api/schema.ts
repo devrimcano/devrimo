@@ -501,6 +501,10 @@ export interface paths {
         /**
          * Planner Inputs
          * @description Return section times and student verdicts in one pool-sized read.
+         *
+         *     The published catalog is already a durable shared cache. Reading it once
+         *     for the requested courses avoids the previous course-by-course SQL loop
+         *     and keeps sections and verdicts pinned to the same immutable release.
          */
         post: operations["planner_inputs_api_v1_schedule_planner_inputs_post"];
         delete?: never;
@@ -2927,10 +2931,13 @@ export interface components {
              * @enum {string}
              */
             verification_status?: "verified" | "tentative" | "unverified_constraints" | "restriction_overridden";
-            /** Verification Reason */
+            /**
+             * Verification Reason
+             * @default
+             */
             verification_reason?: string;
             /** Restriction Override Scope */
-            restriction_override_scope?: "section" | "global" | null;
+            restriction_override_scope?: ("section" | "global") | null;
             /** Catalog Release Id */
             catalog_release_id?: string | null;
         };
