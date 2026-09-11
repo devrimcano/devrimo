@@ -684,6 +684,50 @@ async def test_fresh_leaf_steps_are_dropped_unless_the_import_is_forced():
     assert forced == steps
 
 
+async def test_a_fetch_before_the_registration_window_is_not_reused(monkeypatch):
+    from datetime import UTC, timedelta
+
+    from app.academic_catalog.service import drop_fresh_leaf_steps, ingest_observation
+
+    settings = worker.get_settings()
+    now = datetime.now(UTC)
+    monkeypatch.setattr(settings, "academic_catalog_registration_start",
+                        (now - timedelta(hours=1)).isoformat())
+    monkeypatch.setattr(settings, "academic_catalog_registration_end",
+                        (now + timedelta(hours=5)).isoformat())
+
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        before_window = now - timedelta(hours=2)
+        await ingest_observation(
+            db, METU_ID, "get_section_constraints",
+            {"semester": "20261", "department": "240", "course": "2402201", "section": "1"},
+            {"course_code": "2402201", "section": "1", "constraints": []},
+            before_window, source_fetched_at=before_window,
+        )
+        future = now + timedelta(minutes=30)
+        await ingest_observation(
+            db, METU_ID, "get_section_constraints",
+            {"semester": "20261", "department": "240", "course": "2402202", "section": "1"},
+            {"course_code": "2402202", "section": "1", "constraints": []},
+            future, source_fetched_at=future,
+        )
+        await db.commit()
+
+        steps = [
+            {"tool": "get_section_constraints",
+             "values": {"semester": "20261", "department": "240", "course": "2402201", "section": "1"}},
+            {"tool": "get_section_constraints",
+             "values": {"semester": "20261", "department": "240", "course": "2402202", "section": "1"}},
+        ]
+        kept = await drop_fresh_leaf_steps(db, METU_ID, "20261", steps)
+
+    # Both are inside the reuse window by age, but one predates the open
+    # registration window and the other is in the future; readers call both
+    # stale, so neither may satisfy the step.
+    assert kept == steps
+
+
 async def test_a_course_job_reuses_fresh_rules_but_still_reads_its_detail(monkeypatch):
     from datetime import UTC
 

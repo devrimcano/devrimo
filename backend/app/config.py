@@ -324,9 +324,10 @@ class Settings(BaseSettings):
     # How long a successful source observation may satisfy an import step
     # before the worker reads that page again.  Detail and section pages go
     # stale during add-drop; rule pages change by publication.  Forced imports
-    # ignore both windows.
-    catalog_reuse_info_seconds: int = 24 * 3600
-    catalog_reuse_rules_seconds: int = 7 * 24 * 3600
+    # ignore both windows, and a window above the component's read-time max age
+    # is clamped down so a stale component can always be refreshed.
+    catalog_reuse_info_seconds: int = Field(default=24 * 3600, ge=0)
+    catalog_reuse_rules_seconds: int = Field(default=7 * 24 * 3600, ge=0)
     # How many source pages may be in flight at once. Each one needs its own
     # client, because a portal session serves one page at a time. One is the
     # long-standing behaviour; raise it only against a source that tolerates

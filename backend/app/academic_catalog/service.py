@@ -1919,13 +1919,23 @@ _LEAF_REUSE_TOOLS = (
 
 
 def leaf_reuse_ttl_seconds(tool: str) -> int:
-    """How long a successful observation may satisfy one reusable leaf step."""
+    """How long a successful observation may satisfy one reusable leaf step.
+
+    The window is clamped below the component's read-time max age: reusing a
+    page past that age would keep a component permanently stale, because the
+    step that would refresh it would keep being skipped.
+    """
     from app.config import get_settings
 
     settings = get_settings()
     if tool in {"get_course_prerequisites", "get_course_replacements"}:
-        return max(0, int(settings.catalog_reuse_rules_seconds))
-    return max(0, int(settings.catalog_reuse_info_seconds))
+        ttl = int(settings.catalog_reuse_rules_seconds)
+    else:
+        ttl = int(settings.catalog_reuse_info_seconds)
+    max_age = _COMPONENT_MAX_AGE_SECONDS.get(_tool_component(tool))
+    if max_age is not None:
+        ttl = min(ttl, max(0, max_age - 60))
+    return max(0, ttl)
 
 
 def leaf_step_key(step: dict[str, Any]) -> tuple[str, str, str | None]:
@@ -1972,6 +1982,8 @@ async def drop_fresh_leaf_steps(
     if not by_tool:
         return kept
     now = datetime.now(UTC)
+    registration = _registration_window(now)
+    window_start = _registration_boundary(registration.get("start")) if registration.get("active") else None
     reused: set[tuple[str, str, str | None]] = set()
     for tool, tool_steps in by_tool.items():
         ttl = leaf_reuse_ttl_seconds(tool)
@@ -1986,8 +1998,15 @@ async def drop_fresh_leaf_steps(
             CatalogSourceObservation.status.in_(("success", "empty")),
             CatalogSourceObservation.source_fetched_at.is_not(None),
             CatalogSourceObservation.source_fetched_at >= now - timedelta(seconds=ttl),
+            # A future fetch is stale to readers too (clock skew, bad evidence).
+            CatalogSourceObservation.source_fetched_at <= now,
             CatalogSourceObservation.course_code.in_(codes),
         ]
+        if window_start is not None:
+            # An active add-drop window invalidates anything fetched before it,
+            # however recent: readers mark those components stale, so the import
+            # must be able to refresh them without a forced job.
+            filters.append(CatalogSourceObservation.source_fetched_at >= window_start)
         if term_code:
             filters.append(CatalogSourceObservation.term == term_code)
         if tool == "get_section_constraints":

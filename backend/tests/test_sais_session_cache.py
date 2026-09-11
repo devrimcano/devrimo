@@ -752,6 +752,26 @@ async def test_short_thesis_rows_fail_instead_of_reading_as_empty(sais):
         await client.get_thesis_courses("567", "20261")
 
 
+async def test_a_thesis_placeholder_row_is_an_empty_answer(sais):
+    """A table plus "No course records" is empty, not layout drift."""
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
+        '<tr><td colspan="7">No course records found.</td></tr>'
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+
+    assert await client.get_thesis_courses("567", "20261") == []
+
+
 async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sais):
     client = _client(sais)
 

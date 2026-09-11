@@ -112,3 +112,20 @@ def test_reused_leaf_steps_are_dropped_and_parent_steps_survive():
         ("get_course_info", "2402201", None),
         ("get_section_constraints", "2402201", "2"),
     ]
+
+
+def test_reuse_windows_are_clamped_to_component_max_age(monkeypatch):
+    from app.academic_catalog import service
+    from app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "catalog_reuse_info_seconds", 30 * 24 * 3600)
+    monkeypatch.setattr(settings, "catalog_reuse_rules_seconds", 90 * 24 * 3600)
+
+    # A window past the component's read-time max age would keep the component
+    # stale for ever, because the step that refreshes it would keep being
+    # skipped.
+    assert service.leaf_reuse_ttl_seconds("get_section_constraints") == (
+        service._COMPONENT_MAX_AGE_SECONDS["constraints"] - 60)
+    assert service.leaf_reuse_ttl_seconds("get_course_prerequisites") == (
+        service._COMPONENT_MAX_AGE_SECONDS["prerequisites"] - 60)

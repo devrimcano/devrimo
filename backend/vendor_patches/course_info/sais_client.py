@@ -1312,11 +1312,13 @@ class SAISClient:
                         )
                     )
 
-        if course_table_found and data_rows and not courses:
+        if course_table_found and data_rows and not courses and not _explicit_empty_result(soup, "course"):
             # A found table whose rows carried no readable course number is
             # layout drift, not an empty programme.  Reporting it as empty would
             # silently drop every thesis course, which is how the original
-            # column bug went unnoticed.
+            # column bug went unnoticed.  A placeholder row ("No course records
+            # found.") is the opposite case: the source is saying the table is
+            # empty, so it stays a valid empty answer.
             raise ValueError("SAIS thesis course table could not be read")
 
         if not course_table_found and not _explicit_empty_result(soup, "course"):
