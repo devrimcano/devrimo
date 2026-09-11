@@ -4,10 +4,8 @@ from uuid import UUID
 
 from agno.tools.decorator import tool
 
-from app.agents.memory import MemoryChanges
-from app.planning.models import PlanChanges
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, PreferenceChanges, ResourceRef, SearchRequest, UpdateStateChanges
+from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest
 from app.workspace.service import WorkspaceService
 
 
@@ -43,11 +41,21 @@ def build_platform_tools(user_id: UUID) -> list:
     @tool(name="update")
     async def update(
         resource: ResourceRef,
-        changes: PlanChanges | MemoryChanges | PreferenceChanges | UpdateStateChanges,
+        changes: dict,
         expected_revision: int,
         idempotency_key: str,
     ) -> dict:
-        """Save editable timetable changes against its current revision with a unique request key."""
+        """Save an editable resource against its current revision with a unique request key.
+
+        `changes` is a JSON object whose shape follows `resource.kind`:
+          - planning.timetable: the `application` object a prior `plan` returned,
+            copied verbatim - it already holds the exact entries to write. Do not
+            hand-build this from section data.
+          - my.preferences / my.update_state: {"key": ..., "value": ...}.
+          - my.memory: {"add": [...]} and/or {"remove": [...]}.
+        The server validates `changes` against the kind and rejects anything it
+        does not recognise, so pass what the resource expects and nothing more.
+        """
         return await workspace.update(
             ResourceRef.model_validate(resource),
             changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
