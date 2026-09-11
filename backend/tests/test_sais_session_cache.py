@@ -1020,3 +1020,79 @@ def test_curriculum_parser_does_not_read_other_tabs(sais):
     html = '<div id="studentTranscript">' + _curriculum_box(1, False) + '</div>'
     html += '<div id="curriculum">' + _curriculum_box(3, False) + '</div>'
     assert [s["semester"] for s in sais.parse_student_curriculum(html)["semesters"]] == [3]
+
+
+# --- the rule pages beside them -----------------------------------------------
+
+
+def _rule_page_html(course: str = "5670201", semester: str = "20261") -> str:
+    """A rule page that parses, and is identified the way rule pages are.
+
+    Not shaped like a course page: the requested code comes back as a radio
+    value and the heading names the rule. That is why these have their own
+    identity check, and why reusing the course page's would reject every one.
+
+    Names both subjects, so one fixture serves the prerequisite and the
+    replacement reads - seventy per cent of both are empty in the real
+    catalog, so an explicitly empty page is the ordinary case, not an edge.
+    """
+    return (
+        _course_rule_identity(course=course, semester=semester)
+        + "<p>No records found for prerequisite or replacement courses.</p>"
+    )
+
+
+async def test_prerequisites_reuse_the_held_position(sais):
+    """The last two tools that still submitted the department first.
+
+    Measured on the live whole-term import: course info and section
+    constraints cost one request each, prerequisites and replacements two -
+    the extra one being a department selection the client was already
+    standing in. Twice per course, about 4,900 requests across a term.
+    """
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _rule_page_html(),
+        _rule_page_html(course="5670202"),
+    ])
+
+    await client.get_course_prerequisites("567", "20261", "5670201")
+    await client.get_course_prerequisites("567", "20261", "5670202")
+
+    assert nav == [("567", "20261")], "the second read must reuse the held position"
+    assert len(sent) == 2, "one action POST per course, no second department select"
+
+
+async def test_replacements_reuse_the_held_position(sais):
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _rule_page_html(),
+        _rule_page_html(course="5670202"),
+    ])
+
+    await client.get_course_replacements("567", "20261", "5670201")
+    await client.get_course_replacements("567", "20261", "5670202")
+
+    assert nav == [("567", "20261")]
+    assert len(sent) == 2
+
+
+async def test_a_rule_page_for_the_wrong_course_takes_the_long_path(sais):
+    """The reuse is only ever as safe as the check that accepts it.
+
+    SAIS answers a request from a position it no longer holds with the
+    previous page rather than an error, so the failure this guards against is
+    one course's prerequisites shown for another.
+    """
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _rule_page_html(),
+        _rule_page_html(course="5670999"),
+        _rule_page_html(course="5670202"),
+    ])
+
+    await client.get_course_prerequisites("567", "20261", "5670201")
+    await client.get_course_prerequisites("567", "20261", "5670202")
+
+    assert len(nav) == 2, "a rejected reuse takes the full navigation"
+    assert len(sent) == 3

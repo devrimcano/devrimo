@@ -1037,6 +1037,56 @@ class SAISClient:
         self._hold_course_page(department_code, semester_code, course_code, soup)
         return soup
 
+    async def _verified_rule_page(
+        self, department_code: str, semester_code: str, course_code: str, submit: str
+    ) -> BeautifulSoup:
+        """A course's rule page, posted from the held position when that is safe.
+
+        The prerequisite and replacement pages are reached by the same POST as
+        the course page, with a different submit button, and SAIS accepts them
+        from the held position on the same terms - which is what
+        _verified_course_page established live. These two were the last tools
+        still submitting the department selection first: one wasted request
+        each, twice per course, about 4,900 across a term.
+
+        Identity is checked on the response and the position is dropped on any
+        doubt, so this can only ever be faster, never looser.
+        """
+        post_data = {
+            "text_course_code": str(course_code).strip(),
+            submit: "Submit",
+            "hidden_redir": "Course_List",
+        }
+        # A rule page is not shaped like a course page and has its own identity
+        # fields - the requested code arrives as a radio value, and the heading
+        # names the rule rather than the course. Checking it with the course
+        # page's rule would reject every reused page, take the full navigation
+        # anyway, and cost a request more than it saves.
+        labels = {
+            "semester_label": getattr(self, "_course_semester_labels", {}).get(str(semester_code)),
+            "department_label": getattr(self, "_course_department_labels", {}).get(str(department_code)),
+        }
+        action_url = self._live_action(semester_code)
+        if action_url is not None:
+            try:
+                soup = await self._post_action(action_url, post_data)
+                if not self._session_lost(soup):
+                    _verify_course_rule_response_identity(soup, course_code, semester_code, **labels)
+                    self._touch_position()
+                    return soup
+            except ValueError:
+                pass
+            self._clear_position()
+        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
+        # Deliberately not verified here. Each caller checks identity after it
+        # has parsed, so a page that cannot be read is reported as unreadable
+        # rather than as the wrong course - which is the more useful of the two
+        # sentences and the one those callers' tests pin. Only the reused page
+        # is checked above, because nothing else stands between it and being
+        # trusted: SAIS answers from a position it no longer holds with the
+        # previous page rather than an error.
+        return await self._post_action(action_url, post_data)
+
     async def get_course_info(
         self, department_code: str, semester_code: str, course_code: str
     ) -> CourseDetails:
@@ -1138,21 +1188,8 @@ class SAISClient:
         self, department_code: str, semester_code: str, course_code: str
     ) -> List[CoursePrerequisite]:
         """Fetch prerequisite courses and rules for a course."""
-        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
-
-        post_data = {
-            "text_course_code": str(course_code).strip(),
-            "SubmitPrerequisite": "Submit",
-            "hidden_redir": "Course_List",
-        }
-
-        resp = await self._client.post(
-            action_url,
-            data=post_data,
-            headers={"Referer": action_url},
-        )
-        html = self._decode_html(resp)
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await self._verified_rule_page(
+            department_code, semester_code, course_code, "SubmitPrerequisite")
 
         prereqs: List[CoursePrerequisite] = []
         prerequisite_table_found = False
@@ -1192,21 +1229,8 @@ class SAISClient:
         self, department_code: str, semester_code: str, course_code: str
     ) -> List[CourseReplacement]:
         """Fetch equivalent / auto-replacement (Denk Dersler) courses for a course."""
-        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
-
-        post_data = {
-            "text_course_code": str(course_code).strip(),
-            "SubmitReplacement": "Submit",
-            "hidden_redir": "Course_List",
-        }
-
-        resp = await self._client.post(
-            action_url,
-            data=post_data,
-            headers={"Referer": action_url},
-        )
-        html = self._decode_html(resp)
-        soup = BeautifulSoup(html, "html.parser")
+        soup = await self._verified_rule_page(
+            department_code, semester_code, course_code, "SubmitReplacement")
 
         replacements: List[CourseReplacement] = []
         replacement_table_found = False
