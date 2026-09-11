@@ -1352,8 +1352,8 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
   const client = useQueryClient();
   const overrideValues = draftOverrideValues(detail);
   const overrideFields = Object.keys(overrideValues).sort();
-  const draftId = row.draft_id ?? detail.draft_id ?? detail.draft?.id ?? null;
-  const expectedRevision = detail.draft_revision ?? detail.draft?.revision ?? null;
+  const draftId = detail.draft?.id ?? detail.draft_id ?? row.draft_id ?? null;
+  const expectedRevision = detail.draft?.revision ?? detail.draft_revision ?? null;
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [reason, setReason] = useState("");
   const selectedOverrideFields = overrideFields.filter((field) => selectedFields.has(field));
