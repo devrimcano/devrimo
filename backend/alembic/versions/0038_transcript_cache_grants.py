@@ -15,6 +15,11 @@ this; this migration is the reason there was anything to fall back from.
 Also brings the table into the same lockdown as its neighbours, which 0037
 skipped as well: the Supabase-provided roles must not reach it, and the rows
 are transcripts.
+
+Only the API is granted. The assistant worker never touches this table, and
+granting it anyway is not harmless: the runtime identity guard rejects any
+write access a role is not supposed to have, so a surplus grant fails every
+chat turn. It did.
 """
 
 from alembic import op
@@ -56,20 +61,16 @@ def upgrade() -> None:
       END IF;
     END $$""")
 
-    # The assistant worker deletes a conversation's cached copy when the
-    # conversation changes underneath it, so it needs more than SELECT.
-    op.execute(f"""DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='devrimo_assistant') THEN
-        GRANT SELECT,INSERT,UPDATE,DELETE ON public.{TABLE} TO devrimo_assistant;
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='{TABLE}'
-            AND policyname='devrimo_assistant_access'
-        ) THEN
-          CREATE POLICY devrimo_assistant_access ON public.{TABLE}
-            TO devrimo_assistant USING (true) WITH CHECK (true);
-        END IF;
-      END IF;
-    END $$""")
+    # The assistant gets nothing, and that is deliberate. Only the API reads or
+    # writes this table - the copy is taken on the read path, and it is
+    # invalidated by comparing source_updated_at, so nothing has to delete it.
+    #
+    # The first version of this migration granted the worker all four anyway,
+    # on a sentence I wrote without checking. The runtime identity guard in
+    # app/db/ownership.py rejected it on the next connection, and every chat
+    # turn failed with "Runtime database identity has foreign write access to
+    # public.chat_transcript_cache" - which is the guard doing exactly its job.
+    # A grant nobody needs is not free; it is a way to break a worker.
 
 
 def downgrade() -> None:
@@ -77,10 +78,6 @@ def downgrade() -> None:
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='devrimo_api') THEN
         DROP POLICY IF EXISTS devrimo_api_access ON public.{TABLE};
         REVOKE ALL ON public.{TABLE} FROM devrimo_api;
-      END IF;
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='devrimo_assistant') THEN
-        DROP POLICY IF EXISTS devrimo_assistant_access ON public.{TABLE};
-        REVOKE ALL ON public.{TABLE} FROM devrimo_assistant;
       END IF;
     END $$""")
     op.execute(f"ALTER TABLE public.{TABLE} DISABLE ROW LEVEL SECURITY")

@@ -307,6 +307,13 @@ class Settings(BaseSettings):
     # At fifteen, a 10,048-step term needed 670 passes and the five seconds
     # between them added an hour of doing nothing. A pass is also bounded by
     # the wall clock below, so a larger batch cannot outlive its lease.
+    # Whose SAIS session the catalog is read through, by METU username. A
+    # whole-term import is about eleven thousand page loads behind one
+    # student's login, and until this existed nobody chose whose: every
+    # connected account was eligible and the rotation picked by day of the
+    # year. Set this and only that account is used; leave it empty and the old
+    # rotation applies.
+    catalog_source_metu_username: str = ""
     catalog_import_batch: int = Field(default=200, ge=1, le=5000)
     # A pass stops at this fraction of the job lease regardless of the batch,
     # so a slow source can never let a pass write past its own lease.
@@ -328,10 +335,12 @@ class Settings(BaseSettings):
     # is clamped down so a stale component can always be refreshed.
     catalog_reuse_info_seconds: int = Field(default=24 * 3600, ge=0)
     catalog_reuse_rules_seconds: int = Field(default=7 * 24 * 3600, ge=0)
-    # How many source pages may be in flight at once. Each one needs its own
-    # client, because a portal session serves one page at a time. One is the
-    # long-standing behaviour; raise it only against a source that tolerates
-    # more than one session for the same account.
+    # How many source pages may be in flight at once, on one client each.
+    # Leave this at one for SAIS: measured on production, three clients on one
+    # account cost 10s per step against 1.02s with one, and the source began
+    # closing connections. SAIS holds its proxy session against the account,
+    # not the cookie jar, so extra clients only fight over it. Kept
+    # configurable because a second *account* is the real way to parallelise.
     catalog_import_concurrency: int = Field(default=1, ge=1, le=8)
     # Local hours for automatic refreshes, as "start-end".
     catalog_warm_hours: str = "1-7"
