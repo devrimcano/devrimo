@@ -15,7 +15,12 @@ async function fetchConnection() {
 export function useCampus() {
   const queryClient = useQueryClient();
 
-  const query = useQuery({ queryKey: ["campus"], queryFn: fetchConnection });
+  // Same reasoning as useProfile: a campus connection changes when the student
+  // connects, disconnects or applies one, and every one of those paths writes
+  // the new value into this cache directly through setConnection below. Until
+  // then there is nothing to poll for, and the ten-second default had this
+  // refetching on every window focus alongside the profile and the session list.
+  const query = useQuery({ queryKey: ["campus"], queryFn: fetchConnection, staleTime: 5 * 60_000 });
 
   const setConnection = (connection: CampusConnection) => {
     queryClient.setQueryData(["campus"], connection);

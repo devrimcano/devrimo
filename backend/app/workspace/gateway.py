@@ -9,12 +9,10 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
-from app.agents.memory import MemoryChanges
 from app.auth.jwt import verify_access_token
 from app.config import get_settings
-from app.planning.models import PlanChanges
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, PreferenceChanges, ResourceRef, SearchRequest, UpdateStateChanges
+from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest
 from app.workspace.service import WorkspaceService
 
 
@@ -79,14 +77,26 @@ def create_gateway():
     @server.tool()
     async def update(
         resource: ResourceRef,
-        changes: PlanChanges | MemoryChanges | PreferenceChanges | UpdateStateChanges,
+        changes: dict,
         expected_revision: int,
         idempotency_key: str,
         ctx: Context,
     ) -> dict:
-        """Update an editable resource with optimistic concurrency."""
+        """Update an editable resource with optimistic concurrency.
+
+        `changes` is shaped by `resource.kind` and validated against it by
+        WorkspaceService.update. It is deliberately untyped here: as a union of
+        four models it expanded to roughly 17,500 characters of JSON schema,
+        larger than the other six tools together and carried on every model
+        step of every turn. See platform_tools.update, which this must match -
+        test_stateless_mcp_seven_tools_and_private_identity pins the two
+        surfaces together.
+        """
         return await service(ctx).update(
-            resource, changes.model_dump(exclude_unset=True), expected_revision, idempotency_key
+            resource,
+            changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
+            expected_revision,
+            idempotency_key,
         )
 
     @server.tool()

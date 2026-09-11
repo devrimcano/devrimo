@@ -77,7 +77,18 @@ class WorkspaceService:
         if ref.kind == "catalog.department":
             return envelope(ref, await self.domain("lookup_department", value=request.query))
         if request.query:
-            raise HTTPException(422, "This resource supports read, not text search")
+            # Names the call that works, because this is read by a model that
+            # will otherwise try the same search again with different wording.
+            # It did: twelve failing search calls on one free-elective question,
+            # because "supports read, not text search" said what was wrong and
+            # not what to do instead.
+            raise HTTPException(
+                422,
+                f"{ref.kind} has no text search. Call read with "
+                f'{{"kind": "{ref.kind}", "key": "<identifier>"}} instead. '
+                "To find a course by name, search catalog.departments for the department, "
+                "then read catalog.courses with that department.",
+            )
         return await self.read(ref)
 
     async def read(self, ref: ResourceRef):

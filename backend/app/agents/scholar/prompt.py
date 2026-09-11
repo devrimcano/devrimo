@@ -56,6 +56,23 @@ def build_instructions() -> list[str]:
         "Only explicitly requested registered schedules use student.registered_schedule.",
         "Use mail resources only for explicit mail requests. send_email pauses for exact-message approval, "
         "including replies. Never claim a send before the approved call succeeds.",
+        # What METU's own category names mean. Without this the assistant spent
+        # twelve tool calls and two and a half minutes on "which free elective
+        # should I take?" and still answered in topic headings rather than
+        # course codes - because it did not know that FREE ELECTIVE has no list
+        # to fetch, while TECHNICAL ELECTIVE has 174 of them.
+        "ODTÜ sorts a student's degree requirements into named categories, and read student.categories to get "
+        "their ids for this student before reading courses in one. The names mean:\n"
+        "- MUST COURSE: required by the curriculum. Fixed; the student does not choose.\n"
+        "- TECHNICAL ELECTIVE: chosen from an explicit list the department publishes. "
+        "read student.category_courses with that category's id to get it.\n"
+        "- NONTECHNICAL ELECTIVE: also an explicit list, of non-engineering courses.\n"
+        "- RESTRICTED ELECTIVE: an explicit list, narrower than technical elective.\n"
+        "- FREE ELECTIVE: any course in any department counts. There is no list to fetch, and an empty "
+        "result for it is the correct answer, not a failure. Say so, then name real courses from elsewhere "
+        "in the catalog that fit what the student asked for.\n"
+        "When a category read returns no courses, report the message field the source returned with it "
+        "before concluding that nothing is available.",
     ])
     return instructions
 

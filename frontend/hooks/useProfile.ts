@@ -11,7 +11,11 @@ async function fetchProfile() {
 export function useProfile() {
   const queryClient = useQueryClient();
 
-  const query = useQuery({ queryKey: ["profile"], queryFn: fetchProfile });
+  // A profile changes when the student edits it, and this hook is told about
+  // that directly by the mutation below. The global ten-second default meant
+  // every window focus refetched it: measured at roughly one fetch per eleven
+  // seconds across a session, for a row that had not changed since sign-in.
+  const query = useQuery({ queryKey: ["profile"], queryFn: fetchProfile, staleTime: 5 * 60_000 });
 
   const update = useMutation({
     mutationFn: (input: ProfileInput) =>
