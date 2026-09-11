@@ -15,7 +15,28 @@ export DEVRIMO_STATE="$DEVRIMO_ROOT/.codex/cloud/.cache"
 export TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgresql://devrimo:devrimo@localhost:5432/postgres}"
 export PG_BIN_DIR="${PG_BIN_DIR:-/usr/lib/postgresql/16/bin}"
 
+# The cloud environment is never pointed at the live database. Everything the
+# agent runs against is a disposable copy on this container's own PostgreSQL,
+# built from the migrations in this repo -- schema only, never production rows.
+# The copy exists so a hand-run server has a real database; the test suite still
+# creates and drops its own throwaway database from TEST_DATABASE_URL.
+export DEVRIMO_CODEX_DB="${DEVRIMO_CODEX_DB:-devrimo_codex}"
+export DATABASE_URL="postgresql+asyncpg://devrimo:devrimo@localhost:5432/${DEVRIMO_CODEX_DB}"
+export DATABASE_RUNTIME_ROLE="${DATABASE_RUNTIME_ROLE:-api}"
+
 log() { printf '\n[devrimo] %s\n' "$*"; }
+
+# A database URL that leaves this container is a configuration error, not a task
+# to run. Checked before the copy is built or the environment is exported.
+assert_local_database() {
+  case "$1" in
+    *@localhost:*|*@127.0.0.1:*|*//localhost*|*//127.0.0.1*) ;;
+    *)
+      echo "[devrimo] refusing a non-local database: $1" >&2
+      return 1
+      ;;
+  esac
+}
 
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
@@ -86,8 +107,39 @@ export PATH="$DEVRIMO_VENV/bin:\$PATH"
 export PYTHON="$DEVRIMO_VENV/bin/python"
 export TEST_DATABASE_URL="$TEST_DATABASE_URL"
 export PG_BIN_DIR="$PG_BIN_DIR"
+export DEVRIMO_CODEX_DB="$DEVRIMO_CODEX_DB"
+export DATABASE_URL="$DATABASE_URL"
+export DATABASE_RUNTIME_ROLE="$DATABASE_RUNTIME_ROLE"
 # >>> devrimo codex cloud <<<
 EOF
+}
+
+local_database_exists() {
+  as_postgres psql -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DEVRIMO_CODEX_DB'" | grep -qx 1
+}
+
+# Rebuild the disposable copy from the migrations. The schema is identical to
+# production because it comes from the same Alembic chain, but the rows are not:
+# nothing here is seeded from live student data.
+reset_local_database() {
+  assert_local_database "$DATABASE_URL"
+  start_postgres
+  log "building the local database copy $DEVRIMO_CODEX_DB (schema from migrations, no live rows)"
+  as_postgres psql -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS \"$DEVRIMO_CODEX_DB\""
+  as_postgres createdb -O devrimo "$DEVRIMO_CODEX_DB"
+  (
+    cd "$DEVRIMO_BACKEND"
+    ENVIRONMENT=development \
+      DATABASE_URL="$DATABASE_URL" \
+      DATABASE_RUNTIME_ROLE=api \
+      "$DEVRIMO_VENV/bin/python" -m alembic upgrade head
+  )
+}
+
+ensure_local_database() {
+  if ! local_database_exists; then
+    reset_local_database
+  fi
 }
 
 sync_backend_deps() {

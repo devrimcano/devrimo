@@ -35,6 +35,7 @@ as_postgres psql -v ON_ERROR_STOP=1 -q -c \
   "SELECT 'pgvector present' WHERE EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector')" >/dev/null
 
 sync_backend_deps
+reset_local_database
 sync_frontend_deps
 ensure_bashrc
 
@@ -44,4 +45,4 @@ ensure_bashrc
 log "stopping PostgreSQL so the cached snapshot is clean"
 stop_postgres
 
-log "setup complete: backend .venv, frontend node_modules, PostgreSQL 16 + pgvector"
+log "setup complete: backend .venv, frontend node_modules, PostgreSQL 16 + pgvector, local database copy"

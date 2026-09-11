@@ -16,7 +16,9 @@ ensure_postgres_role
 ensure_bashrc
 sync_backend_deps
 sync_frontend_deps
+ensure_local_database
 
-log "ready: TEST_DATABASE_URL=$TEST_DATABASE_URL"
+log "ready: tests use their own throwaway database from $TEST_DATABASE_URL"
+log "        the server uses the local copy DATABASE_URL=$DATABASE_URL"
 log "backend tests:  backend/.venv/bin/python -m pytest tests -q   (run from backend/)"
 log "frontend:       npm run contracts:check && npm run lint && npm run build   (run from frontend/)"
