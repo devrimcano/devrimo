@@ -17,6 +17,11 @@ __pycache__/
 /frontend/tsconfig.tsbuildinfo
 /backend/.pytest_cache/
 
+# Codex Cloud environment cache markers and the backend virtualenv it builds
+# (see .codex/cloud/). Machine-local, rebuilt by the setup script.
+/.codex/cloud/.cache/
+/backend/.venv/
+
 # Per-worktree development state written by `node scripts/dev.mjs`: this
 # worktree's identity, its allocated loopback ports, its generated stack
 # configuration, and its verification reports. Every one of these is specific
