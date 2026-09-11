@@ -69,6 +69,59 @@ def _traced(model: Model, runtime: AgentRuntimeConfig, session_id: str | None = 
     return model
 
 
+# OpenCode Go does not serve every model on the same wire API. Muse Spark, the
+# GPT 5.6 family and Grok answer on `/responses`; GLM, Kimi, DeepSeek, MiMo and
+# the rest are OpenAI chat-completions models. The gateway does not translate
+# between them - a model sent to the wrong path fails there, as a bare 500 or
+# "not supported for format openai" - so the choice has to be made here, not in
+# the model id alone. Qwen and MiniMax are served only on the Anthropic
+# `/messages` endpoint, for which this broker builds no client.
+_OPENCODE_RESPONSES_MODELS = ("muse-spark", "gpt-5.6", "gpt-6", "grok-")
+_OPENCODE_MESSAGES_MODELS = ("qwen3.8", "qwen3.7", "qwen3.6", "qwen3.5", "minimax")
+
+
+def opencode_uses_responses(model_id: str) -> bool:
+    """Whether OpenCode Go serves this model on the Responses API."""
+    return model_id.lower().startswith(_OPENCODE_RESPONSES_MODELS)
+
+
+def _build_opencode_model(model_id: str, runtime: AgentRuntimeConfig, session_id: str | None) -> Model:
+    settings = get_settings()
+    headers = opencode_session_headers(session_id) or None
+    if model_id.lower().startswith(_OPENCODE_MESSAGES_MODELS):
+        raise RuntimeError(
+            f"{model_id} is served on OpenCode Go's Anthropic /messages endpoint, which this "
+            "broker builds no client for; choose a Responses or chat-completions model."
+        )
+    if opencode_uses_responses(model_id):
+        from agno.models.openai import OpenAIResponses
+
+        return _traced(
+            OpenAIResponses(
+                id=model_id,
+                api_key=settings.agent_openai_api_key,
+                base_url=settings.agent_openai_base_url,
+                max_output_tokens=runtime.max_tokens,
+                default_headers=headers,
+            ),
+            runtime,
+            session_id,
+        )
+    from agno.models.openai import OpenAIChat
+
+    return _traced(
+        OpenAIChat(
+            id=model_id,
+            api_key=settings.agent_openai_api_key,
+            base_url=settings.agent_openai_base_url,
+            max_tokens=runtime.max_tokens,
+            default_headers=headers,
+        ),
+        runtime,
+        session_id,
+    )
+
+
 def build_model(runtime: AgentRuntimeConfig | None = None, *, session_id: str | None = None) -> Model:
     settings = get_settings()
     runtime = runtime or default_runtime_config()
@@ -83,19 +136,7 @@ def build_model(runtime: AgentRuntimeConfig | None = None, *, session_id: str | 
 
     base_url = (settings.agent_openai_base_url or "").lower()
     if "opencode.ai" in base_url or model_id == "muse-spark-1.2-contributor":
-        from agno.models.openai import OpenAIResponses
-
-        return _traced(
-            OpenAIResponses(
-                id=model_id,
-                api_key=settings.agent_openai_api_key,
-                base_url=settings.agent_openai_base_url,
-                max_output_tokens=runtime.max_tokens,
-                default_headers=opencode_session_headers(session_id) or None,
-            ),
-            runtime,
-            session_id,
-        )
+        return _build_opencode_model(model_id, runtime, session_id)
 
     if "openrouter.ai" in base_url:
         from agno.models.openrouter import OpenRouter
