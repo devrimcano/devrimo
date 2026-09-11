@@ -66,3 +66,16 @@ def test_categories_are_read_by_id_rather_than_by_name():
     instructions = _text()
     assert "student.categories" in instructions
     assert "id" in instructions
+
+
+def test_silence_before_a_tool_call_is_stated_as_a_rule_about_output():
+    """"Never narrate" was already there, and the model narrated anyway.
+
+    A real PHYS 213 reply arrived with four announcements run together in front
+    of the answer, because each was written just before a tool call and every
+    one of them stayed. The instruction is now about where output may appear -
+    nothing before a tool call - rather than about a style to avoid.
+    """
+    instructions = _text()
+    assert "Write nothing before a tool call" in instructions
+    assert "stay silent until you can answer" in instructions
