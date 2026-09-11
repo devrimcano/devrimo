@@ -612,10 +612,16 @@ export function CoursesPanel({
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  const changeTerm = (value: string) => { setTerm(value); setOffset(0); };
-  const changeDepartment = (value: string) => { setDepartment(value); setOffset(0); };
-  const changeState = (value: string) => { setStateFilter(value); setOffset(0); };
-  const changeSearch = (value: string) => { setSearch(value); setOffset(0); };
+  const resetSelection = () => setSelectedCodes(new Set());
+  const changeTerm = (value: string) => { setTerm(value); setOffset(0); resetSelection(); };
+  const changeDepartment = (value: string) => { setDepartment(value); setOffset(0); resetSelection(); };
+  const changeState = (value: string) => { setStateFilter(value); setOffset(0); resetSelection(); };
+  const changeSearch = (value: string) => { setSearch(value); setOffset(0); resetSelection(); };
+  // The batch bar counts and the publish list are built from the rows on this
+  // page, so a selection must not survive a page or scope change: an invisible
+  // selection would either vanish from the count or be sent by "Refresh
+  // selected" for a different scope.
+  const changeOffset = (value: number) => { setOffset(value); resetSelection(); };
 
   const releases = useQuery({
     queryKey: ["admin", "catalog", "releases", term],
@@ -758,7 +764,7 @@ export function CoursesPanel({
             <CourseFilters term={term} setTerm={changeTerm} department={department} setDepartment={changeDepartment} search={search} setSearch={changeSearch} state={stateFilter} setState={changeState} />
             <CoverageSummary data={courses.data} />
             {selectedCodes.size ? <BatchBar selectedRows={selectedRows} canWrite={canWrite} canPublish={canPublish} conflictTotal={conflictTotal} onImport={() => setImportOpen(true)} onPublish={() => setPublishOpen(true)} onClear={() => setSelectedCodes(new Set())} /> : null}
-            {courses.isLoading ? <Skeleton className="h-72 rounded-xl" /> : courses.error ? <ErrorState error={courses.error} retry={() => void courses.refetch()} /> : <CourseTable rows={rows} selected={selectedCodes} onSelect={toggleSelected} onOpen={setSelectedCourse} total={courses.data?.total ?? 0} offset={offset} setOffset={setOffset} />}
+            {courses.isLoading ? <Skeleton className="h-72 rounded-xl" /> : courses.error ? <ErrorState error={courses.error} retry={() => void courses.refetch()} /> : <CourseTable rows={rows} selected={selectedCodes} onSelect={toggleSelected} onOpen={setSelectedCourse} total={courses.data?.total ?? 0} offset={offset} setOffset={changeOffset} />}
             {selectedCourse ? <CourseDetailSheet row={selectedCourse} detail={detail.data} loading={detail.isLoading} error={detail.error} term={term} canRead={canRead} canWrite={canWrite} canPublish={canPublish} onClose={() => setSelectedCourse(null)} onRefresh={refresh} onCreateDraft={() => setCreateOpen(true)} /> : null}
           </>
         ) : view === "imports" ? (
@@ -1034,13 +1040,13 @@ function CourseDetailContent({
   const [reason, setReason] = useState("");
   const [verify, setVerify] = useState(false);
   const [verificationEvidence, setVerificationEvidence] = useState("");
-  const draft = detail.draft ?? null;
-  const draftId = row.draft_id ?? detail.draft_id ?? draft?.id ?? null;
-  const expectedRevision = detail.draft_revision ?? draft?.revision ?? 0;
+  const draftId = detail.draft?.id ?? detail.draft_id ?? row.draft_id ?? null;
+  const expectedRevision = detail.draft?.revision ?? detail.draft_revision ?? null;
   const conflicts = sourceConflictItems(row, detail);
   const updateDraft = useMutation({
     mutationFn: () => {
       if (!draftId) throw new Error(pick({ tr: "Önce bir taslak oluşturun.", en: "Create a draft before editing." }));
+      if (expectedRevision === null) throw new Error(pick({ tr: "Taslak sürümü bulunamadı.", en: "The draft revision is unavailable." }));
       if (reason.trim().length < 3) throw new Error(pick({ tr: "Değişiklik nedeni en az 3 karakter olmalı.", en: "A change reason must be at least 3 characters." }));
       return adminMutate<CatalogDraft>(`catalog/drafts/${encodeURIComponent(draftId)}`, "PATCH", {
         expected_revision: expectedRevision,
@@ -1422,7 +1428,7 @@ function DraftOverridesPanel({ detail, row, canWrite }: { detail: CatalogCourseD
 function HistoryView({ entries, locale }: { entries: CatalogHistoryEntry[]; locale: "tr" | "en" }) {
   const { pick } = useLocale();
   if (!entries.length) return <EmptyState title={pick({ tr: "Geçmiş kaydı yok", en: "No history yet" })} />;
-  return <div className="space-y-2">{entries.map((entry, index) => <div className="flex flex-wrap items-start gap-3 rounded-xl border p-3" key={`${entry.id ?? entry.action}-${index}`}><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted"><HistoryIcon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><StatusBadge value={entry.action} />{entry.revision !== null && entry.revision !== undefined ? <Badge variant="outline">r{entry.revision}</Badge> : null}<span className="text-xs text-muted-foreground">{formatDate(entry.created_at, locale)}</span></div><p className="mt-1 text-sm">{entry.reason ?? pick({ tr: "Neden belirtilmedi", en: "No reason provided" })}</p>{entry.actor ? <p className="text-xs text-muted-foreground">{entry.actor}</p> : null}</div></div>)}</div>;
+  return <div className="space-y-2">{entries.map((entry, index) => <div className="flex flex-wrap items-start gap-3 rounded-xl border p-3" key={`${entry.id ?? entry.action}-${index}`}><span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted"><HistoryIcon className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><StatusBadge value={entry.action} />{entry.revision !== null && entry.revision !== undefined ? <Badge variant="outline">r{entry.revision}</Badge> : null}<span className="text-xs text-muted-foreground">{formatDate(entry.created_at, locale)}</span></div>{entry.reason ? <p className="mt-1 text-sm">{entry.reason}</p> : null}{entry.actor ? <p className="text-xs text-muted-foreground">{entry.actor}</p> : null}</div></div>)}</div>;
 }
 
 function updateAt<T>(items: T[], index: number, patch: Partial<T>): T[] {

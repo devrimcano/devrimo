@@ -9,16 +9,11 @@ from sqlalchemy import or_, select
 
 from app.academic_catalog import service
 from app.academic_catalog.models import (
-    CatalogAdminOverride, CatalogCourse, CatalogSourceObservation, CatalogTerm,
+    CatalogAdminOverride,
+    CatalogCourse,
+    CatalogSourceObservation,
+    CatalogTerm,
 )
-
-
-_FIELD_COMPONENT = {
-    "title": "details", "department": "listing", "local_credits": "details",
-    "ects": "details", "level": "details", "availability": "details",
-    "campus": "details", "is_thesis": "listing", "sections": "sections",
-    "prerequisite_groups": "prerequisites", "replacements": "replacements",
-}
 
 
 async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
@@ -80,7 +75,7 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
             data[field] = source.data[field]
         else:
             data.pop(field, None)
-        affected.add(_FIELD_COMPONENT.get(field, field))
+        affected.add(service.FIELD_COMPONENT_MAP.get(field, field))
         if field == "sections":
             affected.add("constraints")
         records = (await db.scalars(select(CatalogAdminOverride).where(
@@ -100,7 +95,7 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
             value={"removed_override": value, "restored_source": field in source.data},
             reason=reason, active=False, removed_at=now, created_by=updated_by,
         ))
-    remaining_components = {_FIELD_COMPONENT.get(field, field) for field in overrides}
+    remaining_components = {service.FIELD_COMPONENT_MAP.get(field, field) for field in overrides}
     if "sections" in overrides:
         remaining_components.add("constraints")
     for component in affected:

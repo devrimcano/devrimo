@@ -740,6 +740,25 @@ def _tool_component(tool: str) -> str:
     }.get(tool, "details")
 
 
+# One canonical field -> component map.  The draft editor and the override
+# removal path must agree: an edit that marks a component nothing reads leaves
+# the real one looking fresh.  ``is_thesis`` belongs to the listing.
+FIELD_COMPONENT_MAP = {
+    "title": "details",
+    "department": "listing",
+    "local_credits": "details",
+    "ects": "details",
+    "level": "details",
+    "availability": "details",
+    "campus": "details",
+    "is_thesis": "listing",
+    "sections": "sections",
+    "prerequisite_groups": "prerequisites",
+    "replacements": "replacements",
+    "completeness": "details",
+}
+
+
 def _error_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -2195,19 +2214,6 @@ async def patch_draft(
             section["restrictions_status"] = "verified" if verify else "unknown"
             section["restrictions_observed_at"] = _iso(now) if verify else None
             section["restrictions_source_fetched_at"] = None
-    field_components = {
-        "title": "details",
-        "department": "listing",
-        "local_credits": "details",
-        "ects": "details",
-        "level": "details",
-        "availability": "details",
-        "campus": "details",
-        "sections": "sections",
-        "prerequisite_groups": "prerequisites",
-        "replacements": "replacements",
-        "completeness": "details",
-    }
     for key in patch:
         # Every admin edit is retained as a per-field source override.  An
         # ordinary edit remains pending verification: a reason documents why
@@ -2220,7 +2226,7 @@ async def patch_draft(
             "updated_by": str(updated_by) if updated_by else None,
             "updated_at": _iso(now),
         }
-        component = field_components.get(key, key)
+        component = FIELD_COMPONENT_MAP.get(key, key)
         meta = dict(current["component_status"].get(component, {}))
         meta.update(
             {
@@ -3150,6 +3156,7 @@ async def course_detail(
     if course is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Course not found")
     release = await _release_for_term(db, organization_id, term, required=False)
+    draft = await _active_draft_for(db, organization_id, term.id, course.id)
     pair = (await _release_revisions(db, organization_id, release, course_code=course.course_code)) if release else []
     if pair:
         _, revision = pair[0]
@@ -3159,8 +3166,24 @@ async def course_detail(
         data["course_revision_id"] = str(revision.id)
         data["release_id"] = str(release.id) if release else None
         data["_catalog"] = _catalog_metadata(revision, release)
+        # Issues are admin review material, so they are attached here rather
+        # than in _revision_data, which the published reader also builds from.
+        data["issues"] = _jsonable(revision.issues or [])
+        if draft is not None:
+            # The published revision stays at the top level - content fields and
+            # release metadata - but the pending draft rides beside it.  Without
+            # this, a course that already has a release could not be edited
+            # after the next import created a draft: the editor read the
+            # published revision's number and the save was rejected.  The
+            # draft's state, issues and overrides are what the review surface
+            # acts on, so they win at the top level.
+            data["draft"] = serialize_draft(draft)
+            data["draft_id"] = str(draft.id)
+            data["draft_revision"] = int(draft.revision)
+            data["state"] = draft.state
+            data["issues"] = _jsonable(draft.issues or [])
+            data["field_overrides"] = _jsonable(draft.field_overrides or {})
     else:
-        draft = await _active_draft_for(db, organization_id, term.id, course.id)
         revision = await _latest_revision_for(db, organization_id, term.id, course.id)
         if draft is not None:
             data = await _draft_detail(db, draft, course, term, release)
@@ -3186,6 +3209,7 @@ async def course_detail(
     data["history"] = [
         {
             "id": str(item.id),
+            "action": item.state,
             "revision": item.revision,
             "state": item.state,
             "created_at": _iso(item.created_at),
