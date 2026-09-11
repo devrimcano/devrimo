@@ -623,3 +623,88 @@ async def test_a_department_that_cannot_be_listed_does_not_end_the_import(monkey
         updated = await db.get(CatalogImportJob, job_id)
         assert updated.status in {"queued", "completed"}
         assert updated.checkpoint_offset >= 2
+
+
+async def test_fresh_leaf_steps_are_dropped_unless_the_import_is_forced():
+    from datetime import UTC, timedelta
+
+    from app.academic_catalog.service import drop_fresh_leaf_steps, ingest_observation
+
+    now = datetime.now(UTC)
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        await ingest_observation(
+            db, METU_ID, "get_course_info",
+            {"semester": "20261", "department": "240", "course": "2402201"},
+            {"course_code": "2402201", "course_name": "Fresh", "sections": []},
+            now, source_fetched_at=now,
+        )
+        await ingest_observation(
+            db, METU_ID, "get_course_info",
+            {"semester": "20261", "department": "240", "course": "2402202"},
+            {"course_code": "2402202", "course_name": "Stale", "sections": []},
+            now - timedelta(days=3), source_fetched_at=now - timedelta(days=3),
+        )
+        await db.commit()
+
+        steps = [
+            {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402201"}},
+            {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402202"}},
+            {"tool": "list_program_courses", "values": {"semester": "20261", "department": "240"}},
+        ]
+        kept = await drop_fresh_leaf_steps(db, METU_ID, "20261", steps)
+
+    assert [step["values"].get("course") for step in kept] == ["2402202", None]
+
+    async with SessionLocal() as db:
+        forced = await drop_fresh_leaf_steps(db, METU_ID, "20261", steps, force=True)
+
+    assert forced == steps
+
+
+async def test_a_job_satisfied_by_fresh_observations_reads_nothing(monkeypatch):
+    from datetime import UTC
+
+    from app.academic_catalog.service import enqueue_import, ingest_observation
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    reads = []
+
+    class Source:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, tool, values):
+            reads.append(tool)
+            return {}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+
+    now = datetime.now(UTC)
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        for tool, payload in (
+            ("get_course_info", {"course_code": "2402201", "course_name": "Fixture", "sections": []}),
+            ("get_course_prerequisites", []),
+            ("get_course_replacements", []),
+        ):
+            await ingest_observation(
+                db, METU_ID, tool,
+                {"semester": "20261", "department": "240", "course": "2402201"},
+                payload, now, source_fetched_at=now,
+            )
+        await enqueue_import(db, METU_ID, "20261", course_codes=["2402201"], requested_by=uuid4())
+        await db.commit()
+
+    result = await worker.run_once()
+
+    assert result.outcome == "completed"
+    assert reads == [], "fresh observations must satisfy the job without a source read"

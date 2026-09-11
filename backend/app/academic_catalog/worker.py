@@ -561,6 +561,15 @@ async def run_once() -> CatalogPassResult:
             error_code="invalid_import_scope",
             scheduled_count=scheduled_count,
         )
+    force_refresh = bool((job.payload or {}).get("force_refresh"))
+    if not plan_persisted and steps and not force_refresh:
+        # An unforced job may already be satisfied by pages read recently.
+        # Expansion steps stay so the plan can still grow; a leaf whose
+        # observation is inside its reuse window is not fetched again.
+        async with SessionLocal() as db:
+            steps = await catalog_service.drop_fresh_leaf_steps(
+                db, job.organization_id, job.term, steps, force=False,
+            )
     # 0034 moves the hot cursor out of the growing JSONB plan. The fallback
     # keeps jobs written before that migration resumable and also tolerates
     # hand-created legacy fixtures that only have the JSONB cursor.
@@ -736,6 +745,11 @@ async def run_once() -> CatalogPassResult:
                     discovery_only = (job.payload or {}).get("discovery_only")
                     if discovery_only and step["tool"] == "list_program_courses":
                         added = []
+                    if added and not force_refresh:
+                        async with SessionLocal() as db:
+                            added = await catalog_service.drop_fresh_leaf_steps(
+                                db, job.organization_id, job.term, added, force=False,
+                            )
                     if added:
                         # Restrictions for this course precede the next
                         # expensive detail fetch; a listing's courses go on the

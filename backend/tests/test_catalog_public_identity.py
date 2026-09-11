@@ -1,8 +1,15 @@
-import pytest
 from datetime import UTC, datetime, timedelta
 
-from app.academic_catalog.service import _parse_observation, _prior_grade, _section_constraint_metadata
+import pytest
+
 from app.academic_catalog.models import CatalogCourseRevision, CatalogSection
+from app.academic_catalog.service import (
+    _parse_observation,
+    _prior_grade,
+    _section_constraint_metadata,
+    drop_reused_steps,
+    leaf_step_key,
+)
 
 
 @pytest.mark.parametrize("field,value", [("course_code", "2300201"), ("semester", "20252"), ("section", "2")])
@@ -73,3 +80,33 @@ def test_thesis_listing_parses_courses_and_marks_them():
     assert issues == []
     assert candidate["courses"][0]["course_code"] == "5670801"
     assert candidate["courses"][0]["data"]["thesis"] is True
+
+
+def test_leaf_step_keys_separate_detail_from_section():
+    assert leaf_step_key({"tool": "get_course_info", "values": {"course": "2402201"}}) == (
+        "get_course_info", "2402201", None)
+    assert leaf_step_key({
+        "tool": "get_section_constraints", "values": {"course": "2402201", "section": "2"},
+    }) == ("get_section_constraints", "2402201", "2")
+
+
+def test_reused_leaf_steps_are_dropped_and_listings_survive():
+    steps = [
+        {"tool": "list_program_courses", "values": {"semester": "20261", "department": "240"}},
+        {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402201"}},
+        {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402202"}},
+        {"tool": "get_section_constraints", "values": {"semester": "20261", "course": "2402201", "section": "1"}},
+        {"tool": "get_course_prerequisites", "values": {"semester": "20261", "course": "2402201"}},
+    ]
+    reused = {
+        ("get_course_info", "2402201", None),
+        ("get_section_constraints", "2402201", "1"),
+    }
+
+    kept = drop_reused_steps(steps, reused)
+
+    assert [(step["tool"], step["values"].get("course")) for step in kept] == [
+        ("list_program_courses", None),
+        ("get_course_info", "2402202"),
+        ("get_course_prerequisites", "2402201"),
+    ]

@@ -321,6 +321,12 @@ class Settings(BaseSettings):
     # interrupted pass re-reads at most this many pages and never loses the
     # courses those pages discovered.
     catalog_import_checkpoint_steps: int = Field(default=25, ge=1, le=1000)
+    # How long a successful source observation may satisfy an import step
+    # before the worker reads that page again.  Detail and section pages go
+    # stale during add-drop; rule pages change by publication.  Forced imports
+    # ignore both windows.
+    catalog_reuse_info_seconds: int = 24 * 3600
+    catalog_reuse_rules_seconds: int = 7 * 24 * 3600
     # How many source pages may be in flight at once. Each one needs its own
     # client, because a portal session serves one page at a time. One is the
     # long-standing behaviour; raise it only against a source that tolerates
