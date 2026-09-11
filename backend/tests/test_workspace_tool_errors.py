@@ -59,6 +59,21 @@ def test_a_very_long_upstream_error_is_bounded():
     assert len(detail) < 700
 
 
+def test_a_missing_catalog_course_is_marked_final():
+    """A 404 that means "not in this term's catalog" is not a retry prompt.
+
+    Re-asking the same missing course as sections, prerequisites and eligibility
+    cost one run 317 seconds over twenty-three model calls; the tool result now
+    says outright that the answer will not change.
+    """
+    detail = workspace_error_text(
+        _result(is_error=True, text="Course is not available in the published release"), "read"
+    )
+    assert "not available in the published release" in detail
+    assert "final" in detail.casefold()
+    assert "do not retry" in detail.casefold()
+
+
 # --- and how it travels ------------------------------------------------------
 
 

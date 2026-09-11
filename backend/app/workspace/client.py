@@ -26,6 +26,16 @@ def trusted_workspace_token(token: str, approval_token: str | None = None):
         _access_token.reset(marker)
 
 
+# A catalog read that answers one of these cannot succeed on a retry: the course
+# is absent from the published release for the requested term, not temporarily
+# unavailable. A run on 2026-09-11 spent 317 seconds and twenty-three model calls
+# re-asking for a missing course as sections, then prerequisites, then
+# eligibility, because each 404 read as "try something else". Marking it final in
+# the tool result stops the loop even when the same rule in the instructions is
+# ignored.
+_TERMINAL_CATALOG_MISSES = ("not available in the published release",)
+
+
 def workspace_error_text(result, name: str) -> str:
     """What the workspace actually said, rather than that something went wrong.
 
@@ -43,7 +53,13 @@ def workspace_error_text(result, name: str) -> str:
         if text:
             # Bounded: this is model input, and an upstream server is free to
             # return a page of HTML in an error block.
-            return f"{name} failed: {text[:600]}"
+            detail = text[:600]
+            if any(marker in detail.casefold() for marker in _TERMINAL_CATALOG_MISSES):
+                detail += (
+                    " This is final for the requested term: do not retry it as another catalog resource kind, "
+                    "another term, or a search. Tell the student the course is not in the catalog and stop."
+                )
+            return f"{name} failed: {detail}"
     return f"{name} failed, and the workspace gave no reason"
 
 
