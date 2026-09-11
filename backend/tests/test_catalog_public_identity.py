@@ -90,23 +90,25 @@ def test_leaf_step_keys_separate_detail_from_section():
     }) == ("get_section_constraints", "2402201", "2")
 
 
-def test_reused_leaf_steps_are_dropped_and_listings_survive():
+def test_reused_leaf_steps_are_dropped_and_parent_steps_survive():
     steps = [
         {"tool": "list_program_courses", "values": {"semester": "20261", "department": "240"}},
         {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402201"}},
-        {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402202"}},
         {"tool": "get_section_constraints", "values": {"semester": "20261", "course": "2402201", "section": "1"}},
+        {"tool": "get_section_constraints", "values": {"semester": "20261", "course": "2402201", "section": "2"}},
         {"tool": "get_course_prerequisites", "values": {"semester": "20261", "course": "2402201"}},
     ]
     reused = {
-        ("get_course_info", "2402201", None),
         ("get_section_constraints", "2402201", "1"),
+        ("get_course_prerequisites", "2402201", None),
     }
 
     kept = drop_reused_steps(steps, reused)
 
-    assert [(step["tool"], step["values"].get("course")) for step in kept] == [
-        ("list_program_courses", None),
-        ("get_course_info", "2402202"),
-        ("get_course_prerequisites", "2402201"),
+    # Listing and detail steps are how the plan grows and how sections are
+    # discovered; only the data-carrying leaves are dropped.
+    assert [(step["tool"], step["values"].get("course"), step["values"].get("section")) for step in kept] == [
+        ("list_program_courses", None, None),
+        ("get_course_info", "2402201", None),
+        ("get_section_constraints", "2402201", "2"),
     ]

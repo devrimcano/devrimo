@@ -633,28 +633,50 @@ async def test_fresh_leaf_steps_are_dropped_unless_the_import_is_forced():
     now = datetime.now(UTC)
     async with SessionLocal() as db:
         await ensure_metu(db)
+        arguments = {"semester": "20261", "department": "240", "course": "2402201", "section": "1"}
         await ingest_observation(
-            db, METU_ID, "get_course_info",
-            {"semester": "20261", "department": "240", "course": "2402201"},
-            {"course_code": "2402201", "course_name": "Fresh", "sections": []},
+            db, METU_ID, "get_section_constraints", arguments,
+            {"course_code": "2402201", "section": "1", "constraints": []},
             now, source_fetched_at=now,
         )
+        old = now - timedelta(days=3)
         await ingest_observation(
-            db, METU_ID, "get_course_info",
-            {"semester": "20261", "department": "240", "course": "2402202"},
-            {"course_code": "2402202", "course_name": "Stale", "sections": []},
-            now - timedelta(days=3), source_fetched_at=now - timedelta(days=3),
+            db, METU_ID, "get_section_constraints",
+            {**arguments, "course": "2402202"},
+            {"course_code": "2402202", "section": "1", "constraints": []},
+            old, source_fetched_at=old,
+        )
+        # A backfilled cache row: it has an observation time but no source fetch,
+        # and must never satisfy a step.
+        await ingest_observation(
+            db, METU_ID, "get_section_constraints",
+            {**arguments, "course": "2402203"},
+            {"course_code": "2402203", "section": "1", "constraints": []},
+            now,
         )
         await db.commit()
 
         steps = [
+            {"tool": "get_section_constraints",
+             "values": {"semester": "20261", "department": "240", "course": "2402201", "section": "1"}},
+            {"tool": "get_section_constraints",
+             "values": {"semester": "20261", "department": "240", "course": "2402202", "section": "1"}},
+            {"tool": "get_section_constraints",
+             "values": {"semester": "20261", "department": "240", "course": "2402203", "section": "1"}},
             {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402201"}},
-            {"tool": "get_course_info", "values": {"semester": "20261", "department": "240", "course": "2402202"}},
             {"tool": "list_program_courses", "values": {"semester": "20261", "department": "240"}},
         ]
         kept = await drop_fresh_leaf_steps(db, METU_ID, "20261", steps)
 
-    assert [step["values"].get("course") for step in kept] == ["2402202", None]
+    # Only the fresh network read is reused. The stale and backfilled sections
+    # are kept, and detail and listing steps always run so their children can be
+    # discovered.
+    assert [(step["tool"], step["values"].get("course"), step["values"].get("section")) for step in kept] == [
+        ("get_section_constraints", "2402202", "1"),
+        ("get_section_constraints", "2402203", "1"),
+        ("get_course_info", "2402201", None),
+        ("list_program_courses", None, None),
+    ]
 
     async with SessionLocal() as db:
         forced = await drop_fresh_leaf_steps(db, METU_ID, "20261", steps, force=True)
@@ -662,7 +684,7 @@ async def test_fresh_leaf_steps_are_dropped_unless_the_import_is_forced():
     assert forced == steps
 
 
-async def test_a_job_satisfied_by_fresh_observations_reads_nothing(monkeypatch):
+async def test_a_course_job_reuses_fresh_rules_but_still_reads_its_detail(monkeypatch):
     from datetime import UTC
 
     from app.academic_catalog.service import enqueue_import, ingest_observation
@@ -681,7 +703,7 @@ async def test_a_job_satisfied_by_fresh_observations_reads_nothing(monkeypatch):
 
         async def read(self, tool, values):
             reads.append(tool)
-            return {}
+            return {"course_code": "2402201", "course_name": "Fixture", "sections": []}
 
         async def aclose(self):
             pass
@@ -707,4 +729,60 @@ async def test_a_job_satisfied_by_fresh_observations_reads_nothing(monkeypatch):
     result = await worker.run_once()
 
     assert result.outcome == "completed"
-    assert reads == [], "fresh observations must satisfy the job without a source read"
+    # Fresh rule pages are reused, but the detail page always runs: it is what
+    # discovers the section steps.
+    assert reads == ["get_course_info"]
+
+
+async def test_a_fresh_detail_still_expands_its_pending_sections(monkeypatch):
+    from datetime import UTC
+
+    from app.academic_catalog.service import enqueue_import, ingest_observation
+
+    settings = worker.get_settings()
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    monkeypatch.setattr(settings, "catalog_warm_enabled", False)
+    monkeypatch.setattr(worker, "_within_hours", lambda *_: True)
+    monkeypatch.setattr(worker, "_account", AsyncMock(return_value=(uuid4(), object())))
+
+    reads = []
+
+    class Source:
+        def __init__(self, _secret, _admission):
+            pass
+
+        async def read(self, tool, values):
+            reads.append(tool)
+            if tool == "get_course_info":
+                return {"course_code": "2402201", "course_name": "Fixture",
+                        "sections": [{"section": "1"}]}
+            return {"course_code": "2402201", "section": values.get("section"), "constraints": []}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(worker, "CatalogSource", Source)
+
+    now = datetime.now(UTC)
+    async with SessionLocal() as db:
+        await ensure_metu(db)
+        for tool, payload in (
+            ("get_course_info", {"course_code": "2402201", "course_name": "Fixture",
+                                 "sections": [{"section": "1"}]}),
+            ("get_course_prerequisites", []),
+            ("get_course_replacements", []),
+        ):
+            await ingest_observation(
+                db, METU_ID, tool,
+                {"semester": "20261", "department": "240", "course": "2402201"},
+                payload, now, source_fetched_at=now,
+            )
+        # No section observation exists: the child must still be fetched even
+        # though its fresh parent is reused.
+        await enqueue_import(db, METU_ID, "20261", course_codes=["2402201"], requested_by=uuid4())
+        await db.commit()
+
+    result = await worker.run_once()
+
+    assert result.outcome == "completed"
+    assert reads == ["get_course_info", "get_section_constraints"]

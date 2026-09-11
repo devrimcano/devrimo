@@ -717,15 +717,18 @@ class SAISClient:
         )
         html = self._decode_html(resp)
         res_soup = BeautifulSoup(html, "html.parser")
-        if self._session_lost(res_soup) and not _retrying:
+        if self._session_lost(res_soup):
             # The held session is no longer the one the server has. Drop it and
             # take the long way round exactly once; a second failure is a real
-            # failure and belongs to the caller.
-            self._session = None
+            # failure and belongs to the caller.  A login page never becomes a
+            # position, so a later action cannot be posted into it.
             self._clear_position()
-            return await self._submit_course_list_page(
-                department_code, semester_code, _retrying=True
-            )
+            if not _retrying:
+                self._session = None
+                return await self._submit_course_list_page(
+                    department_code, semester_code, _retrying=True
+                )
+            return action, html, res_soup
         self._note_position(action, semester_code)
         return action, html, res_soup
 
@@ -1269,10 +1272,10 @@ class SAISClient:
             if any("code" in h for h in headers) and any("name" in h for h in headers):
                 course_table_found = True
                 for tr in rows[1:]:
+                    data_rows += 1
                     cells = tr.find_all(["td", "th"])
                     if len(cells) < 6:
                         continue
-                    data_rows += 1
                     # The live table leads with an empty radio cell, exactly
                     # like the programme course list; older shapes put the code
                     # first.  Take the radio's value when it has one, then

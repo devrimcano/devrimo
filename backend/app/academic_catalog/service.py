@@ -1907,8 +1907,11 @@ def import_dedup_key(
     )
 
 
+# Only pages whose data stands alone are reusable.  Course detail steps are
+# deliberately absent: their responses are what discovers the section steps, so
+# skipping a detail would hide a section whose own observation is missing or
+# failed until the detail observation ages out.
 _LEAF_REUSE_TOOLS = (
-    "get_course_info",
     "get_section_constraints",
     "get_course_prerequisites",
     "get_course_replacements",
@@ -1916,7 +1919,7 @@ _LEAF_REUSE_TOOLS = (
 
 
 def leaf_reuse_ttl_seconds(tool: str) -> int:
-    """How long a successful observation may satisfy one leaf step."""
+    """How long a successful observation may satisfy one reusable leaf step."""
     from app.config import get_settings
 
     settings = get_settings()
@@ -1951,10 +1954,11 @@ async def drop_fresh_leaf_steps(
 ) -> list[dict[str, Any]]:
     """Drop leaf steps whose latest successful observation is still fresh.
 
-    Listing steps always run: they are how the plan grows, and a skipped
-    listing would hide the courses it would have added.  Only the pages whose
-    data is already recorded are skipped, so an unforced refresh becomes the
-    difference since the last one.  A forced refresh returns every step.
+    Listing and course detail steps always run: they are how the plan grows and
+    how its section steps are discovered.  A reused observation must carry
+    network-fetched evidence - backfilled cache rows have no
+    ``source_fetched_at`` and never satisfy a step.  A forced refresh returns
+    every step.
     """
     kept = list(steps)
     if force or not kept:
@@ -1980,7 +1984,8 @@ async def drop_fresh_leaf_steps(
             CatalogSourceObservation.organization_id == organization_id,
             CatalogSourceObservation.tool == tool,
             CatalogSourceObservation.status.in_(("success", "empty")),
-            CatalogSourceObservation.observed_at >= now - timedelta(seconds=ttl),
+            CatalogSourceObservation.source_fetched_at.is_not(None),
+            CatalogSourceObservation.source_fetched_at >= now - timedelta(seconds=ttl),
             CatalogSourceObservation.course_code.in_(codes),
         ]
         if term_code:

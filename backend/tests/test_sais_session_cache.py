@@ -361,6 +361,18 @@ async def test_a_session_that_is_gone_for_good_does_not_retry_for_ever(sais):
     assert opens == [64, 64], "one retry, then the answer is handed back as it is"
 
 
+async def test_a_login_page_never_becomes_a_position(sais):
+    """A dead session must not be reused: a later action would post into it."""
+    client = _client(sais)
+    _track_opens(client, sais)
+    _post_returning(client, [AUTOLOGIN])
+
+    await client._submit_course_list_page("236", "20252")
+
+    assert client._position is None
+    assert client._course_page is None
+
+
 async def test_an_empty_department_is_an_answer_not_a_lost_session(sais):
     """The trap in the other direction.
 
@@ -706,6 +718,27 @@ async def test_unreadable_thesis_rows_fail_instead_of_reading_as_empty(sais):
         "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
         "<tr><td></td><td>NOT-A-CODE</td><td>SPECIAL STUDIES</td><td>10.0</td><td>0.00</td>"
         "<td>Graduate</td><td>Thesis</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+
+    with pytest.raises(ValueError, match="thesis course table"):
+        await client.get_thesis_courses("567", "20261")
+
+
+async def test_short_thesis_rows_fail_instead_of_reading_as_empty(sais):
+    """Rows too short to hold a code are layout drift, not an empty term."""
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th></tr>"
+        "<tr><td></td><td>5670801</td></tr>"
         "</table>"
     )
 
