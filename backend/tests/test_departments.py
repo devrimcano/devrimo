@@ -9,6 +9,7 @@ else notices — the student is simply told the wrong thing.
 
 import pytest
 
+from app.academic_catalog.service import _resolve_catalog_scope
 from app.campus.departments import (
     all_departments,
     by_abbreviation,
@@ -138,6 +139,31 @@ def test_no_two_departments_claim_one_abbreviation():
             f"{department.abbreviation} claimed by {seen.get(department.abbreviation)} and {department.code}"
         )
         seen[department.abbreviation] = department.code
+
+
+@pytest.mark.parametrize(
+    ("department", "course", "expected_department", "expected_course"),
+    [
+        # The bug: the student-facing read compared the lettered code against
+        # the numeric catalog key, so it said "not available in the published
+        # release" for a course the admin panel listed.
+        (None, "EE201", "567", "5670201"),
+        (None, "EE 201", "567", "5670201"),
+        (None, "CENG 331", "571", "5710331"),
+        # Already numeric passes through, with its owner identified.
+        (None, "5670201", "567", "5670201"),
+        # A department named on its own resolves to its code.
+        ("EE", None, "567", None),
+        ("571", None, "571", None),
+        # A department abbreviation alongside a numeric course resolves too.
+        ("CENG", "5710331", "571", "5710331"),
+        (None, None, None, None),
+    ],
+)
+def test_the_catalog_read_resolves_a_students_lettered_code(
+    department, course, expected_department, expected_course
+):
+    assert _resolve_catalog_scope(department, course) == (expected_department, expected_course)
 
 
 def test_offsite_and_joint_programmes_are_excluded():

@@ -233,6 +233,27 @@ def _scope(values: dict[str, Any]) -> tuple[str | None, str | None, str | None, 
     )
 
 
+def _resolve_catalog_scope(department: str | None, requested_course: str | None) -> tuple[str | None, str | None]:
+    """Map a student's lettered code onto the catalog's numeric key.
+
+    "EE 201" is 5670201 in the catalog, and the agent hands the lettered form
+    straight through. Without this the published read compares "EE201" against
+    the numeric key, finds nothing, and answers "not available in the published
+    release" for a course the admin panel lists. The admin listing already
+    resolves codes this way; this brings the student-facing read in line.
+    """
+    if requested_course is not None:
+        expanded = department_directory.expand_course_code(requested_course)
+        if expanded is not None:
+            requested_course, expanded_department = expanded
+            department = department or expanded_department.code
+    if department:
+        resolved_department = department_directory.resolve(department)
+        if resolved_department is not None:
+            department = resolved_department.code
+    return department, requested_course
+
+
 def _rows(value: Any, names: Iterable[str] = ()) -> list[dict[str, Any]]:
     """Find labelled rows without treating arbitrary dictionaries as tables."""
 
@@ -4620,6 +4641,7 @@ async def read_tool(
     organization_id = await _organization_for_user(db, user_id)
     values = dict(values or {})
     term_code, department, requested_course, section_code = _scope(values)
+    department, requested_course = _resolve_catalog_scope(department, requested_course)
     if tool_suffix in {"get_departments_and_semesters", "search_departments"}:
         return await _directory_read(
             db,
