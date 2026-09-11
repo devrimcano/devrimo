@@ -64,3 +64,8 @@ def test_frontend_retention_keeps_active_and_one_complete_rollback():
     assert '[[ "$name" =~ ^([0-9a-f]{40}|previous)-[0-9]{8}-[0-9]{6}$ ]]' in SCRIPT_TEXT
     assert '("$frontend_releases"/*) rm -rf -- "$directory"' in SCRIPT_TEXT
     assert SCRIPT_TEXT.count("prune_frontend_releases") >= 3
+
+
+def test_production_keeps_catalog_readers_on_the_published_cache():
+    assert "/etc/devrimo/api.env ACADEMIC_CATALOG_READS_ENABLED true" in SCRIPT_TEXT
+    assert "/etc/devrimo/assistant.env ACADEMIC_CATALOG_READS_ENABLED true" in SCRIPT_TEXT
