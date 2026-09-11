@@ -410,7 +410,7 @@ fi
 # newly imported drafts into live data without another explicit review.
 catalog_cutover_marker="$DEPLOY_DIR/.catalog-20261-cutover-v1"
 if [ ! -f "$catalog_cutover_marker" ]; then
-  if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export DATABASE_URL=\"\$DATABASE_MIGRATION_URL\" && unset DATABASE_MIGRATION_URL && export ENVIRONMENT=production DATABASE_RUNTIME_ROLE=api && .venv/bin/python -m app.academic_catalog.publish_cli --term 20261 --apply"; then
+  if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export ENVIRONMENT=production DATABASE_RUNTIME_ROLE=api && .venv/bin/python -m app.academic_catalog.publish_cli --term 20261 --apply"; then
     sudo /usr/bin/systemctl start devrimo-api.service
     exit 1
   fi
