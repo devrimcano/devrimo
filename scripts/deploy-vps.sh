@@ -399,9 +399,13 @@ sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
 
 # Keep the migration/restart window short. Alembic migrations in this project
 # may change ownership and remove retired columns; keep the recovery snapshot.
-sudo /usr/bin/systemctl stop devrimo-api.service
+catalog_writer_unit=devrimo-catalog-worker.service
+# Publishing materializes every ready draft in one transaction.  The catalog
+# worker writes the same revision tables, so leaving the old worker active can
+# deadlock the cutover even though the API has already been stopped.
+sudo /usr/bin/systemctl stop devrimo-api.service "$catalog_writer_unit"
 if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export ENVIRONMENT=production && .venv/bin/python -m alembic upgrade head && .venv/bin/python -m alembic check"; then
-  sudo /usr/bin/systemctl start devrimo-api.service
+  sudo /usr/bin/systemctl start devrimo-api.service "$catalog_writer_unit"
   exit 1
 fi
 
@@ -411,7 +415,7 @@ fi
 catalog_cutover_marker="$DEPLOY_DIR/.catalog-20261-cutover-v1"
 if [ ! -f "$catalog_cutover_marker" ]; then
   if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export ENVIRONMENT=production DATABASE_RUNTIME_ROLE=api && .venv/bin/python -m app.academic_catalog.publish_cli --term 20261 --apply"; then
-    sudo /usr/bin/systemctl start devrimo-api.service
+    sudo /usr/bin/systemctl start devrimo-api.service "$catalog_writer_unit"
     exit 1
   fi
   touch "$catalog_cutover_marker"
