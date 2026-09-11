@@ -516,6 +516,20 @@ function formToPatch(form: CourseForm): CatalogDraftPatch {
   };
 }
 
+function changedFormPatch(form: CourseForm, baseline: CourseForm): CatalogDraftPatch {
+  // A save must not pin every field as an admin override.  Sending the whole
+  // form freezes unrelated values - including published sections a sparse
+  // manual draft never held - against every later SAIS import.  Compare the
+  // normalized patches so only what the operator actually touched is sent.
+  const next = formToPatch(form) as Record<string, unknown>;
+  const previous = formToPatch(baseline) as Record<string, unknown>;
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(next)) {
+    if (JSON.stringify(value) !== JSON.stringify(previous[key])) changed[key] = value;
+  }
+  return changed as CatalogDraftPatch;
+}
+
 function sourceConflictItems(row: CatalogCourseRow | null, detail: CatalogCourseDetail | null): CatalogSourceConflict[] {
   if (detail?.source_conflicts?.length) return detail.source_conflicts;
   const issues = detail?.issues ?? [];
@@ -1037,6 +1051,9 @@ function CourseDetailContent({
   const [editing, setEditing] = useState(false);
   const draftDetail = draftDetailFrom(detail);
   const [form, setForm] = useState<CourseForm>(() => formFromDetail(draftDetail));
+  const [baseline] = useState<CourseForm>(() => formFromDetail(draftDetail));
+  const changedPatch = changedFormPatch(form, baseline);
+  const dirty = Object.keys(changedPatch).length > 0;
   const [reason, setReason] = useState("");
   const [verify, setVerify] = useState(false);
   const [verificationEvidence, setVerificationEvidence] = useState("");
@@ -1050,7 +1067,7 @@ function CourseDetailContent({
       if (reason.trim().length < 3) throw new Error(pick({ tr: "Değişiklik nedeni en az 3 karakter olmalı.", en: "A change reason must be at least 3 characters." }));
       return adminMutate<CatalogDraft>(`catalog/drafts/${encodeURIComponent(draftId)}`, "PATCH", {
         expected_revision: expectedRevision,
-        patch: formToPatch(form),
+        patch: changedPatch,
         reason: reason.trim(),
         verify,
         verification_evidence: verify ? verificationEvidence.trim() : undefined,
@@ -1083,7 +1100,7 @@ function CourseDetailContent({
         {conflicts.length ? <Badge variant="destructive" className="gap-1"><ShieldAlertIcon />{conflicts.length} {pick({ tr: "kaynak çakışması", en: "source conflicts" })}</Badge> : null}
         <span className="ml-auto flex gap-2">{canWrite ? <Button size="sm" variant={editing ? "secondary" : "outline"} onClick={startEditing} disabled={updateDraft.isPending}><BookOpenIcon />{draftId ? pick({ tr: editing ? "Düzenleniyor" : "Düzenle", en: editing ? "Editing" : "Edit" }) : pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button> : null}{canPublish && draftId ? <Badge variant="secondary">{pick({ tr: "Yayın yetkisi var", en: "Can publish" })}</Badge> : null}</span>
       </div>
-      {editing ? <CourseEditForm form={form} setForm={setForm} reason={reason} setReason={setReason} verify={verify} setVerify={setVerify} verificationEvidence={verificationEvidence} setVerificationEvidence={setVerificationEvidence} pending={updateDraft.isPending} onCancel={() => setEditing(false)} onSave={() => updateDraft.mutate()} /> : null}
+      {editing ? <CourseEditForm form={form} setForm={setForm} reason={reason} setReason={setReason} verify={verify} setVerify={setVerify} verificationEvidence={verificationEvidence} setVerificationEvidence={setVerificationEvidence} pending={updateDraft.isPending} dirty={dirty} onCancel={() => setEditing(false)} onSave={() => updateDraft.mutate()} /> : null}
       <SectionNav value={tab} onChange={(value) => setTab(value as CourseTab)} items={[
         { id: "overview", label: pick({ tr: "Genel bakış", en: "Overview" }) },
         { id: "sections", label: pick({ tr: "Şubeler / toplantılar", en: "Sections / meetings" }) },
@@ -1453,6 +1470,7 @@ function CourseEditForm({
   verificationEvidence,
   setVerificationEvidence,
   pending,
+  dirty,
   onCancel,
   onSave,
 }: {
@@ -1465,11 +1483,12 @@ function CourseEditForm({
   verificationEvidence: string;
   setVerificationEvidence: (value: string) => void;
   pending: boolean;
+  dirty: boolean;
   onCancel: () => void;
   onSave: () => void;
 }) {
   const { pick } = useLocale();
-  const valid = form.title.trim().length > 0 && reason.trim().length >= 3 && form.sections.every((section) => section.section_code.trim().length > 0) && (!verify || verificationEvidence.trim().length >= 3);
+  const valid = dirty && form.title.trim().length > 0 && reason.trim().length >= 3 && form.sections.every((section) => section.section_code.trim().length > 0) && (!verify || verificationEvidence.trim().length >= 3);
   return <Card className="border-primary/30 bg-primary/[0.02]"><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><BookOpenIcon className="size-4" />{pick({ tr: "Taslağı düzenle", en: "Edit draft" })}</CardTitle><CardDescription>{pick({ tr: "Alanlar türlerine göre düzenlenir; kaydetme mevcut sürüme karşı iyimserlik kontrolü yapar.", en: "Fields are edited by type; saving checks the draft against its current revision." })}</CardDescription></CardHeader><CardContent className="space-y-5"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label={pick({ tr: "Başlık", en: "Title" })} value={form.title} onChange={(value) => setForm((current) => ({ ...current, title: value }))} className="sm:col-span-2" /><Field label={pick({ tr: "Bölüm", en: "Department" })} value={form.department} onChange={(value) => setForm((current) => ({ ...current, department: value }))} /><Field label={pick({ tr: "Kredi", en: "Credits" })} type="number" step="0.5" value={form.credits} onChange={(value) => setForm((current) => ({ ...current, credits: value }))} /><Field label="ECTS" type="number" step="0.5" value={form.ects} onChange={(value) => setForm((current) => ({ ...current, ects: value }))} /><Field label={pick({ tr: "Seviye", en: "Level" })} value={form.level} onChange={(value) => setForm((current) => ({ ...current, level: value }))} /><Field label={pick({ tr: "Açılma durumu", en: "Availability" })} value={form.availability} onChange={(value) => setForm((current) => ({ ...current, availability: value }))} /><Field label={pick({ tr: "Kampüs", en: "Campus" })} value={form.campus} onChange={(value) => setForm((current) => ({ ...current, campus: value }))} /><label className="flex items-center gap-2 self-end pb-1 text-sm"><input type="checkbox" checked={form.is_thesis} onChange={(event) => setForm((current) => ({ ...current, is_thesis: event.target.checked }))} />{pick({ tr: "Tez dersi", en: "Thesis course" })}</label></div><SectionEditors sections={form.sections} onChange={(sections) => setForm((current) => ({ ...current, sections }))} /><RulesEditor groups={form.prerequisite_groups} replacements={form.replacements} onGroupsChange={(prerequisite_groups) => setForm((current) => ({ ...current, prerequisite_groups }))} onReplacementsChange={(replacements) => setForm((current) => ({ ...current, replacements }))} /><div className="space-y-1.5"><Label htmlFor="catalog-edit-reason" className="text-xs text-muted-foreground">{pick({ tr: "Değişiklik nedeni", en: "Change reason" })}</Label><Textarea id="catalog-edit-reason" value={reason} onChange={(event) => setReason(event.target.value)} placeholder={pick({ tr: "Bu düzeltmeyi neden yaptığınızı yazın", en: "Explain why this correction is needed" })} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div><label className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3 text-sm"><input type="checkbox" checked={verify} onChange={(event) => setVerify(event.target.checked)} className="mt-0.5" /><span><strong>{pick({ tr: "Bu düzeltmeyi doğrula", en: "Verify this correction" })}</strong><span className="mt-1 block text-xs text-muted-foreground">{pick({ tr: "Kaynak kontrolü veya onaylı kayıt kanıtı girildiğinde planlayıcı bu alanı doğrulanmış sayabilir.", en: "The planner can treat this field as verified after source or approved-record evidence is recorded." })}</span></span></label>{verify ? <div className="space-y-1.5"><Label htmlFor="catalog-verification-evidence" className="text-xs text-muted-foreground">{pick({ tr: "Doğrulama kanıtı", en: "Verification evidence" })}</Label><Textarea id="catalog-verification-evidence" value={verificationEvidence} onChange={(event) => setVerificationEvidence(event.target.value)} placeholder={pick({ tr: "Kaynak URL’si, kayıt adı veya inceleme notu", en: "Source URL, record name, or review note" })} /><p className="text-xs text-muted-foreground">{pick({ tr: "En az 3 karakter.", en: "At least 3 characters." })}</p></div> : null}<div className="flex flex-wrap justify-end gap-2 border-t pt-4"><Button variant="outline" onClick={onCancel} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button onClick={onSave} disabled={!valid || pending}>{pending ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}{pick({ tr: "Taslağı kaydet", en: "Save draft" })}</Button></div></CardContent></Card>;
 }
 
