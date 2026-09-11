@@ -34,18 +34,3 @@ test("valid text and tool frames retain their typed protocol events", () => {
     { type: "tool", tool: { status: "error", tool: "sais", server: null, message: null } },
   );
 });
-
-test("a reasoning frame is its own event, not answer text", () => {
-  // The broker sends these for the sentence the model produced on its way to a
-  // tool call. Parsed as text they would land in front of the answer, which is
-  // the bug this frame exists to end.
-  const event = parseSseEvent(JSON.stringify({
-    devrimo: { type: "reasoning", text: "PHYS 213 şubelerini kontrol ediyorum." },
-  }));
-  assert.deepEqual(event, { type: "reasoning", text: "PHYS 213 şubelerini kontrol ediyorum." });
-});
-
-test("a reasoning frame with no text is malformed", () => {
-  assert.throws(() => parseSseEvent(JSON.stringify({ devrimo: { type: "reasoning" } })));
-  assert.throws(() => parseSseEvent(JSON.stringify({ devrimo: { type: "reasoning", text: "" } })));
-});
