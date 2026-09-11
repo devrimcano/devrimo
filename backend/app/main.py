@@ -70,15 +70,26 @@ app.mount("/mcp", gateway_app)
 
 
 @app.get("/health")
-async def root_health() -> dict[str, object]:
-    """Liveness, plus which commit each campus MCP server was built from.
+async def root_health() -> dict[str, str]:
+    """Liveness only.
 
-    The commits are reported because the servers are pinned by build arg and
-    the build deletes their ``.git`` directories: without this, the pin is
-    unverifiable from a running container. They name public commits in public
-    repositories, so exposing them unauthenticated discloses nothing that
-    reading those repositories would not — and the alternative, guessing which
-    image is deployed during an incident, is worse.
+    The public edge serves this path, so it answers with the one thing a
+    liveness probe needs and nothing that describes the deployment.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/internal/build-manifest")
+async def build_manifest() -> dict[str, object]:
+    """Which commit each campus MCP server was built from.
+
+    Kept off ``/health`` deliberately. The servers are pinned by build arg and
+    their ``.git`` directories are deleted at build time, so a running process
+    is the only place the pin can be read — but the public edge proxies
+    ``/health``, and an image's exact third-party pins are supply-chain detail
+    that does not need to be world-readable. Caddy routes nothing under
+    ``/internal`` and the API listens on loopback, so this answers only to a
+    process on the host.
     """
     return {"status": "ok", "campus_servers": commits_by_slug(settings.campus_mcp_root)}
 

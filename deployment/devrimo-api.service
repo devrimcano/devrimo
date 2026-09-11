@@ -1,0 +1,26 @@
+[Unit]
+Description=Devrimo Backend API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devrimo
+Group=devrimo
+WorkingDirectory=/opt/devrimo/backend
+EnvironmentFile=/opt/devrimo/backend/.env
+# Loopback only. Caddy, on this host, is the only thing that should reach the
+# broker: bound to 0.0.0.0 the API answered on the public IP, served plain HTTP
+# with the TLS proxy and its controls bypassed, and sent bearer tokens in the
+# clear to anyone who used that address. --no-server-header keeps uvicorn from
+# advertising itself on the responses Caddy forwards.
+ExecStart=/opt/devrimo/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-server-header
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/devrimo /var/lib/devrimo
+
+[Install]
+WantedBy=multi-user.target

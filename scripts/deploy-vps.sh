@@ -325,6 +325,25 @@ if [ -f "$web_unit_src" ] && ! cmp -s "$web_unit_src" "$web_unit_dst"; then
   echo "Installed devrimo-web.service from the release"
 fi
 
+# The API unit was hand-managed on the host and never shipped with a release,
+# which is how it stayed bound to 0.0.0.0 while the web unit beside it did not.
+# Installing it here makes the loopback bind a property of the release rather
+# than of whoever last edited the host. Same pattern as the web unit: only on a
+# change, with the previous file kept beside it, and reloaded before the restart
+# further down actually swaps the broker onto it.
+api_unit_src="$stage_dir/deployment/devrimo-api.service"
+api_unit_dst="/etc/systemd/system/devrimo-api.service"
+if [ -f "$api_unit_src" ] && ! cmp -s "$api_unit_src" "$api_unit_dst"; then
+  if [ ! -w "$(dirname "$api_unit_dst")" ]; then
+    echo "::error::devrimo-api.service needs updating and $(dirname "$api_unit_dst") is not writable by $(id -un)" >&2
+    exit 1
+  fi
+  cp -n "$api_unit_dst" "$api_unit_dst.pre-$stamp" 2>/dev/null || true
+  install -m 0644 "$api_unit_src" "$api_unit_dst"
+  systemctl daemon-reload
+  echo "Installed devrimo-api.service from the release"
+fi
+
 # Deploy an exact source tree instead of extracting over the previous release.
 # Runtime state and secrets are preserved; stale source files are removed.
 rsync -a --delete \
@@ -404,6 +423,26 @@ catalog_writer_unit=devrimo-catalog-worker.service
 # worker writes the same revision tables, so leaving the old worker active can
 # deadlock the cutover even though the API has already been stopped.
 sudo /usr/bin/systemctl stop devrimo-api.service "$catalog_writer_unit"
+
+# The broker and its catalog writer are down from here until the restart
+# further below. If this script stops in between — the SSH channel dropping, or
+# the Actions job hitting its timeout — systemd will not bring them back,
+# because the stop was deliberate. That is exactly how the site stayed on 502:
+# a cancelled deploy left the API stopped and nothing restarted it. This
+# handler puts them back on any exit that did not already reach its own
+# restart. It replaces the release-directory cleanup trap installed near the
+# top, because a shell has one EXIT trap, and does that cleanup too.
+cleanup_and_restore_services() {
+  rc=$?
+  if ! sudo /usr/bin/systemctl is-active --quiet devrimo-api.service; then
+    echo "deploy exited with the API stopped; restarting it" >&2
+    sudo /usr/bin/systemctl start devrimo-api.service "$catalog_writer_unit" || true
+  fi
+  rm -rf "$stage_dir"
+  exit "$rc"
+}
+trap cleanup_and_restore_services EXIT
+
 if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export ENVIRONMENT=production && .venv/bin/python -m alembic upgrade head && .venv/bin/python -m alembic check"; then
   sudo /usr/bin/systemctl start devrimo-api.service "$catalog_writer_unit"
   exit 1

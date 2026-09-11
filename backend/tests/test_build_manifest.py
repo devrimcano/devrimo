@@ -53,8 +53,8 @@ def test_malformed_line_does_not_hide_the_others(tmp_path):
     assert commits_by_slug(root) == {"sais": SAIS, "webmail": WEBMAIL}
 
 
-async def test_health_reports_campus_commits(client, tmp_path, monkeypatch):
-    """The pin is only verifiable if a running container will state it."""
+async def test_build_manifest_reports_campus_commits(client, tmp_path, monkeypatch):
+    """The pin is only verifiable if a running process will state it."""
     from app import main
     from app.campus.manifest import read_manifest
 
@@ -64,8 +64,16 @@ async def test_health_reports_campus_commits(client, tmp_path, monkeypatch):
     read_manifest.cache_clear()
     monkeypatch.setattr(main.settings, "campus_mcp_root", str(tmp_path))
 
-    response = await client.get("/health")
+    response = await client.get("/internal/build-manifest")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "campus_servers": {"sais": SAIS}}
     read_manifest.cache_clear()
+
+
+async def test_health_stays_liveness_only(client):
+    """The public edge serves /health; it must not describe the deployment."""
+    response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

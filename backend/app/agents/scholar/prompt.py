@@ -85,6 +85,16 @@ def build_instructions() -> list[str]:
         "in the catalog that fit what the student asked for.\n"
         "When a category read returns no courses, report the message field the source returned with it "
         "before concluding that nothing is available.",
+        # A 404 for a course that is simply not in the term's catalog is the
+        # same shape of dead end as an empty FREE ELECTIVE list, and it was read
+        # the same wrong way: on 2026-09-11 a CENG334 question spent 317 seconds
+        # and twenty-three model calls re-asking as sections, then prerequisites,
+        # then eligibility, for a course that was in none of them. State it as a
+        # rule so one 404 ends the search rather than starting another.
+        "A catalog read that answers \"not available in the published release\" (or \"not found\") for a "
+        "course and term is final, whichever resource kind asked: the course is not in that term's catalog. "
+        "Do not retry it as another catalog resource kind, another term, or a search. Tell the student the "
+        "course is not in the catalog for that term and stop.",
     ])
     return instructions
 
