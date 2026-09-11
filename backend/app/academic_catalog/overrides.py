@@ -115,6 +115,7 @@ async def remove_overrides(db, organization_id: UUID, draft_id: UUID, *,
     draft.issues = [issue for issue in (draft.issues or [])
                     if not (isinstance(issue, dict) and issue.get("code") == "source_conflict"
                             and issue.get("field") in selected)]
+    service._sync_manual_verification_issue(draft, component_status)
     draft.reason = reason
     draft.updated_by = updated_by
     draft.revision += 1

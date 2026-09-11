@@ -2295,6 +2295,8 @@ export interface components {
             expected_release_id?: string | null;
             /** Target Release Id */
             target_release_id?: string | null;
+            /** Course Count */
+            course_count?: number | null;
             /** Metadata */
             metadata?: {
                 [key: string]: unknown;
@@ -2334,6 +2336,11 @@ export interface components {
             candidate_data?: {
                 [key: string]: unknown;
             };
+            /**
+             * Payload Truncated
+             * @default false
+             */
+            payload_truncated?: boolean;
             /** Status */
             status: string;
             /** Observed At */

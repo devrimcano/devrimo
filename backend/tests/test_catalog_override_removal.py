@@ -93,11 +93,37 @@ async def test_override_removal_admin_http_contract(client, monkeypatch):
     })
     assert response.status_code == 200, response.text
     draft = response.json()
+    assert any(issue.get("code") == "manual_verification_required" for issue in draft["issues"])
     response = await client.post(f"/api/v1/admin/catalog/drafts/{draft['id']}/remove-overrides",
         headers=headers, json={"expected_revision": draft["revision"], "fields": ["title"], "reason": "Remove correction"})
     assert response.status_code == 200, response.text
     assert response.json()["field_overrides"] == {}
     assert response.json()["revision"] == draft["revision"] + 1
+    assert not any(issue.get("code") == "manual_verification_required" for issue in response.json()["issues"])
+
+
+async def test_verification_clears_the_pending_marker(client, monkeypatch):
+    user = new_user_id()
+    monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(user))
+    headers = auth_header(user)
+    await client.get("/api/v1/profile", headers=headers)
+    created = await client.post("/api/v1/admin/catalog/drafts", headers=headers, json={
+        "term": "20261", "course_code": "2402201", "data": {"title": "Fixture"},
+    })
+    assert created.status_code == 201, created.text
+    draft = created.json()
+    pending = await client.patch(f"/api/v1/admin/catalog/drafts/{draft['id']}", headers=headers, json={
+        "expected_revision": draft["revision"], "patch": {"title": "Correction"}, "reason": "Admin correction",
+    })
+    assert pending.status_code == 200, pending.text
+    assert any(issue["code"] == "manual_verification_required" for issue in pending.json()["issues"])
+    verified = await client.patch(f"/api/v1/admin/catalog/drafts/{draft['id']}", headers=headers, json={
+        "expected_revision": pending.json()["revision"], "patch": {"title": "Correction"},
+        "reason": "Checked the registrar record", "verify": True,
+        "verification_evidence": "Registrar record 42",
+    })
+    assert verified.status_code == 200, verified.text
+    assert not any(issue["code"] == "manual_verification_required" for issue in verified.json()["issues"])
 
 
 async def test_raw_observation_inspection_is_admin_and_organization_scoped(client, monkeypatch):

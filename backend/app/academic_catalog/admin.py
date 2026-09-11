@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -437,6 +438,24 @@ async def remove_draft_overrides(
         raise _as_error(exc) from exc
 
 
+#: A raw source payload is retained so an administrator can audit it, but the
+#: inspector is a review surface and must not stream an arbitrarily large MCP
+#: response into the browser.  Larger payloads come back as a bounded preview.
+_OBSERVATION_PAYLOAD_MAX_CHARS = 64_000
+
+
+def _bounded_json(value: object) -> tuple[object, bool]:
+    if value is None:
+        return None, False
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        rendered = str(value)
+    if len(rendered) <= _OBSERVATION_PAYLOAD_MAX_CHARS:
+        return value, False
+    return {"truncated": True, "preview": rendered[:_OBSERVATION_PAYLOAD_MAX_CHARS]}, True
+
+
 @router.get("/observations/{observation_id}", response_model=CatalogSourceObservationOut)
 async def inspect_observation(
     observation_id: UUID,
@@ -451,9 +470,12 @@ async def inspect_observation(
     ))
     if row is None:
         raise HTTPException(404, "Source observation not found")
+    payload, payload_truncated = _bounded_json(row.payload)
+    candidate_data, candidate_truncated = _bounded_json(row.candidate_data)
     return {
         "id": str(row.id), "tool": row.tool, "arguments": row.arguments,
-        "payload": row.payload, "candidate_data": row.candidate_data,
+        "payload": payload, "candidate_data": candidate_data,
+        "payload_truncated": payload_truncated or candidate_truncated,
         "status": row.status, "observed_at": row.observed_at,
         "source_fetched_at": row.source_fetched_at,
         "parser_version": row.parser_version, "issues": row.issues,

@@ -220,6 +220,7 @@ export type CatalogSourceObservationDetail = CatalogSourceObservation & {
   arguments: unknown;
   payload: unknown;
   candidate_data: unknown;
+  payload_truncated?: boolean;
   status: string;
   observed_at: string | null;
   source_fetched_at: string | null;

@@ -136,6 +136,17 @@ async def test_courses_tab_draft_publish_and_read_contract(client, monkeypatch):
         "reason": "Revise an already published course",
     })
     assert edited.status_code == 200, edited.text
+    # The row is labelled "draft", so it must show what the draft holds rather
+    # than the published revision behind it.
+    rows = (await client.get("/api/v1/admin/catalog/courses?term=20261", headers=headers)).json()
+    revised_row = next(row for row in rows["courses"] if row["course_code"] == "2402201")
+    assert revised_row["state"] == "draft"
+    assert revised_row["draft_id"] == revised["id"]
+    assert revised_row["title"] == "Revised fixture"
+    # The release history has to say how many courses each release carries.
+    releases = (await client.get("/api/v1/admin/catalog/releases?term=20261", headers=headers)).json()
+    assert releases["releases"][0]["active"] is True
+    assert releases["releases"][0]["course_count"] == 1
 
 
 async def test_campus_admin_cannot_read_or_patch_another_organizations_draft(client, monkeypatch):

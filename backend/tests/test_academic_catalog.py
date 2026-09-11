@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.academic_catalog import service
 from app.academic_catalog.models import (
+    CatalogCourse,
     CatalogCourseRevision,
     CatalogDraft,
     CatalogRestriction,
@@ -157,6 +158,49 @@ def test_component_freshness_expires_by_component_window():
     effective = service._effective_component_status(status, component="sections")
     assert effective["fresh"] is False
     assert effective["stale_reason"] == "source_fetch_expired"
+
+
+def test_course_summary_shows_the_active_draft_beside_its_label():
+    course = CatalogCourse(course_code="2402201", department="240")
+    revision = CatalogCourseRevision(title="Published title", local_credits=3, ects=5)
+    draft = CatalogDraft(
+        data={"title": "Draft title", "local_credits": 4, "sections": [{"section_code": "1"}]},
+        issues=[],
+        field_overrides={},
+    )
+    summary = service._course_summary(course, revision, None, draft=draft, section_count=9)
+    assert summary["state"] == "draft"
+    assert summary["title"] == "Draft title"
+    assert summary["local_credits"] == 4
+    assert summary["section_count"] == 1
+    assert summary["draft_id"] == str(draft.id)
+
+    published = service._course_summary(course, revision, None, draft=None, section_count=9)
+    assert published["state"] == revision.state
+    assert published["title"] == "Published title"
+    assert published["local_credits"] == 3
+    assert published["section_count"] == 9
+
+
+def test_pending_verification_marker_tracks_retained_overrides():
+    draft = CatalogDraft(issues=[], field_overrides={"title": {"value": "x"}}, data={"component_status": {}})
+    service._sync_manual_verification_issue(draft)
+    assert [issue["code"] for issue in draft.issues] == ["manual_verification_required"]
+    draft.data = {"component_status": {"details": {"verified": True}}}
+    service._sync_manual_verification_issue(draft)
+    assert draft.issues == []
+
+
+def test_observation_preview_is_bounded():
+    from app.academic_catalog.admin import _OBSERVATION_PAYLOAD_MAX_CHARS, _bounded_json
+
+    small, truncated = _bounded_json({"title": "ok"})
+    assert small == {"title": "ok"}
+    assert truncated is False
+    large, truncated = _bounded_json({"text": "x" * (_OBSERVATION_PAYLOAD_MAX_CHARS * 2)})
+    assert truncated is True
+    assert large["truncated"] is True
+    assert len(large["preview"]) == _OBSERVATION_PAYLOAD_MAX_CHARS
 
 
 def test_meeting_patch_rejects_scheduled_without_time():

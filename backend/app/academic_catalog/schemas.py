@@ -550,6 +550,7 @@ class CatalogReleaseOut(BaseModel):
     created_at: str | None = None
     expected_release_id: str | None = None
     target_release_id: str | None = None
+    course_count: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     active: bool = False
 
@@ -586,6 +587,7 @@ class CatalogSourceObservationOut(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     payload: Any = None
     candidate_data: dict[str, Any] = Field(default_factory=dict)
+    payload_truncated: bool = False
     status: str
     observed_at: Any = None
     source_fetched_at: Any = None
