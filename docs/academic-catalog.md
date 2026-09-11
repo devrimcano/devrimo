@@ -40,9 +40,11 @@ endpoint. Observation time and actual source fetch time are shown separately.
    drafts, and publish selected courses. Campus admins can edit/publish within
    their organization; operators can read.
 4. Enable `ACADEMIC_CATALOG_READS_ENABLED=true` consistently for the API and
-   assistant processes after initial publication. This routes shared course
-   reads through published releases and removes shared raw Course Info tools
-   from student MCP toolsets. Personal Course Info operations remain available.
+   assistant processes after initial publication. Production deployments set
+   this flag on both services so they cannot drift back to different read
+   paths. This routes shared course reads through published releases and
+   removes shared raw Course Info tools from student MCP toolsets. Personal
+   Course Info operations remain available.
 
 Do not enable publication as an operational workflow while leaving student
 readers on the old path. An unpublished or incomplete course has an explicit
