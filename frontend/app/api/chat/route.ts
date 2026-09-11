@@ -48,7 +48,12 @@ export const POST = authenticatedRoute(
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const started = Date.now();
-        let reasoningParts = 0;
+        // One reasoning part for the whole turn. A part per announcement gave
+        // the thread a separate collapsible for each - five "Düşünme süreci"
+        // boxes down one answer - because adjacent parts of the same type
+        // coalesce but these are separated by the tool rows between them.
+        const reasoningId = "assistant-reasoning";
+        let reasoningOpen = false;
         writer.write({ type: "text-start", id: textId });
         try {
           for await (const event of observeChatStream(streamChatCompletions(
@@ -75,10 +80,11 @@ export const POST = authenticatedRoute(
               // tool's row instead of stacking it in front of the answer -
               // which is where four copies of "PHYS 213 şubelerini kontrol
               // ediyorum." used to end up, run together without spaces.
-              const id = `reasoning-${reasoningParts++}`;
-              writer.write({ type: "reasoning-start", id });
-              writer.write({ type: "reasoning-delta", id, delta: event.text });
-              writer.write({ type: "reasoning-end", id });
+              if (!reasoningOpen) {
+                writer.write({ type: "reasoning-start", id: reasoningId });
+                reasoningOpen = true;
+              }
+              writer.write({ type: "reasoning-delta", id: reasoningId, delta: event.text });
             } else if (event.type === "confirmation") {
               writer.write({ type: "data-confirmation", data: event.confirmation });
             } else if (event.type === "tool") {
@@ -108,6 +114,7 @@ export const POST = authenticatedRoute(
           });
           writer.write({ type: "error", errorText: message });
         }
+        if (reasoningOpen) writer.write({ type: "reasoning-end", id: reasoningId });
         writer.write({ type: "text-end", id: textId });
       },
     });
