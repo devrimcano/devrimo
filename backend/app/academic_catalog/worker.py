@@ -534,10 +534,50 @@ async def schedule_due() -> int:
     return made
 
 
+async def _reclaim_leases_from_a_previous_process() -> None:
+    """Hand back jobs a worker was holding when it was killed.
+
+    A pass that is cancelled - which is every deploy, because systemd restarts
+    this unit - unwinds without releasing the job's lease, and `_claim` will not
+    touch a `running` job until that lease expires. The lease is fifteen
+    minutes. Measured across one afternoon: three deploys, and each one left the
+    whole-term import stopped for the remainder of its lease while the new
+    worker polled beside it with nothing to do.
+
+    Releasing it on the way out is the obvious place, and the wrong one: the
+    task is already cancelling, so an await there is cancelled with it and the
+    write may never land. Doing it on the way in always lands.
+
+    Stealing is safe by construction. `_claim` issues a new lease token and
+    every write goes through `_owned_job`, so a worker whose lease was taken
+    cannot write - that fence is what makes it safe for this to be wrong about
+    whether the other process is really gone.
+    """
+    async with SessionLocal() as db:
+        released = await db.execute(
+            update(CatalogImportJob)
+            .where(CatalogImportJob.status == "running")
+            .values(status="queued", lease_until=None, lease_token=None)
+        )
+        await db.commit()
+    if released.rowcount:
+        logger.info("catalog_import_leases_reclaimed", jobs=released.rowcount)
+
+
+_reclaimed_on_boot = False
+
+
 async def run_once() -> CatalogPassResult:
+    global _reclaimed_on_boot
     settings = get_settings()
     if not settings.academic_catalog_ingestion_enabled:
         return CatalogPassResult(0, outcome="idle", error_code="ingestion_disabled")
+    if not _reclaimed_on_boot:
+        # Once per process, before the first claim. A job this process is
+        # already running cannot be caught by it, because this runs before
+        # there is one.
+        _reclaimed_on_boot = True
+        await _reclaim_leases_from_a_previous_process()
     background_allowed = settings.catalog_warm_enabled and _within_hours(datetime.now(ISTANBUL), settings.catalog_warm_hours)
     scheduled_count = await schedule_due() if background_allowed else 0
     job = await _claim(manual_only=not background_allowed)
