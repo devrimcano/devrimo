@@ -381,6 +381,8 @@ class ImportIn(BaseModel):
     department: str | None = Field(default=None, max_length=32)
     course_codes: list[str] | None = Field(default=None, max_length=500)
     reason: str = Field(min_length=3, max_length=1000)
+    # Read every page even when a recent observation already satisfies it.
+    force_refresh: bool = False
 
     @field_validator("term")
     @classmethod

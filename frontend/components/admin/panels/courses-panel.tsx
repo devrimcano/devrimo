@@ -686,11 +686,12 @@ export function CoursesPanel({
     onError: (error) => toast.error(error.message),
   });
   const importJob = useMutation({
-    mutationFn: (payload: { department: string; course_codes: string[]; reason: string }) => adminMutate<{ id: string }>("catalog/imports", "POST", {
+    mutationFn: (payload: { department: string; course_codes: string[]; reason: string; force_refresh: boolean }) => adminMutate<{ id: string }>("catalog/imports", "POST", {
       term,
       department: payload.department.trim() || null,
       course_codes: payload.course_codes.length ? payload.course_codes : undefined,
       reason: payload.reason,
+      force_refresh: payload.force_refresh,
     }),
     onSuccess: () => {
       toast.success(pick({ tr: "Yenileme hazır. İlerlemeyi Yenileme işleri sekmesinden izleyin.", en: "Refresh ready to run. Track progress in Refresh jobs." }));
@@ -740,7 +741,7 @@ export function CoursesPanel({
         {pick({ tr: "Yenile", en: "Refresh" })}
       </Button>
       {canWrite ? <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}><UploadCloudIcon />{pick({ tr: "Yenileme iste", en: "Request refresh" })}</Button> : null}
-      {canWrite ? <Button size="sm" disabled={importJob.isPending || !term.trim()} onClick={() => importJob.mutate({ department: "", course_codes: [], reason: `Import all departments for term ${term}` })}>{importJob.isPending ? <Loader2Icon className="animate-spin" /> : <UploadCloudIcon />}{pick({ tr: "Tüm bölümleri içe aktar", en: "Import all departments" })}</Button> : null}
+      {canWrite ? <Button size="sm" disabled={importJob.isPending || !term.trim()} onClick={() => importJob.mutate({ department: "", course_codes: [], reason: `Import all departments for term ${term}`, force_refresh: false })}>{importJob.isPending ? <Loader2Icon className="animate-spin" /> : <UploadCloudIcon />}{pick({ tr: "Tüm bölümleri içe aktar", en: "Import all departments" })}</Button> : null}
       {canWrite ? <Button size="sm" onClick={() => setCreateOpen(true)}><BookOpenIcon />{pick({ tr: "Taslak oluştur", en: "Create draft" })}</Button> : null}
     </div>
   );
@@ -1670,14 +1671,15 @@ function ImportDialog({
   term: string;
   pending: boolean;
   onClose: () => void;
-  onSubmit: (payload: { department: string; course_codes: string[]; reason: string }) => void;
+  onSubmit: (payload: { department: string; course_codes: string[]; reason: string; force_refresh: boolean }) => void;
 }) {
   const { pick } = useLocale();
   const [department, setDepartment] = useState("");
   const [scope, setScope] = useState(selectedCodes.length ? "selected" : "department");
   const [reason, setReason] = useState("");
+  const [forceRefresh, setForceRefresh] = useState(false);
   const valid = reason.trim().length >= 3 && (scope === "selected" ? selectedCodes.length > 0 : department.trim().length > 0);
-  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Katalog yenilemesi iste", en: "Request catalog refresh" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için kaynaklardan yeniden alım bir arka plan işi olarak çalışır.`, en: `The source refresh for ${term} runs as a background job.` })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="catalog-import-scope">{pick({ tr: "Kapsam", en: "Scope" })}</Label><select id="catalog-import-scope" value={scope} onChange={(event) => setScope(event.target.value)} className="h-9 w-full rounded-lg border bg-background px-3 text-sm"><option value="selected" disabled={!selectedCodes.length}>{selectedCodes.length ? pick({ tr: `Seçilen dersler (${selectedCodes.length})`, en: `Selected courses (${selectedCodes.length})` }) : pick({ tr: "Seçilen ders yok", en: "No courses selected" })}</option><option value="department">{pick({ tr: "Bölüm", en: "Department" })}</option></select></div>{scope === "department" ? <Field label={pick({ tr: "Bölüm kodu", en: "Department code" })} value={department} onChange={setDepartment} placeholder="CNG" maxLength={32} /> : <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{selectedCodes.join(", ")}</p>}<div className="space-y-1.5"><Label htmlFor="catalog-import-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="catalog-import-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ department: scope === "department" ? department : "", course_codes: scope === "selected" ? selectedCodes : [], reason: reason.trim() })}>{pending ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}{pick({ tr: "Yenilemeyi sıraya al", en: "Queue refresh" })}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}><DialogContent><DialogHeader><DialogTitle>{pick({ tr: "Katalog yenilemesi iste", en: "Request catalog refresh" })}</DialogTitle><DialogDescription>{pick({ tr: `${term} dönemi için kaynaklardan yeniden alım bir arka plan işi olarak çalışır.`, en: `The source refresh for ${term} runs as a background job.` })}</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="catalog-import-scope">{pick({ tr: "Kapsam", en: "Scope" })}</Label><select id="catalog-import-scope" value={scope} onChange={(event) => setScope(event.target.value)} className="h-9 w-full rounded-lg border bg-background px-3 text-sm"><option value="selected" disabled={!selectedCodes.length}>{selectedCodes.length ? pick({ tr: `Seçilen dersler (${selectedCodes.length})`, en: `Selected courses (${selectedCodes.length})` }) : pick({ tr: "Seçilen ders yok", en: "No courses selected" })}</option><option value="department">{pick({ tr: "Bölüm", en: "Department" })}</option></select></div>{scope === "department" ? <Field label={pick({ tr: "Bölüm kodu", en: "Department code" })} value={department} onChange={setDepartment} placeholder="CNG" maxLength={32} /> : <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{selectedCodes.join(", ")}</p>}<div className="space-y-1.5"><Label htmlFor="catalog-import-reason">{pick({ tr: "Neden", en: "Reason" })}</Label><Textarea id="catalog-import-reason" value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} /></div><label className="flex items-start gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" checked={forceRefresh} onChange={(event) => setForceRefresh(event.target.checked)} className="mt-0.5" /><span>{pick({ tr: "Son alınan verileri yok say (zorla yenile)", en: "Ignore recently fetched data (force refresh)" })}</span></label></div><DialogFooter><Button variant="outline" onClick={onClose} disabled={pending}>{pick({ tr: "Vazgeç", en: "Cancel" })}</Button><Button disabled={!valid || pending} onClick={() => onSubmit({ department: scope === "department" ? department : "", course_codes: scope === "selected" ? selectedCodes : [], reason: reason.trim(), force_refresh: forceRefresh })}>{pending ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}{pick({ tr: "Yenilemeyi sıraya al", en: "Queue refresh" })}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function PublishDialog({

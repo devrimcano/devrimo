@@ -2669,6 +2669,11 @@ export interface components {
             course_codes?: string[] | null;
             /** Reason */
             reason: string;
+            /**
+             * Force Refresh
+             * @default false
+             */
+            force_refresh?: boolean;
         };
         /** InviteIn */
         InviteIn: {

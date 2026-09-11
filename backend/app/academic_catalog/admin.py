@@ -353,6 +353,7 @@ async def create_import(
             course_codes=body.course_codes,
             reason=body.reason,
             requested_by=principal.user.id,
+            payload={"force_refresh": True} if body.force_refresh else None,
         )
         await db.flush()
         await db.refresh(job)

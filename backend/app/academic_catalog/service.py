@@ -18,7 +18,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 from uuid import UUID, uuid4
@@ -1962,6 +1962,125 @@ def import_dedup_key(
     )
 
 
+# Only pages whose data stands alone are reusable.  Course detail steps are
+# deliberately absent: their responses are what discovers the section steps, so
+# skipping a detail would hide a section whose own observation is missing or
+# failed until the detail observation ages out.
+_LEAF_REUSE_TOOLS = (
+    "get_section_constraints",
+    "get_course_prerequisites",
+    "get_course_replacements",
+)
+
+
+def leaf_reuse_ttl_seconds(tool: str) -> int:
+    """How long a successful observation may satisfy one reusable leaf step.
+
+    The window is clamped below the component's read-time max age: reusing a
+    page past that age would keep a component permanently stale, because the
+    step that would refresh it would keep being skipped.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    if tool in {"get_course_prerequisites", "get_course_replacements"}:
+        ttl = int(settings.catalog_reuse_rules_seconds)
+    else:
+        ttl = int(settings.catalog_reuse_info_seconds)
+    max_age = _COMPONENT_MAX_AGE_SECONDS.get(_tool_component(tool))
+    if max_age is not None:
+        ttl = min(ttl, max(0, max_age - 60))
+    return max(0, ttl)
+
+
+def leaf_step_key(step: dict[str, Any]) -> tuple[str, str, str | None]:
+    """The observation identity that can satisfy a leaf step."""
+    values = step.get("values") or {}
+    section = None
+    if step.get("tool") == "get_section_constraints":
+        section = str(values.get("section") or "").strip()
+    return (str(step.get("tool") or ""), str(values.get("course") or "").strip(), section)
+
+
+def drop_reused_steps(
+    steps: Iterable[dict[str, Any]], reused: set[tuple[str, str, str | None]]
+) -> list[dict[str, Any]]:
+    """Remove leaf steps whose source data is still within its reuse window."""
+    return [step for step in steps if leaf_step_key(step) not in reused]
+
+
+async def drop_fresh_leaf_steps(
+    db: AsyncSession,
+    organization_id: UUID,
+    term: str | None,
+    steps: Iterable[dict[str, Any]],
+    *,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Drop leaf steps whose latest successful observation is still fresh.
+
+    Listing and course detail steps always run: they are how the plan grows and
+    how its section steps are discovered.  A reused observation must carry
+    network-fetched evidence - backfilled cache rows have no
+    ``source_fetched_at`` and never satisfy a step.  A forced refresh returns
+    every step.
+    """
+    kept = list(steps)
+    if force or not kept:
+        return kept
+    term_code = normalize_term(term) if term else None
+    by_tool: dict[str, list[dict[str, Any]]] = {}
+    for step in kept:
+        tool = str(step.get("tool") or "")
+        if tool in _LEAF_REUSE_TOOLS:
+            by_tool.setdefault(tool, []).append(step)
+    if not by_tool:
+        return kept
+    now = datetime.now(UTC)
+    registration = _registration_window(now)
+    window_start = _registration_boundary(registration.get("start")) if registration.get("active") else None
+    reused: set[tuple[str, str, str | None]] = set()
+    for tool, tool_steps in by_tool.items():
+        ttl = leaf_reuse_ttl_seconds(tool)
+        if ttl <= 0:
+            continue
+        codes = sorted({key[1] for key in map(leaf_step_key, tool_steps) if key[1]})
+        if not codes:
+            continue
+        filters = [
+            CatalogSourceObservation.organization_id == organization_id,
+            CatalogSourceObservation.tool == tool,
+            CatalogSourceObservation.status.in_(("success", "empty")),
+            CatalogSourceObservation.source_fetched_at.is_not(None),
+            CatalogSourceObservation.source_fetched_at >= now - timedelta(seconds=ttl),
+            # A future fetch is stale to readers too (clock skew, bad evidence).
+            CatalogSourceObservation.source_fetched_at <= now,
+            CatalogSourceObservation.course_code.in_(codes),
+        ]
+        if window_start is not None:
+            # An active add-drop window invalidates anything fetched before it,
+            # however recent: readers mark those components stale, so the import
+            # must be able to refresh them without a forced job.
+            filters.append(CatalogSourceObservation.source_fetched_at >= window_start)
+        if term_code:
+            filters.append(CatalogSourceObservation.term == term_code)
+        if tool == "get_section_constraints":
+            result = await db.execute(
+                select(CatalogSourceObservation.course_code, CatalogSourceObservation.section_code)
+                .where(*filters, CatalogSourceObservation.section_code.is_not(None))
+                .group_by(CatalogSourceObservation.course_code, CatalogSourceObservation.section_code)
+            )
+            reused |= {(tool, str(code or "").strip(), str(section or "").strip()) for code, section in result}
+        else:
+            result = await db.execute(
+                select(CatalogSourceObservation.course_code)
+                .where(*filters)
+                .group_by(CatalogSourceObservation.course_code)
+            )
+            reused |= {(tool, str(row[0] or "").strip(), None) for row in result}
+    return drop_reused_steps(kept, reused)
+
+
 async def enqueue_import(
     db: AsyncSession,
     organization_id: UUID,
@@ -1980,7 +2099,12 @@ async def enqueue_import(
     codes = [normalize_course_code(code) for code in (course_codes or [])]
     if any(not _SEVEN_DIGIT.fullmatch(code) for code in codes):
         raise ValueError("Import course codes require full seven-digit METU codes")
+    force_refresh = bool((payload or {}).get("force_refresh"))
     dedup_key = import_dedup_key(organization_id, term, department, codes)
+    if force_refresh:
+        # A forced refresh must not adopt a scheduled job whose plan may already
+        # have skipped its fresh pages, so it is its own scope.
+        dedup_key = _digest({"scope": dedup_key, "force_refresh": True})
     if not department and not codes:
         # Directory-only maintenance and a full university import have
         # different work to do and must never reuse each other's job.

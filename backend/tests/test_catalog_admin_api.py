@@ -32,6 +32,32 @@ async def test_imports_fail_clearly_when_disabled_and_deduplicate_when_enabled(c
     assert first.json()["id"] == second.json()["id"]
 
 
+async def test_a_forced_import_is_its_own_job_scope(client, monkeypatch):
+    from app.academic_catalog.models import CatalogImportJob
+
+    user = new_user_id()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "admin_bootstrap_user_ids", str(user))
+    monkeypatch.setattr(settings, "academic_catalog_ingestion_enabled", True)
+    headers = auth_header(user)
+    await client.get("/api/v1/profile", headers=headers)
+
+    forced = {"term": "20261", "reason": "Force a full refresh", "force_refresh": True}
+    first = await client.post("/api/v1/admin/catalog/imports", headers=headers, json=forced)
+    again = await client.post("/api/v1/admin/catalog/imports", headers=headers, json=forced)
+    plain = await client.post("/api/v1/admin/catalog/imports", headers=headers,
+                              json={"term": "20261", "reason": "Import all departments"})
+
+    assert first.status_code == again.status_code == plain.status_code == 202
+    assert first.json()["id"] == again.json()["id"]
+    assert plain.json()["id"] != first.json()["id"], "a forced job must not adopt the unforced scope"
+    assert first.json()["payload"]["force_refresh"] is True
+
+    async with SessionLocal() as db:
+        job = await db.get(CatalogImportJob, first.json()["id"])
+        assert job.payload["force_refresh"] is True
+
+
 async def test_operator_can_inspect_but_cannot_edit_or_publish(client):
     user = new_user_id()
     headers = auth_header(user)

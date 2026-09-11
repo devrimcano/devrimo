@@ -31,6 +31,21 @@ SESSION_CACHE_ENABLED = os.getenv("COURSE_INFO_SESSION_CACHE", "1").strip().lowe
 }
 SESSION_TTL_SECONDS = 10 * 60
 
+# Whether a positioned session may post course actions without re-selecting the
+# department first.  Live-verified against SAIS: once any course list page has
+# been submitted, `SubmitCourseInfo` is accepted for any course — including
+# another department's — and a course page's hidden fields can post every one
+# of its sections.  Every reuse is identity-verified and falls back to the full
+# navigation, so this changes the request count, not the trust model.
+# Switchable from the environment so a rollback is a config change rather than
+# an image build.
+NAV_ELISION_ENABLED = os.getenv("COURSE_INFO_NAV_ELISION", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
 
 def _report(**fields) -> None:
     """One line on stderr, which the MCP stdio client forwards to the broker's log.
@@ -259,6 +274,48 @@ def _explicit_empty_result(soup: BeautifulSoup, subject: str) -> bool:
     return subject_present and (any(marker in text for marker in empty_markers) or no_rows_sentence)
 
 
+def _explicit_empty_section_criteria(soup: BeautifulSoup) -> bool:
+    """Whether SAIS positively says the section admits everyone.
+
+    The live page states it where the eligibility table would be: "There is no
+    section criteria to take the selected courses for this section." That is an
+    answer — the section exists and restricts nobody — not a read failure. A
+    page that merely failed to parse does not carry this sentence, so the
+    caller still refuses it.
+    """
+    text = clean_text(soup.get_text(" ", strip=True)).casefold()
+    # ``casefold`` turns a dotted capital İ into "i" plus a combining dot, which
+    # would stop "İÇİN" matching; drop the combining mark before matching.
+    text = text.replace("\u0307", "")
+    return bool(
+        re.search(r"\bno\s+section\s+criteria\b", text)
+        or re.search(r"(?:şube|sube)[^.]{0,80}(?:kriter|kriteri)[^.]{0,40}(?:yok|bulunma)", text)
+        or re.search(r"(?:kriter|kriteri)[^.]{0,40}(?:yok|bulunma)[^.]{0,80}(?:şube|sube)", text)
+    )
+
+
+def _observed_section_numbers(soup: BeautifulSoup) -> set[str]:
+    """Section numbers the returned page itself lists, normalized for comparison.
+
+    Every section control on the page counts, including the submit buttons
+    ``_verify_course_response_identity`` skips: a bare button is not identity
+    evidence there, but here the set of buttons is exactly the list of sections
+    the page is about.
+    """
+    names = {"submit_section", "section", "section_code", "hidden_section", "text_section"}
+    found: set[str] = set()
+    for control in soup.find_all(["input", "select"], attrs={"name": list(names)}):
+        if control.name == "select":
+            values = [option.get("value", "") for option in control.find_all("option", selected=True)]
+        else:
+            values = [control.get("value", "")]
+        for value in values:
+            value = str(value).strip()
+            if re.fullmatch(r"\d+", value):
+                found.add(str(int(value)))
+    return found
+
+
 def parse_student_curriculum(html: str) -> dict:
     """Read the actual Student Information curriculum board (SAIS App 61).
 
@@ -335,17 +392,25 @@ class SAISClient:
         password: Optional[str] = None,
         locale: Optional[str] = None,
         request_gate=None,
+        nav_elision: Optional[bool] = None,
     ):
         self.username = username or settings.sais_username
         self.password = password or settings.sais_password
         self.locale = locale or settings.locale or "tr"
         self._token: Optional[str] = None
+        self._nav_elision = NAV_ELISION_ENABLED if nav_elision is None else bool(nav_elision)
         # At most one app's proxy session is held at a time, because the server
         # keeps exactly one: the cookie jar is shared, and reaching app 178
         # moves the session away from app 64. Modelling that as a single slot
         # is what stops a cached app-64 page being replayed after a category
         # read has quietly moved the session elsewhere.
         self._session: Optional[Tuple[int, float, Tuple[str, str, BeautifulSoup]]] = None
+        # Where the app-64 session is "standing" after the last accepted
+        # request: the action URL and term it was positioned for, and when.
+        self._position: Optional[Tuple[str, str, float]] = None
+        # The last course page's hidden fields, so its sections can be posted
+        # without re-opening it.  Cleared whenever the session moves.
+        self._course_page: Optional[Dict[str, Any]] = None
         # Calls on one client must not overlap. See the note on the lock below.
         self._lock = asyncio.Lock()
         # Every HTTP request this client makes, counted once. The saving from
@@ -439,8 +504,10 @@ class SAISClient:
             if held_app == app_code and time.monotonic() - opened_at < SESSION_TTL_SECONDS:
                 return payload
         payload = await self._open_app_proxy_session(app_code)
-        # Replaces rather than adds: one slot, one live session.
+        # Replaces rather than adds: one slot, one live session.  A fresh
+        # preamble is also where any held position stops being trustworthy.
         self._session = (app_code, time.monotonic(), payload)
+        self._clear_position()
         return payload
 
     def _session_lost(self, soup: BeautifulSoup) -> bool:
@@ -541,6 +608,7 @@ class SAISClient:
         """Fetch the Student Information page and parse its Curriculum tab."""
         # This form advances the page; never reuse a saved pre-submit form.
         self._session = None
+        self._clear_position()
         url, _, landing = await self._open_app_proxy_session(61)
         selector = landing.find("select", attrs={"name": "text_semester_programtype"})
         form = selector.find_parent("form") if selector else None
@@ -649,15 +717,87 @@ class SAISClient:
         )
         html = self._decode_html(resp)
         res_soup = BeautifulSoup(html, "html.parser")
-        if self._session_lost(res_soup) and not _retrying:
+        if self._session_lost(res_soup):
             # The held session is no longer the one the server has. Drop it and
             # take the long way round exactly once; a second failure is a real
-            # failure and belongs to the caller.
-            self._session = None
-            return await self._submit_course_list_page(
-                department_code, semester_code, _retrying=True
-            )
+            # failure and belongs to the caller.  A login page never becomes a
+            # position, so a later action cannot be posted into it.
+            self._clear_position()
+            if not _retrying:
+                self._session = None
+                return await self._submit_course_list_page(
+                    department_code, semester_code, _retrying=True
+                )
+            return action, html, res_soup
+        self._note_position(action, semester_code)
         return action, html, res_soup
+
+    def _note_position(self, action_url: str, semester_code: str) -> None:
+        """Record where the app-64 session stands after a submitted selection."""
+        self._position = (action_url, str(semester_code).strip(), time.monotonic())
+        self._course_page = None
+
+    def _clear_position(self) -> None:
+        self._position = None
+        self._course_page = None
+
+    def _live_action(self, semester_code: str) -> Optional[str]:
+        """The action URL a positioned session may post to, or None."""
+        if not self._nav_elision or self._position is None:
+            return None
+        action_url, held_semester, opened_at = self._position
+        if held_semester != str(semester_code).strip():
+            return None
+        if time.monotonic() - opened_at >= SESSION_TTL_SECONDS:
+            return None
+        return action_url
+
+    def _position_is_live(self, semester_code: str) -> bool:
+        return self._live_action(semester_code) is not None
+
+    def _touch_position(self) -> None:
+        """A direct post worked, so the session is still serving this position."""
+        if self._position is not None:
+            action_url, held_semester, _ = self._position
+            self._position = (action_url, held_semester, time.monotonic())
+
+    def _hold_course_page(
+        self, department_code: str, semester_code: str, course_code: str, soup: BeautifulSoup
+    ) -> None:
+        """Keep a course page's hidden fields so its sections can be posted.
+
+        Live-verified: the section buttons' hidden fields stay valid for every
+        section of the course, and re-posting them returns each section's own
+        page, so the course page does not have to be re-opened per section.
+        """
+        self._course_page = {
+            "department": str(department_code).strip(),
+            "semester": str(semester_code).strip(),
+            "course": str(course_code).strip(),
+            "hidden": {
+                hidden.get("name"): str(hidden.get("value", ""))
+                for hidden in soup.find_all("input", {"type": "hidden"})
+                if hidden.get("name")
+            },
+        }
+
+    def _held_course_page(
+        self, department_code: str, semester_code: str, course_code: str
+    ) -> Optional[Dict[str, Any]]:
+        page = self._course_page
+        if page is None or not self._position_is_live(semester_code):
+            return None
+        if (page["department"], page["semester"], page["course"]) != (
+            str(department_code).strip(),
+            str(semester_code).strip(),
+            str(course_code).strip(),
+        ):
+            return None
+        return page
+
+    async def _post_action(self, action_url: str, data: Dict[str, str]) -> BeautifulSoup:
+        resp = await self._client.post(action_url, data=data, headers={"Referer": action_url})
+        return BeautifulSoup(self._decode_html(resp), "html.parser")
 
     async def list_program_courses(
         self, department_code: str, semester_code: str
@@ -739,35 +879,56 @@ class SAISClient:
         from with a ``hidden_redir`` token that differs per page, and guessing
         it returns the previous page instead of an error.
         """
-        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
+        held = self._held_course_page(department_code, semester_code, course_code)
+        if held is not None:
+            action_url = self._live_action(semester_code)
+            if action_url is not None:
+                post_data = dict(held["hidden"])
+                post_data["submit_section"] = str(section).strip()
+                try:
+                    soup = await self._post_action(action_url, post_data)
+                    if not self._session_lost(soup):
+                        result = self._section_constraints_from_page(
+                            soup, department_code, semester_code, course_code, section)
+                        self._touch_position()
+                        return result
+                except ValueError:
+                    pass
+                self._clear_position()
 
-        resp = await self._client.post(
-            action_url,
-            data={
-                "text_course_code": str(course_code).strip(),
-                "SubmitCourseInfo": "Submit",
-                "hidden_redir": "Course_List",
-            },
-            headers={"Referer": action_url},
-        )
-        course_soup = BeautifulSoup(self._decode_html(resp), "html.parser")
+        soup = await self._section_page_soup(department_code, semester_code, course_code, section)
+        return self._section_constraints_from_page(
+            soup, department_code, semester_code, course_code, section)
+
+    async def _section_page_soup(
+        self, department_code: str, semester_code: str, course_code: str, section: str
+    ) -> BeautifulSoup:
+        """The section response fetched the long way: select, course page, button.
+
+        Only reached when no held course page can be reused (elision disabled,
+        a different course, an expired position, or a rejected reuse).
+        """
+        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
+        course_soup = await self._post_action(action_url, {
+            "text_course_code": str(course_code).strip(),
+            "SubmitCourseInfo": "Submit",
+            "hidden_redir": "Course_List",
+        })
         _verify_course_response_identity(course_soup, course_code, semester_code,
             semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+        self._hold_course_page(department_code, semester_code, course_code, course_soup)
 
-        post_data: Dict[str, str] = {}
-        for hidden in course_soup.find_all("input", {"type": "hidden"}):
-            name = hidden.get("name")
-            if name:
-                post_data[name] = hidden.get("value", "")
+        post_data: Dict[str, str] = {
+            hidden.get("name"): str(hidden.get("value", ""))
+            for hidden in course_soup.find_all("input", {"type": "hidden"})
+            if hidden.get("name")
+        }
         post_data["submit_section"] = str(section).strip()
+        return await self._post_action(action_url, post_data)
 
-        resp = await self._client.post(
-            action_url,
-            data=post_data,
-            headers={"Referer": action_url},
-        )
-        soup = BeautifulSoup(self._decode_html(resp), "html.parser")
-
+    def _section_constraints_from_page(
+        self, soup: BeautifulSoup, department_code: str, semester_code: str, course_code: str, section: str
+    ) -> SectionConstraints:
         rows: List[SectionConstraint] = []
         constraint_table_found = False
         for table in soup.find_all("table"):
@@ -801,7 +962,33 @@ class SAISClient:
             break
 
         if not constraint_table_found:
-            raise ValueError("SAIS section restriction table could not be read")
+            if not _explicit_empty_section_criteria(soup):
+                raise ValueError("SAIS section restriction table could not be read")
+            # The empty page is the course page with a sentence in place of the
+            # eligibility table, so it repeats every section button rather than
+            # identifying the one asked for.  Identity is still required: the
+            # course and semester must match, and the requested section must be
+            # in the list the page carries — a page with no section list is
+            # refused rather than trusted.  Only the exact empty sentence opens
+            # this path; a page that failed to parse does not.
+            _verify_course_response_identity(soup, course_code, semester_code,
+                semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
+            # Residual risk, knowingly accepted: a replayed same-course page for
+            # another unrestricted section cannot be told apart from the
+            # requested one by anything the page carries.  A page for a
+            # *restricted* section always carries its table, so this can only
+            # confuse two unrestricted sections of one course.
+            listed = _observed_section_numbers(soup)
+            requested_section = str(int(str(section).strip()))
+            if not listed or requested_section not in listed:
+                raise ValueError("SAIS section restriction page section identity is missing, ambiguous, or mismatched")
+            return SectionConstraints(
+                department=str(department_code),
+                semester=str(semester_code),
+                course_code=str(course_code).strip(),
+                section=str(section).strip(),
+                constraints=[],
+            )
         _verify_course_response_identity(soup, course_code, semester_code, section=section,
             semester_label=getattr(self, "_course_semester_labels", {}).get(str(semester_code)))
 
@@ -813,25 +1000,48 @@ class SAISClient:
             constraints=rows,
         )
 
-    async def get_course_info(
+    async def _verified_course_page(
         self, department_code: str, semester_code: str, course_code: str
-    ) -> CourseDetails:
-        """Get section details, instructors, and critical course info for a course."""
-        action_url, _, soup = await self._submit_course_list_page(department_code, semester_code)
+    ) -> BeautifulSoup:
+        """The course page, posted from the held position when that is safe.
 
+        Live-verified: after any course list submission, SAIS accepts a course
+        info POST without the department selection first — for the same
+        department or another one.  The reuse is still verified for identity
+        and falls back to the full navigation on any doubt, so a stale or
+        replayed page is never mistaken for the requested one.
+        """
         post_data = {
             "text_course_code": str(course_code).strip(),
             "SubmitCourseInfo": "Submit",
             "hidden_redir": "Course_List",
         }
+        semester_label = getattr(self, "_course_semester_labels", {}).get(str(semester_code))
+        action_url = self._live_action(semester_code)
+        if action_url is not None:
+            try:
+                soup = await self._post_action(action_url, post_data)
+                if not self._session_lost(soup):
+                    _verify_course_response_identity(
+                        soup, course_code, semester_code, semester_label=semester_label)
+                    self._touch_position()
+                    self._hold_course_page(department_code, semester_code, course_code, soup)
+                    return soup
+            except ValueError:
+                pass
+            self._clear_position()
+        action_url, _, _ = await self._submit_course_list_page(department_code, semester_code)
+        soup = await self._post_action(action_url, post_data)
+        _verify_course_response_identity(
+            soup, course_code, semester_code, semester_label=semester_label)
+        self._hold_course_page(department_code, semester_code, course_code, soup)
+        return soup
 
-        resp = await self._client.post(
-            action_url,
-            data=post_data,
-            headers={"Referer": action_url},
-        )
-        html = self._decode_html(resp)
-        res_soup = BeautifulSoup(html, "html.parser")
+    async def get_course_info(
+        self, department_code: str, semester_code: str, course_code: str
+    ) -> CourseDetails:
+        """Get section details, instructors, and critical course info for a course."""
+        res_soup = await self._verified_course_page(department_code, semester_code, course_code)
 
         dept_name = ""
         sem_name = str(semester_code)
@@ -1053,6 +1263,7 @@ class SAISClient:
             department_label=getattr(self, "_course_department_labels", {}).get(str(department_code)))
         courses: List[ThesisCourse] = []
         course_table_found = False
+        data_rows = 0
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             if not rows:
@@ -1061,18 +1272,54 @@ class SAISClient:
             if any("code" in h for h in headers) and any("name" in h for h in headers):
                 course_table_found = True
                 for tr in rows[1:]:
-                    cells = [clean_text(td.get_text(" ", strip=True)) for td in tr.find_all(["td", "th"])]
-                    if len(cells) >= 6:
-                        courses.append(
-                            ThesisCourse(
-                                course_code=cells[0],
-                                name=cells[1],
-                                ects_credit=cells[2] if len(cells) > 2 else "",
-                                credit=cells[3] if len(cells) > 3 else "",
-                                level=cells[4] if len(cells) > 4 else "",
-                                type=cells[5] if len(cells) > 5 else "",
-                            )
+                    data_rows += 1
+                    cells = tr.find_all(["td", "th"])
+                    if len(cells) < 6:
+                        continue
+                    # The live table leads with an empty radio cell, exactly
+                    # like the programme course list; older shapes put the code
+                    # first.  Take the radio's value when it has one, then
+                    # whichever of the first two cells carries the seven-digit
+                    # code, so the name and credit columns follow the code's
+                    # shift rather than a fixed offset.
+                    radio = tr.find("input", {"type": "radio", "name": "text_course_code"})
+                    code_from_radio = radio.get("value", "").strip() if radio else ""
+                    cell_texts = [clean_text(cell.get_text(" ", strip=True)) for cell in cells]
+                    code = code_from_radio
+                    shift = 0
+                    if re.fullmatch(r"\d{7}", code):
+                        shift = 1 if cell_texts[0] == "" else 0
+                    else:
+                        for index, text in enumerate(cell_texts[:2]):
+                            if re.fullmatch(r"\d{7}", text):
+                                code, shift = text, index
+                                break
+                    if not code:
+                        continue
+                    name = cell_texts[shift + 1] if len(cell_texts) > shift + 1 else ""
+                    ects = cell_texts[shift + 2] if len(cell_texts) > shift + 2 else ""
+                    credit = cell_texts[shift + 3] if len(cell_texts) > shift + 3 else ""
+                    level = cell_texts[shift + 4] if len(cell_texts) > shift + 4 else ""
+                    ctype = cell_texts[shift + 5] if len(cell_texts) > shift + 5 else ""
+                    courses.append(
+                        ThesisCourse(
+                            course_code=code,
+                            name=name,
+                            ects_credit=ects,
+                            credit=credit,
+                            level=level,
+                            type=ctype,
                         )
+                    )
+
+        if course_table_found and data_rows and not courses and not _explicit_empty_result(soup, "course"):
+            # A found table whose rows carried no readable course number is
+            # layout drift, not an empty programme.  Reporting it as empty would
+            # silently drop every thesis course, which is how the original
+            # column bug went unnoticed.  A placeholder row ("No course records
+            # found.") is the opposite case: the source is saying the table is
+            # empty, so it stays a valid empty answer.
+            raise ValueError("SAIS thesis course table could not be read")
 
         if not course_table_found and not _explicit_empty_result(soup, "course"):
             raise ValueError("SAIS thesis course table could not be read")
