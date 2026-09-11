@@ -1395,6 +1395,26 @@ async def _merge_observation_into_draft(
     current["_source_observation_ids"] = list(current.get("_source_observation_ids") or [])
     draft.data = _jsonable(current)
     existing_issues = [item for item in (draft.issues or []) if isinstance(item, dict)]
+    # A component that has just been read cleanly is not failing any more, so
+    # its earlier errors go with the reading that replaced them. Without this
+    # the list only ever grew, and a single bad read blocked a course from
+    # publication for good: publish refuses any draft carrying a blocking
+    # issue, so re-reading the page successfully changed nothing.
+    #
+    # Measured: 513 courses stuck behind a `missing_prerequisites_table` from a
+    # parser that misread METU's `position` field. Re-reading them restored the
+    # prerequisite groups - MATH 219 went from none to four - and every one of
+    # them stayed blocked, because the stale error was still attached.
+    #
+    # Scoped to this component and to errors: another component's failure is
+    # not this reading's to clear, and warnings (a source value differing from
+    # an administrator's override) are review notes that outlive one read.
+    if not any(issue.get("severity", "error") == "error" for issue in conflict_issues):
+        existing_issues = [
+            item
+            for item in existing_issues
+            if item.get("component") != component or item.get("severity", "error") != "error"
+        ]
     # Keep source failures for review.  Identical repeated observations are
     # deduplicated to keep a repeatedly retried job from growing JSONB forever.
     for issue in conflict_issues:
