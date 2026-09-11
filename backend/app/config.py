@@ -256,6 +256,12 @@ class Settings(BaseSettings):
     # re-establishing a session the process already has. Here rather than only
     # in the image so it can be turned off without a rebuild.
     course_info_session_cache: bool = True
+    # Whether catalog actions reuse the held session's navigation position
+    # instead of re-selecting the department before every read. Live-verified
+    # against SAIS; each reuse is identity-checked with a fallback to the full
+    # navigation. Here rather than only in the image so a rollback is a config
+    # change, not a rebuild.
+    course_info_nav_elision: bool = True
 
     # Enable published-only reads after administrators publish the initial catalog.
     # Ingestion can be enabled first so migration never exposes an unreviewed draft.
@@ -322,6 +328,13 @@ class Settings(BaseSettings):
     # interrupted pass re-reads at most this many pages and never loses the
     # courses those pages discovered.
     catalog_import_checkpoint_steps: int = Field(default=25, ge=1, le=1000)
+    # How long a successful source observation may satisfy an import step
+    # before the worker reads that page again.  Detail and section pages go
+    # stale during add-drop; rule pages change by publication.  Forced imports
+    # ignore both windows, and a window above the component's read-time max age
+    # is clamped down so a stale component can always be refreshed.
+    catalog_reuse_info_seconds: int = Field(default=24 * 3600, ge=0)
+    catalog_reuse_rules_seconds: int = Field(default=7 * 24 * 3600, ge=0)
     # How many source pages may be in flight at once, on one client each.
     # Leave this at one for SAIS: measured on production, three clients on one
     # account cost 10s per step against 1.02s with one, and the source began

@@ -87,7 +87,10 @@ def state_dir_for(state_root: str, user_id: UUID, tool: CampusTool) -> str | Non
 
 def _runtime_flags() -> dict[str, str]:
     settings = get_settings()
-    return {"course_info_session_cache": "1" if settings.course_info_session_cache else "0"}
+    return {
+        "course_info_session_cache": "1" if settings.course_info_session_cache else "0",
+        "course_info_nav_elision": "1" if settings.course_info_nav_elision else "0",
+    }
 
 
 def build_server_specs(

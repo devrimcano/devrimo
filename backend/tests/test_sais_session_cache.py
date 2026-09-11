@@ -19,6 +19,7 @@ here. ``config`` is upstream's and is not vendored, so it is stubbed.
 import asyncio
 import importlib.util
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -175,6 +176,154 @@ async def test_the_cache_can_be_switched_off_without_a_rebuild(sais, monkeypatch
     assert opens == [64, 64]
 
 
+# --- reusing the held position ------------------------------------------------
+
+
+def _position_client(sais, nav_calls: list, pages: list[str]):
+    """A client whose navigation is faked but still records the position.
+
+    The real ``_submit_course_list_page`` records where the session stands; the
+    fake has to do the same or the elision has nothing to reuse.
+    """
+    client = _client(sais)
+    client._nav_elision = True
+
+    async def course_list(department, semester):
+        nav_calls.append((department, semester))
+        client._note_position("https://example.invalid/main.php", semester)
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    sent = _post_returning(client, pages)
+    return client, sent
+
+
+def _constraint_table(start: str, end: str) -> str:
+    return (
+        "<table><tr><th>Dept</th><th>Char</th><th>Char</th><th>CGPA</th><th>CGPA</th>"
+        "<th>Year</th><th>Year</th><th>Grade</th><th>Grade</th></tr>"
+        f"<tr><td>CENG</td><td>{start}</td><td>{end}</td><td>0.00</td><td>4.00</td>"
+        "<td>0</td><td>95</td><td>G</td><td>G</td></tr></table>"
+    )
+
+
+def _course_page_html(course: str = "5670201", semester: str = "20261") -> str:
+    return _course_identity(course=course, semester=semester) + (
+        '<form><input type="hidden" name="hidden_redir" value="Course_Info"></form>'
+        "<table><tr><td>Course Name: FIXTURE COURSE Credit: 3</td></tr></table>"
+        "<table><tr><th>Section</th><th>Instructor</th></tr></table>"
+    )
+
+
+async def test_course_info_reuses_the_held_position(sais):
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_page_html(course="5670202"),
+    ])
+
+    first = await client.get_course_info("567", "20261", "5670201")
+    second = await client.get_course_info("567", "20261", "5670202")
+
+    assert (first.course_code, second.course_code) == ("5670201", "5670202")
+    assert nav == [("567", "20261")], "the second read must reuse the held position"
+    assert len(sent) == 2, "one action POST per course, no second department select"
+
+
+async def test_sections_reuse_the_held_course_page(sais):
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_identity(section="1") + _constraint_table("AA", "KA"),
+        _course_identity(section="2") + _constraint_table("KB", "ZZ"),
+    ])
+
+    await client.get_course_info("567", "20261", "5670201")
+    first = await client.get_section_constraints("567", "20261", "5670201", "1")
+    second = await client.get_section_constraints("567", "20261", "5670201", "2")
+
+    assert [row.start_char for row in first.constraints] == ["AA"]
+    assert [row.start_char for row in second.constraints] == ["KB"]
+    assert nav == [("567", "20261")]
+    assert len(sent) == 3, "each section is one POST with the held page's fields"
+
+
+async def test_elision_falls_back_when_the_direct_page_is_wrong(sais):
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _course_page_html(),
+        COURSE_LIST,
+        _course_page_html(course="5670202"),
+    ])
+
+    await client.get_course_info("567", "20261", "5670201")
+    second = await client.get_course_info("567", "20261", "5670202")
+
+    assert second.course_code == "5670202"
+    assert len(nav) == 2, "a rejected reuse takes the full navigation"
+    assert len(sent) == 3
+
+
+async def test_section_reuse_falls_back_to_the_long_path(sais):
+    nav: list = []
+    client, sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_identity(section="2") + _constraint_table("KB", "ZZ"),
+        _course_page_html(),
+        _course_identity(section="1") + _constraint_table("AA", "KA"),
+    ])
+
+    await client.get_course_info("567", "20261", "5670201")
+    result = await client.get_section_constraints("567", "20261", "5670201", "1")
+
+    assert [row.start_char for row in result.constraints] == ["AA"]
+    assert len(nav) == 2
+    assert len(sent) == 4
+
+
+async def test_an_expired_position_is_not_reused(sais):
+    nav: list = []
+    client, _sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_page_html(course="5670202"),
+    ])
+
+    await client.get_course_info("567", "20261", "5670201")
+    _, semester, _ = client._position
+    client._position = (client._position[0], semester, time.monotonic() - sais.SESSION_TTL_SECONDS - 1)
+
+    await client.get_course_info("567", "20261", "5670202")
+
+    assert len(nav) == 2
+
+
+async def test_a_different_term_is_not_reused_from_the_position(sais):
+    nav: list = []
+    client, _sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_page_html(course="5670202", semester="20252"),
+    ])
+
+    await client.get_course_info("567", "20261", "5670201")
+    await client.get_course_info("567", "20252", "5670202")
+
+    assert nav == [("567", "20261"), ("567", "20252")]
+
+
+async def test_navigation_elision_can_be_switched_off(sais):
+    nav: list = []
+    client, _sent = _position_client(sais, nav, [
+        _course_page_html(),
+        _course_page_html(course="5670202"),
+    ])
+    client._nav_elision = False
+
+    await client.get_course_info("567", "20261", "5670201")
+    await client.get_course_info("567", "20261", "5670202")
+
+    assert len(nav) == 2, "with the switch off every read re-selects the department"
+
+
 # --- noticing that the session went away --------------------------------------
 
 
@@ -210,6 +359,18 @@ async def test_a_session_that_is_gone_for_good_does_not_retry_for_ever(sais):
     await client._submit_course_list_page("236", "20252")
 
     assert opens == [64, 64], "one retry, then the answer is handed back as it is"
+
+
+async def test_a_login_page_never_becomes_a_position(sais):
+    """A dead session must not be reused: a later action would post into it."""
+    client = _client(sais)
+    _track_opens(client, sais)
+    _post_returning(client, [AUTOLOGIN])
+
+    await client._submit_course_list_page("236", "20252")
+
+    assert client._position is None
+    assert client._course_page is None
 
 
 async def test_an_empty_department_is_an_answer_not_a_lost_session(sais):
@@ -467,6 +628,150 @@ async def test_verified_empty_thesis_table_is_valid(sais):
     assert await client.get_thesis_courses("567", "20261") == []
 
 
+async def test_thesis_table_reads_the_code_from_its_radio(sais):
+    """The live thesis table leads with an empty radio cell.
+
+    Reading cells[0] as the code returned every row with an empty course_code
+    and the code sitting in its name, which the importer records as malformed
+    and the MCP tool served as misaligned fields.
+    """
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
+        '<tr><td><input type="radio" name="text_course_code" value="5670801"></td>'
+        "<td>5670801</td><td>SPECIAL STUDIES</td><td>10.0</td><td>0.00 (4.00,2.00,)</td>"
+        "<td>Graduate</td><td>Thesis</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+    result = await client.get_thesis_courses("567", "20261")
+
+    assert [(row.course_code, row.name) for row in result] == [("5670801", "SPECIAL STUDIES")]
+    assert result[0].ects_credit == "10.0"
+    assert result[0].credit == "0.00 (4.00,2.00,)"
+    assert result[0].level == "Graduate"
+
+
+async def test_thesis_row_without_the_radio_still_reads_its_code(sais):
+    """A leading empty cell is a column shift, not a reason to drop the row."""
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
+        "<tr><td></td><td>5670801</td><td>SPECIAL STUDIES</td><td>10.0</td><td>0.00</td>"
+        "<td>Graduate</td><td>Thesis</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+    result = await client.get_thesis_courses("567", "20261")
+
+    assert [(row.course_code, row.name) for row in result] == [("5670801", "SPECIAL STUDIES")]
+    assert result[0].ects_credit == "10.0"
+    assert result[0].type == "Thesis"
+
+
+async def test_thesis_row_without_the_type_column_keeps_columns_aligned(sais):
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th></tr>"
+        '<tr><td><input type="radio" name="text_course_code" value="5670801"></td>'
+        "<td>5670801</td><td>SPECIAL STUDIES</td><td>10.0</td><td>0.00 (4.00,2.00,)</td>"
+        "<td>Graduate</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+    result = await client.get_thesis_courses("567", "20261")
+
+    assert result[0].course_code == "5670801"
+    assert result[0].name == "SPECIAL STUDIES"
+    assert result[0].ects_credit == "10.0"
+    assert result[0].credit == "0.00 (4.00,2.00,)"
+    assert result[0].level == "Graduate"
+    assert result[0].type == ""
+
+
+async def test_unreadable_thesis_rows_fail_instead_of_reading_as_empty(sais):
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
+        "<tr><td></td><td>NOT-A-CODE</td><td>SPECIAL STUDIES</td><td>10.0</td><td>0.00</td>"
+        "<td>Graduate</td><td>Thesis</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+
+    with pytest.raises(ValueError, match="thesis course table"):
+        await client.get_thesis_courses("567", "20261")
+
+
+async def test_short_thesis_rows_fail_instead_of_reading_as_empty(sais):
+    """Rows too short to hold a code are layout drift, not an empty term."""
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th></tr>"
+        "<tr><td></td><td>5670801</td></tr>"
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+
+    with pytest.raises(ValueError, match="thesis course table"):
+        await client.get_thesis_courses("567", "20261")
+
+
+async def test_a_thesis_placeholder_row_is_an_empty_answer(sais):
+    """A table plus "No course records" is empty, not layout drift."""
+    client = _client(sais)
+    page = (
+        '<input name="select_dept" value="567"><input name="select_semester" value="20261">'
+        "<table>"
+        "<tr><th></th><th>Code</th><th>Name</th><th>ECTS Credit</th><th>Credit</th><th>Level</th><th>Type</th></tr>"
+        '<tr><td colspan="7">No course records found.</td></tr>'
+        "</table>"
+    )
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", page, _soup(page)
+
+    client._submit_course_list_page = course_list
+    _post_returning(client, [page])
+
+    assert await client.get_thesis_courses("567", "20261") == []
+
+
 async def test_explicit_no_prerequisite_message_remains_a_valid_empty_answer(sais):
     client = _client(sais)
 
@@ -582,6 +887,94 @@ async def test_verified_empty_section_constraints_remain_valid(sais):
     _post_returning(client, [_course_identity(), page])
     result = await client.get_section_constraints("567", "20261", "5670201", "1")
     assert result.constraints == []
+
+
+async def test_explicit_no_section_criteria_is_an_empty_answer(sais):
+    """SAIS states the absence of restrictions as a sentence, not a table.
+
+    The live page repeats every section button instead of identifying the one
+    asked for, so it is accepted only after course and semester identity and
+    only when the requested section is among those the page lists.
+    """
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    empty = (
+        "<p>Course Code: 5670201 Semester : 20261</p>"
+        + "<p>There is no section criteria to take the selected courses for this section.</p>"
+        + '<input type="submit" name="submit_section" value="1">'
+        + '<input type="submit" name="submit_section" value="2">'
+    )
+    _post_returning(client, [_course_identity(), empty])
+
+    result = await client.get_section_constraints("567", "20261", "5670201", "1")
+
+    assert result.constraints == []
+    assert result.section == "1"
+
+
+async def test_no_section_criteria_without_a_section_list_is_refused(sais):
+    """A page with no section evidence is refused, not trusted."""
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    empty = (
+        "<p>Course Code: 5670201 Semester : 20261</p>"
+        + "<p>There is no section criteria to take the selected courses for this section.</p>"
+    )
+    _post_returning(client, [_course_identity(), empty])
+
+    with pytest.raises(ValueError, match="section identity"):
+        await client.get_section_constraints("567", "20261", "5670201", "1")
+
+
+def test_explicit_empty_section_criteria_understands_turkish_caps(sais):
+    assert sais._explicit_empty_section_criteria(_soup("<p>ŞUBE İÇİN KRİTER YOKTUR.</p>"))
+    assert sais._explicit_empty_section_criteria(_soup("<p>Bu şube için kriter bulunmamaktadır.</p>"))
+    assert not sais._explicit_empty_section_criteria(_soup("<p>Department : Computer Engineering</p>"))
+
+
+async def test_no_section_criteria_still_requires_the_requested_course(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    empty = (
+        _course_identity(course="5670202")
+        + "<p>There is no section criteria to take the selected courses for this section.</p>"
+        + '<input type="submit" name="submit_section" value="1">'
+    )
+    _post_returning(client, [_course_identity(), empty])
+
+    with pytest.raises(ValueError, match="identity"):
+        await client.get_section_constraints("567", "20261", "5670201", "1")
+
+
+async def test_no_section_criteria_requires_the_requested_section_to_be_listed(sais):
+    client = _client(sais)
+
+    async def course_list(*_args, **_kwargs):
+        return "https://example.invalid/main.php", COURSE_LIST, _soup(COURSE_LIST)
+
+    client._submit_course_list_page = course_list
+    empty = (
+        _course_identity()
+        + "<p>There is no section criteria to take the selected courses for this section.</p>"
+        + '<input type="submit" name="submit_section" value="1">'
+        + '<input type="submit" name="submit_section" value="2">'
+    )
+    _post_returning(client, [_course_identity(), empty])
+
+    with pytest.raises(ValueError, match="section identity"):
+        await client.get_section_constraints("567", "20261", "5670201", "3")
 
 
 @pytest.mark.parametrize("method, body", [

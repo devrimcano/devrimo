@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.campus.credentials import CampusSecrets
+from app.config import get_settings
 
 _PACKAGE = "app.academic_catalog._source_vendor"
 
@@ -52,6 +53,7 @@ class CatalogSource:
             password=secrets.metu_password,
             locale=secrets.locale,
             request_gate=request_gate,
+            nav_elision=bool(get_settings().course_info_nav_elision),
         )
 
     async def aclose(self) -> None:
