@@ -506,7 +506,20 @@ def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
     value = _decode_payload(value)
     raw: Any = None
     if isinstance(value, dict):
-        raw = _field(value, "groups", "prerequisite_groups", "prerequisites", "requirements", "rows")
+        # `result` belongs here for the same reason it is in _rows: the source
+        # does not answer in one shape. Read live, get_course_prerequisites
+        # hands back a bare list; the same call through the cache hands back
+        # {"result": [...]}. Without the key this read the second shape as no
+        # table at all and recorded missing_prerequisites_table.
+        #
+        # Measured: MATH 219 published with nine sections and an empty
+        # prerequisite_groups, while the source lists MATH 120 at DD for it -
+        # and 513 courses were held out of publication by the same issue. The
+        # planner's prerequisite check was running against nothing.
+        raw = _field(
+            value, "groups", "prerequisite_groups", "prerequisites", "requirements", "rows",
+            "result", "value", "data", "items",
+        )
     elif isinstance(value, list):
         raw = value
     if raw is None:
@@ -623,7 +636,13 @@ def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
 
 def _replacement_rows(value: Any) -> tuple[list[dict[str, Any]], bool]:
     value = _decode_payload(value)
-    raw: Any = _field(value, "replacements", "exclusions", "relationships") if isinstance(value, dict) else value
+    # Same envelope, same reason as _prerequisite_groups above: a cached read
+    # of this tool answers {"result": [...]} where a live one answers a list.
+    raw: Any = (
+        _field(value, "replacements", "exclusions", "relationships", "result", "value", "data", "items")
+        if isinstance(value, dict)
+        else value
+    )
     if raw is None:
         return [], False
     if isinstance(raw, dict):
