@@ -194,6 +194,11 @@ def test_job_expands_only_the_official_term_and_keeps_four_digit_codes(listing_t
     }, "20261")
     listing = next(step for step in listings if step["tool"] == listing_tool)
     steps = worker.expand_steps(listing, [{"course_code": "2402201"}], "20261")
+    if listing_tool == "get_thesis_courses":
+        # Thesis rows are recorded by the listing observation itself; they are
+        # deliberately not expanded into detail and rule reads.
+        assert steps == []
+        return
     assert {step["values"]["course"] for step in steps} == {"2402201"}
     assert [step["tool"] for step in steps] == [
         "get_course_info", "get_course_prerequisites", "get_course_replacements",

@@ -352,7 +352,13 @@ def expand_steps(step: dict, payload, term: str) -> list[dict]:
         return [{"tool": tool, "values": {"semester": term, "department": str(row["code"])}}
                 for row in payload.get("departments", []) if row.get("code")
                 for tool in ("list_program_courses", "get_thesis_courses")]
-    if tool in {"list_program_courses", "get_thesis_courses"}:
+    if tool == "get_thesis_courses":
+        # Thesis courses are recorded from their listing alone.  The listing
+        # observation ingests each row with its identity and ``is_thesis`` flag;
+        # expanding it into detail and rule reads for every thesis number is the
+        # large request cost this plan deliberately avoids.
+        return []
+    if tool == "list_program_courses":
         steps = []
         for row in _rows(payload):
             code = str(row.get("course_code") or "")
@@ -728,7 +734,7 @@ async def run_once() -> CatalogPassResult:
                         await db.commit()
                     added = expand_steps(step, payload, job.term)
                     discovery_only = (job.payload or {}).get("discovery_only")
-                    if discovery_only and step["tool"] in {"list_program_courses", "get_thesis_courses"}:
+                    if discovery_only and step["tool"] == "list_program_courses":
                         added = []
                     if added:
                         # Restrictions for this course precede the next

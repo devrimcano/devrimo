@@ -256,6 +256,12 @@ class Settings(BaseSettings):
     # re-establishing a session the process already has. Here rather than only
     # in the image so it can be turned off without a rebuild.
     course_info_session_cache: bool = True
+    # Whether catalog actions reuse the held session's navigation position
+    # instead of re-selecting the department before every read. Live-verified
+    # against SAIS; each reuse is identity-checked with a fallback to the full
+    # navigation. Here rather than only in the image so a rollback is a config
+    # change, not a rebuild.
+    course_info_nav_elision: bool = True
 
     # Enable published-only reads after administrators publish the initial catalog.
     # Ingestion can be enabled first so migration never exposes an unreviewed draft.

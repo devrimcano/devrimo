@@ -97,6 +97,9 @@ CAMPUS_TOOLS: tuple[CampusTool, ...] = (
             # the broker's settings so backing it out is a config change and a
             # restart rather than an image rebuild.
             "COURSE_INFO_SESSION_CACHE": "{course_info_session_cache}",
+            # Reuse the held session's navigation position instead of
+            # re-selecting the department before every course read.
+            "COURSE_INFO_NAV_ELISION": "{course_info_nav_elision}",
         },
         state_slug="course-info",
         include_tools=(

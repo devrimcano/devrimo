@@ -58,3 +58,18 @@ def test_empty_schedule_is_unknown_and_unparseable_restrictions_are_not_unrestri
                     {"constraints": [{"unexpected_column": "Do not assume open"}]}):
         _, _, status = _parse_observation("get_section_constraints", {"course": "2402201", "section": "1"}, payload)
         assert status == "malformed"
+
+
+def test_thesis_listing_parses_courses_and_marks_them():
+    candidate, issues, status = _parse_observation("get_thesis_courses", {
+        "semester": "20261", "department": "567",
+    }, {
+        "courses": [{
+            "course_code": "5670801", "name": "SPECIAL STUDIES", "ects_credit": "10.0",
+            "credit": "0.00 (4.00,2.00,)", "level": "Graduate", "type": "Thesis",
+        }],
+    })
+    assert status == "success"
+    assert issues == []
+    assert candidate["courses"][0]["course_code"] == "5670801"
+    assert candidate["courses"][0]["data"]["thesis"] is True
