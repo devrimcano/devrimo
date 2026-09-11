@@ -397,15 +397,6 @@ sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
 sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
   /etc/devrimo/catalog.env ACADEMIC_CATALOG_INGESTION_ENABLED true
 
-# Student planning and assistant course reads must use the reviewed catalog
-# once the catalog is the production source of truth.  Keep both processes on
-# the same mode: enabling only the API makes the schedule page use releases
-# while assistant tool calls continue hitting the legacy raw cache.
-sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
-  /etc/devrimo/api.env ACADEMIC_CATALOG_READS_ENABLED true
-sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
-  /etc/devrimo/assistant.env ACADEMIC_CATALOG_READS_ENABLED true
-
 # Keep the migration/restart window short. Alembic migrations in this project
 # may change ownership and remove retired columns; keep the recovery snapshot.
 sudo /usr/bin/systemctl stop devrimo-api.service
@@ -413,6 +404,26 @@ if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && s
   sudo /usr/bin/systemctl start devrimo-api.service
   exit 1
 fi
+
+# One authorized initial cutover: publish every currently valid 20261 draft in
+# one immutable release.  The marker prevents later deployments from turning
+# newly imported drafts into live data without another explicit review.
+catalog_cutover_marker="$DEPLOY_DIR/.catalog-20261-cutover-v1"
+if [ ! -f "$catalog_cutover_marker" ]; then
+  if ! bash -lc "cd '$DEPLOY_DIR/backend' && set -a && source .env.migrations && set +a && export DATABASE_URL=\"\$DATABASE_MIGRATION_URL\" && unset DATABASE_MIGRATION_URL && export ENVIRONMENT=production DATABASE_RUNTIME_ROLE=api && .venv/bin/python -m app.academic_catalog.publish_cli --term 20261 --apply"; then
+    sudo /usr/bin/systemctl start devrimo-api.service
+    exit 1
+  fi
+  touch "$catalog_cutover_marker"
+fi
+
+# Student planning and assistant course reads must use the reviewed catalog.
+# Keep both processes on the same mode: enabling only the API makes the
+# schedule page use releases while assistant calls continue on the legacy path.
+sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
+  /etc/devrimo/api.env ACADEMIC_CATALOG_READS_ENABLED true
+sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
+  /etc/devrimo/assistant.env ACADEMIC_CATALOG_READS_ENABLED true
 
 # The knowledge worker imports the same application modules as the API, so it
 # keeps serving the previous release from memory until it is restarted too.
