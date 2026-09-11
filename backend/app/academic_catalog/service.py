@@ -545,11 +545,24 @@ def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
             )
         )
 
+    # `position` is deliberately not read as an ordinal here. METU sends it on
+    # every prerequisite row as a course *status* - "Offered Course / Açık
+    # Ders", "Closed Course / Kapalı Ders" - and the name collides with this
+    # parser's own idea of a position, which is an index. Treating the label as
+    # an ordinal made _int() return None and marked the row malformed, so every
+    # course that actually had a prerequisite was recorded as unreadable while
+    # every course without one parsed cleanly.
+    #
+    # Measured: 513 courses held out of publication, and MATH 219 published
+    # with nine sections and no prerequisites while the source lists MATH 120
+    # at DD for it. `order` and `index` are this parser's own spellings and
+    # still mean what they say; where neither is given the row keeps its place
+    # in the list, which is the order the source sent them in.
     def has_position(item: dict[str, Any]) -> bool:
-        return _field(item, "position", "order", "index") not in (None, "")
+        return _field(item, "order", "index") not in (None, "")
 
     def valid_position(item: dict[str, Any]) -> bool:
-        value = _field(item, "position", "order", "index")
+        value = _field(item, "order", "index")
         return value in (None, "") or _int(value) is not None
 
     for index, item in enumerate(raw):
@@ -597,7 +610,7 @@ def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
                     "course_code": code,
                     "minimum_grade": _field(item, "minimum_grade", "grade_min", "min_grade", "required_grade"),
                     "requirement_type": str(_field(item, "requirement_type", "type") or "course"),
-                    "position": _int(_field(item, "position", "order", "index")) or index,
+                    "position": _int(_field(item, "order", "index")) or index,
                     "raw_text": _field(item, "raw_text", "text", "description"),
                 }
             )
@@ -624,7 +637,7 @@ def _prerequisite_groups(value: Any) -> tuple[list[dict[str, Any]], bool]:
                             "course_code": nested_code,
                             "minimum_grade": _field(requirement, "minimum_grade", "grade_min", "min_grade", "required_grade"),
                             "requirement_type": str(_field(requirement, "requirement_type", "type") or "course"),
-                            "position": _int(_field(requirement, "position", "order")) or position,
+                            "position": _int(_field(requirement, "order", "index")) or position,
                             "raw_text": _field(requirement, "raw_text", "text", "description"),
                         }
                     )

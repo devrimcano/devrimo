@@ -68,3 +68,52 @@ def test_replacements_carry_the_same_envelope():
     rows, present = _replacement_rows({"result": [{"replaced_course_code": "2360117"}]})
     assert present
     assert rows, "the replacement envelope read as no table"
+
+
+# --- the field-name collision that was actually blocking publication --------
+
+# One real row, copied from a stored observation. Every prerequisite row METU
+# returns carries `position` as a course *status*, not an ordinal.
+METU_ROW = {
+    "name": "OCCUPATIONAL HEALTH AND SAFETY-I",
+    "credit": "0(0.00,0.00,0.00)",
+    "set_no": "1",
+    "position": "Offered Course / Açık Ders",
+    "min_grade": "S",
+    "level_type": "Undergraduate / Lisans",
+    "dept_version": "0",
+    "program_code": "1",
+    "prerequisite_course_code": "8770101",
+}
+
+
+def test_the_source_status_label_is_not_read_as_an_ordinal():
+    """`position` means "course status" here and "index" to this parser.
+
+    _int("Offered Course / Açık Ders") is None, which marked the row malformed
+    - so every course that actually had a prerequisite was recorded as
+    unreadable while every course without one parsed cleanly. 513 courses were
+    held out of publication by it, and MATH 219 published with nine sections
+    and no prerequisites while the source lists MATH 120 at DD for it.
+    """
+    groups, present = _prerequisite_groups([METU_ROW])
+    assert present, "a real METU prerequisite row still reads as no table"
+    assert groups, "the row produced no group"
+    requirements = groups[0]["requirements"]
+    assert [r["course_code"] for r in requirements] == ["8770101"]
+    assert requirements[0]["minimum_grade"] == "S"
+
+
+def test_rows_keep_the_order_the_source_sent_them_in():
+    """With no ordinal given, the list order is the order."""
+    second = dict(METU_ROW, prerequisite_course_code="5710230", name="INTRODUCTION TO C PROGRAMMING")
+    groups, present = _prerequisite_groups([METU_ROW, second])
+    assert present
+    codes = [r["course_code"] for r in groups[0]["requirements"]]
+    assert codes == ["8770101", "5710230"]
+
+
+def test_an_ordinal_this_parser_does_name_is_still_checked():
+    """`order` and `index` are its own spellings and still mean what they say."""
+    _groups, present = _prerequisite_groups([dict(METU_ROW, order="not-a-number")])
+    assert not present, "a genuinely unreadable ordinal stopped being reported"
