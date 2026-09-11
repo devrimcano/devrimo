@@ -15,7 +15,10 @@ set -eu
 
 root="${FRONTEND_ROOT:-/opt/devrimo/current-frontend}"
 port="${PORT:-3000}"
-host="${HOSTNAME:-0.0.0.0}"
+# Loopback by default. The unit sets HOSTNAME explicitly; this default is what
+# a hand-run of the script uses, and 0.0.0.0 here is what published the server
+# directly on the public interface.
+host="${HOSTNAME:-127.0.0.1}"
 cd "$root"
 
 if [ -f server.js ]; then
