@@ -1794,16 +1794,40 @@ export interface paths {
         };
         /**
          * Root Health
-         * @description Liveness, plus which commit each campus MCP server was built from.
+         * @description Liveness only.
          *
-         *     The commits are reported because the servers are pinned by build arg and
-         *     the build deletes their ``.git`` directories: without this, the pin is
-         *     unverifiable from a running container. They name public commits in public
-         *     repositories, so exposing them unauthenticated discloses nothing that
-         *     reading those repositories would not — and the alternative, guessing which
-         *     image is deployed during an incident, is worse.
+         *     The public edge serves this path, so it answers with the one thing a
+         *     liveness probe needs and nothing that describes the deployment.
          */
         get: operations["root_health_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/build-manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Build Manifest
+         * @description Which commit each campus MCP server was built from.
+         *
+         *     Kept off ``/health`` deliberately. The servers are pinned by build arg and
+         *     their ``.git`` directories are deleted at build time, so a running process
+         *     is the only place the pin can be read — but the public edge proxies
+         *     ``/health``, and an image's exact third-party pins are supply-chain detail
+         *     that does not need to be world-readable. Caddy routes nothing under
+         *     ``/internal`` and the API listens on loopback, so this answers only to a
+         *     process on the host.
+         */
+        get: operations["build_manifest_internal_build_manifest_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6937,6 +6961,28 @@ export interface operations {
         };
     };
     root_health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    build_manifest_internal_build_manifest_get: {
         parameters: {
             query?: never;
             header?: never;
