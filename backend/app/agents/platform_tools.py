@@ -48,10 +48,10 @@ def build_platform_tools(user_id: UUID) -> list:
     async def read(resource: ResourceRef) -> dict:
         """Read one resource by kind.
 
-        Course kinds take the numeric METU code in `key` (CENG 331 is 5710331) or a department
-        code/abbreviation in `department`; `term` may be left out and defaults to the active term. To find a
-        course by name, read catalog.department first, then read catalog.courses with that department.
-        student.registered_schedule is SAIS; planning.timetable is the editable week.
+        Course kinds take the course code in `key`, written either way a student does - "EE 201" or
+        5670201 - or a department code/abbreviation in `department`; `term` may be left out and defaults to
+        the active term. To find a course by name, read catalog.department first, then read catalog.courses
+        with that department. student.registered_schedule is SAIS; planning.timetable is the editable week.
         """
         return await workspace.read(ResourceRef.model_validate(resource))
 
