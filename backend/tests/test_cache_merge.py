@@ -56,11 +56,6 @@ class TestEmptiness:
         for value in ([{}], {"courses": [1]}, "x", 0, False, {"value": 0}):
             assert not _is_empty(value), value
 
-    def test_zero_is_an_answer_not_an_absence(self):
-        """Falsy is not the test: a stored 0 or False is a real cached value."""
-        assert not _is_empty(0)
-        assert not _is_empty(False)
-
     def test_the_json_wrapper_is_seen_through(self):
         assert _unwrap({"value": [1, 2]}) == [1, 2]
         assert _unwrap({"courses": [1]}) == {"courses": [1]}

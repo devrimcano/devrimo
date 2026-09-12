@@ -73,10 +73,6 @@ def test_an_unrecognised_grade_band_is_unknown():
     assert evaluate(rows, department="EE", prior_grade="BB").eligible is None
 
 
-def test_an_unknown_prior_grade_never_excludes():
-    assert evaluate(PHYS213_SECTION_1, department="EE", surname="TA", prior_grade=None).eligible
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

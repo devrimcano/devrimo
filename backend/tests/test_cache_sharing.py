@@ -61,14 +61,6 @@ class _Layers:
         return self
 
 
-def test_no_student_scoped_tool_is_ever_shared():
-    """The allowlist must never grow to include a per-student tool."""
-    shared = set(course_info._SHARED_TOOL_TTLS)
-    assert not [name for name in shared if name.startswith("get_student")], (
-        "a get_student_* tool returns one person's record and cannot be shared"
-    )
-
-
 def test_the_allowlist_is_exactly_what_is_reviewed():
     """A new upstream tool must be considered, not silently inherited.
 

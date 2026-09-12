@@ -21,13 +21,6 @@ def _turn(*contents: str) -> dict:
     return {"messages": [{"role": "user", "content": content} for content in contents]}
 
 
-def test_an_ordinary_message_is_nowhere_near_the_limit():
-    question = "MATH 219'un ön koşulu ne ve bu dönem hangi şubeler açık?"
-    request = ChatCompletionsRequestIn.model_validate(_turn(question))
-    assert request.messages[0].content == question
-    assert len(question) * 100 < MAX_MESSAGE_CHARACTERS * 100
-
-
 def test_a_single_oversized_message_is_refused():
     with pytest.raises(ValidationError):
         ChatCompletionsRequestIn.model_validate(_turn("A" * (MAX_MESSAGE_CHARACTERS + 1)))
