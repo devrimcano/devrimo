@@ -1102,11 +1102,9 @@ async def bulk_constraints(
             if raw in course_info
         ]
         if published_catalog_reads_enabled():
-            checked = [await check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks]
+            checked = [await check_course(*item) for item in checks]
         else:
-            checked = await asyncio.gather(
-                *(check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks)
-            )
+            checked = await asyncio.gather(*(check_course(*item) for item in checks))
         results.update(checked)
     return {"courses": results}
 
