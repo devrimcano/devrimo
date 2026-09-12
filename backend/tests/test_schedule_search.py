@@ -10,8 +10,10 @@ missing the course.
 """
 
 from app.api.v1.schedule import (
+    AiScheduleRequest,
     _course_code_matches,
     _index_rows,
+    _legacy_code_owner,
     _match_courses,
     _published_code_matches,
     _search_fold,
@@ -69,13 +71,35 @@ def test_both_search_paths_answer_every_code_spelling():
     driven through the same matcher and the same index rows here.
     """
     owner, indexed = _indexed(("5710331", "COMPUTER ORGANIZATION"))
+    legacy_payload = {"courses": [{"course_code": "5710331", "name": "COMPUTER ORGANIZATION"}]}
     for digits in ("331", "5710331", "571"):
         published = _published_code_matches(indexed, named=owner, digits=digits, home=owner)
-        legacy = _match_courses({"courses": [{"course_code": "5710331", "name": "COMPUTER ORGANIZATION"}]}, owner, digits=digits, title="")
+        legacy = _match_courses(legacy_payload, owner, digits=digits, title="")
         assert [course["code"] for course in published] == ["CENG331"], digits
         assert [course["code"] for course in legacy] == ["CENG331"], digits
     assert _published_code_matches(indexed, named=None, digits="332", home=None) == []
     assert _match_courses({"courses": [{"course_code": "5710331", "name": "X"}]}, owner, digits="332", title="") == []
+
+
+def test_a_seven_digit_code_names_its_own_department():
+    """The legacy listing is fetched for the code's department, not the student's.
+
+    An EE student searching 5710331 used to read EE's listing for a CENG course
+    and find nothing; a student with no saved context got a 422.
+    """
+    ceng = departments.resolve("CENG")
+    ee = departments.resolve("EE")
+    assert _legacy_code_owner(None, ee, "5710331") is ceng
+    assert _legacy_code_owner(None, None, "5710331") is ceng
+    assert _legacy_code_owner(None, ee, "331") is ee
+    assert _legacy_code_owner(None, None, "331") is None
+    assert _legacy_code_owner(ceng, ee, "331") is ceng
+
+
+def test_the_curriculum_request_accepts_the_alternate_spellings():
+    parsed = AiScheduleRequest.model_validate({"term": "20261", "course_codes": [{"code": "EE201"}]})
+    assert parsed.semester == "20261"
+    assert [course.code for course in parsed.courses] == ["EE201"]
 
 
 def test_a_query_without_digits_does_not_filter_by_code():

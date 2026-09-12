@@ -10,7 +10,9 @@ from app.agents.scholar.intent import (
     classify,
     context_fields,
     current_focus,
+    grants_expand,
     guidance,
+    refuses_everything,
     requested_scope,
     wants_everything,
 )
@@ -97,6 +99,25 @@ def test_wants_everything_reads_both_keyboards():
     assert wants_everything("İstersen tamamını çıkarayım")
     assert not wants_everything("Sadece 2. şube uygun mu?")
     assert wants_everything(None) is False
+
+
+def test_a_refusal_overrides_the_ask_and_only_the_current_message_grants():
+    assert refuses_everything("Hepsini gösterme, sadece Cuma.")
+    assert refuses_everything("No, only Friday.")
+    assert not grants_expand("Hepsini gösterme.")
+    assert not grants_expand("Hayır, sadece Cuma.")
+    assert grants_expand("Hepsini göster.")
+    assert grants_expand("Tümünü listeler misin?")
+    assert not grants_expand(None)
+
+
+def test_relative_and_attached_term_wordings_are_seen():
+    assert requested_scope("next semester EE 201 prerequisites?")["term_unresolved"] is True
+    assert requested_scope("20252de EE 201 ön koşulu nedir?")["term"] == "20252"
+    assert requested_scope("20261'de EE 201 ön koşulu nedir?")["term"] == "20261"
+    # "yaz" is the ordinary imperative here, not Summer.
+    assert requested_scope("EE201 dersinin ön koşulu nedir? Açılan şubeleri de yaz.")["term_unresolved"] is False
+    assert requested_scope("yaz döneminde EE 201 açılır mı?")["term_unresolved"] is True
 
 
 def test_an_events_question_is_an_announcements_question():

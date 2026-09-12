@@ -20,15 +20,15 @@ def _set(*, allow: bool, disposable: bool):
     harness.DISPOSABLE = disposable
 
 
-def test_memory_scenarios_need_the_flag_and_a_verified_account():
+def test_memory_scenarios_need_the_flags_and_a_verified_account():
     _set(allow=False, disposable=True)
     assert not harness.memory_write_allowed([])
     _set(allow=True, disposable=False)
-    assert harness.memory_write_allowed([])
-    assert not harness.memory_write_allowed([{"id": "x", "content": "y"}])
+    assert not harness.memory_write_allowed([])
     # A failed GET must never be read as "the account is empty".
-    assert not harness.memory_write_allowed(None)
     _set(allow=True, disposable=True)
+    assert not harness.memory_write_allowed(None)
+    assert harness.memory_write_allowed([])
     assert harness.memory_write_allowed([{"id": "x", "content": "y"}])
 
 

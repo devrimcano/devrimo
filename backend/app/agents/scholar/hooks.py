@@ -234,10 +234,8 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
             result = await result
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
         kind, expand = _requested_read(arguments, run_context)
-        result = bound(
-            project_result(kind, result, expand=expand),
-            limit=EXPANDED_RESULT_CHARS if expand else MAX_TOOL_RESULT_CHARS,
-        )
+        limit = EXPANDED_RESULT_CHARS if expand else MAX_TOOL_RESULT_CHARS
+        result = bound(project_result(kind, result, expand=expand, limit=limit), limit=limit)
         return result
     except Exception as exc:
         error = exc

@@ -46,7 +46,13 @@ _RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = tuple(
         ("eligibility", ("uygun", "alabilir", "kisit", "eligible", "kayit olabil")),
         ("sections", ("sube", "section", "hoca", "ogretim uyesi")),
         ("credits", ("kredi", "akts", "ects", "credit")),
-        ("schedule", ("ders program", "programi", "planim", "planla", "takvim", "cakis", "hafta", "schedule", "timetable")),
+        (
+            "schedule",
+            (
+                "ders program", "programi", "planim", "planla", "takvim", "cakis",
+                "hafta", "schedule", "timetable",
+            ),
+        ),
         ("knowledge", ("yonetmelik", "nedir", "nasil", "neden", "kural")),
         ("greeting", ("merhaba", "selam", "hello")),
     )
@@ -67,8 +73,8 @@ _GUIDANCE = {
         "the times are not published yet; keep restrictions to a single line. When the result carries "
         "sections_omitted, say how many sections the course has in total, show the ones you have, and ask "
         "whether the student wants all of them or one that fits a specific need (instructor, day, surname "
-        "range). `resource.expand` is only honored when the student asked for everything in this message, "
-        "or you offered it in the previous reply and they took the offer."
+        "range). `resource.expand` is honored only when the student's own message asks for everything; a "
+        "model decision alone is ignored."
     ),
     "eligibility": (
         "Answer shape for this question: the verdict first (eligible, not eligible, or unknown), then the "
@@ -87,8 +93,8 @@ _GUIDANCE = {
         "announcements and events; use student.announcements only when the student means their own SAIS "
         "board. Show at most five newest items, one line each with its date, and how many more there are. "
         "When the student names a category or topic (events are type event), filter the list by type, "
-        "title and summary and show only the matches. `resource.expand` is only honored when the student "
-        "asked for everything in this message, or you offered it in the previous reply."
+        "title and summary and show only the matches. `resource.expand` is honored only when the "
+        "student's own message asks for everything."
     ),
     "knowledge": (
         "Answer shape for this question: the answer in one short paragraph, then the source and when it was "
@@ -169,8 +175,18 @@ _FULL_CODE = re.compile(r"\b(\d{7})\b")
 # words - "2026 güz", "gelecek dönem" - cannot be mapped to a code here, and
 # reading the active term for a question about another one is worse than not
 # reading at all, so it is reported unresolved and the caller skips.
-_TERM_CODE = re.compile(r"\b20\d{3}\b")
-_TERM_WORDS = re.compile(r"\b(?:guz|bahar|yaz|fall|spring|summer)\b|gelecek (?:donem|yil)")
+# The code may run straight into a suffixed form - "20252de", "20261'de" - so
+# the boundary is digit-only, not a word boundary.
+_TERM_CODE = re.compile(r"(?<!\d)(20\d{3})(?!\d)")
+# "yaz" alone is the ordinary imperative ("...şubeleri de yaz"), and reading it
+# as Summer skipped the prefetch on the eval's own prerequisite prompt. Only the
+# term phrases count.
+_TERM_WORDS = re.compile(
+    r"\b(?:guz|bahar|fall|spring|summer)\b"
+    r"|yaz (?:donemi|okulu|okul)"
+    r"|(?:gelecek|sonraki|onumuzdeki|gecen) (?:donem|yil)"
+    r"|(?:next|last|previous|coming) (?:semester|term)"
+)
 _YEAR = re.compile(r"\b20\d{2}\b")
 
 # "şube 2", "2. şube", "section-3". Before-the-word matches require the
@@ -181,10 +197,10 @@ _SECTION_BEFORE = re.compile(r"(?<![a-z0-9])(\d{1,3})\s*[.:#/-]\s*(?:sube|sectio
 _SECTION_WORD = re.compile(r"\b(?:sube|section)")
 
 
-# "hepsini göster", "tamamını çıkar", "tümünü listele", "show all". Both the
-# student's request and the assistant's offer use these, which is what lets the
-# broker tell "they asked for everything" from "the model decided to fetch
-# everything on its own".
+# "hepsini göster", "tamamını çıkar", "tümünü listele", "show all". These are
+# the words a student uses to ask for the whole list; the broker checks the
+# student's own message, so a model that decides to fetch everything itself is
+# not granted the expanded read.
 _EVERYTHING = re.compile(
     r"\b(hepsi|hepsini|tamami|tamamini|tumu|tumunu|butun|butununu|"
     r"all of them|all of it|everything|show all|the rest)"
@@ -192,10 +208,34 @@ _EVERYTHING = re.compile(
 
 
 def wants_everything(message: str | None) -> bool:
-    """Whether a message asks for (or offers) every item of a list."""
+    """Whether a message asks for every item of a list."""
     if not message:
         return False
     return bool(_EVERYTHING.search(_fold(message)))
+
+
+# "hepsini gösterme", "sadece Cuma", "not all", "no, only". A refusal in the
+# same message overrides the ask.
+_REFUSALS = re.compile(
+    r"\b(gosterme|gostermeyin|istemiyorum|hayir|yalniz|sadece|"
+    r"not all|do not show|don't show|no thanks|no, only)"
+)
+
+
+def refuses_everything(message: str | None) -> bool:
+    if not message:
+        return False
+    return bool(_REFUSALS.search(_fold(message)))
+
+
+def grants_expand(message: str | None) -> bool:
+    """Whether this message, and only this message, asks for every item.
+
+    A previous offer is not consent: "I can show all of them" followed by
+    "No, only Friday" must not authorize the full read. The current message has
+    to ask, and it must not refuse.
+    """
+    return wants_everything(message) and not refuses_everything(message)
 
 
 def requested_scope(message: str | None) -> dict:

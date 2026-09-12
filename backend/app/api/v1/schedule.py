@@ -85,7 +85,11 @@ class AiScheduleRequest(BaseModel):
     semester: str = Field(
         min_length=4, max_length=20, validation_alias=AliasChoices("semester", "term")
     )
-    courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
+    courses: list[AiScheduleCourse] = Field(
+        default_factory=list,
+        max_length=20,
+        validation_alias=AliasChoices("courses", "course_codes"),
+    )
 
 
 class PrerequisiteRejectionOut(BaseModel):
@@ -620,7 +624,7 @@ async def search_courses(
 
     # A code lookup: the letters name a department, or there are only digits.
     if named is not None or (digits and not letters):
-        owner = named or home
+        owner = _legacy_code_owner(named, home, digits)
         if owner is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -732,6 +736,22 @@ async def _search_index(semester: str) -> tuple[list[tuple[str, dict]], set[str]
     # Single-flighted, so a burst of keystrokes past the debounce builds it
     # once and the rest wait on that build rather than starting their own.
     return await _SEARCH_INDEX.run(semester, build)
+
+
+def _legacy_code_owner(named, home, digits: str):
+    """The department whose listing a code lookup must read, on the legacy path.
+
+    A seven-digit code names its own department in its first three digits. It
+    used to fall back to the student's home department, so an EE student
+    searching 5710331 asked EE's listing for a CENG course and found nothing -
+    and a student with no saved context got a 422 for a code that names its
+    department completely.
+    """
+    if named is not None:
+        return named
+    if len(digits) == 7:
+        return departments.by_code(digits[:3]) or home
+    return home
 
 
 def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list[dict]:

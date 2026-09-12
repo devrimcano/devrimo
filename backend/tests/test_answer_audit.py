@@ -17,6 +17,13 @@ def test_a_completed_write_explains_the_claim():
     assert unsupported_claims("I sent the mail.", ["read", "send_email"]) == []
 
 
+def test_a_claim_is_checked_against_its_own_operation():
+    """A completed update must not excuse a mail claim, and the reverse."""
+    assert unsupported_claims("Mailini gönderdim.", ["update"]) == ["gönderdim"]
+    assert unsupported_claims("Preference saved.", ["send_email"]) == ["saved"]
+    assert unsupported_claims("Mailini gönderdim ve notu kaydettim.", ["send_email", "update"]) == []
+
+
 def test_an_answer_with_no_claim_is_clean():
     assert unsupported_claims("EE 201 dört kredi.", ["read"]) == []
     assert unsupported_claims("", []) == []

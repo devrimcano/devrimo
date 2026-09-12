@@ -40,6 +40,17 @@ _TERMINAL_CATALOG_MISSES = ("not available in the published release",)
 _TERMINAL_MEMORY_REJECTIONS = ("for memorychanges",)
 
 
+def is_terminal_catalog_miss(detail: str) -> bool:
+    """Whether an error message says the course is absent from the release.
+
+    The published catalog answers a missing course with an MCP error result,
+    and this client turns every such result into ``HTTPException(502)`` - so a
+    caller cannot check for a 404 to learn that the miss is final. This is the
+    check that works on the text instead.
+    """
+    return any(marker in str(detail).casefold() for marker in _TERMINAL_CATALOG_MISSES)
+
+
 def error_detail(exc: BaseException, depth: int = 0) -> str:
     """The real message, with anyio's task-group wrappers unwrapped.
 

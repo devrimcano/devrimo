@@ -8,10 +8,12 @@ envelope and nothing else - except that the components' fresh/stale state is
 kept, because an answer must not present stale data as current.
 """
 
-from app.agents.scholar.results import SECTION_PREVIEW, UPDATES_PREVIEW, project, project_result
+import json
+
 from app.agents.scholar.context import _selected
 from app.agents.scholar.hooks import _requested_read
 from app.agents.scholar.intent import context_fields, guidance
+from app.agents.scholar.results import SECTION_PREVIEW, UPDATES_PREVIEW, project, project_result
 
 
 def test_projection_compacts_the_catalog_envelope_and_keeps_every_domain_field():
@@ -173,10 +175,50 @@ def test_totals_survive_a_truncated_result_and_meetings_stay_readable():
     keys = list(data.keys())
     assert keys.index("sections_total") < keys.index("sections")
     section = data["sections"][0]
-    assert section["meetings"] == [{"weekday": 3, "raw_label": "08:40-10:30", "room": "M104"}]
+    assert section["meetings"] == [{"weekday": 3, "time": "08:40-10:30", "room": "M104"}]
     assert len(section["restrictions"]) == 4
     assert section["restrictions_omitted"] == 1
     assert "min_cgpa" not in section["restrictions"][0]
+
+
+def test_legacy_instructor_and_schedule_are_kept():
+    """With published reads off, sections use `instructor` and `schedule`."""
+    envelope = {
+        "data": {
+            "course": "5710201",
+            "department": "571",
+            "semester": "20261",
+            "sections": [
+                {
+                    "section": "1",
+                    "instructor": "STAFF",
+                    "schedule": [{"day": "Monday", "start_minute": 580, "duration_minutes": 50, "room": "P1"}],
+                    "constraint": "Department of Computer Engineering",
+                }
+            ],
+            "data": {"instructor": "STAFF", "schedule": []},
+        }
+    }
+    out = project_result("catalog.sections", envelope)
+    section = out["data"]["sections"][0]
+    assert section["instructors"] == ["STAFF"]
+    assert section["meetings"] == [{"day": "Monday", "time": "09:40", "minutes": 50, "room": "P1"}]
+    assert section["constraint"].startswith("Department")
+    assert out["data"]["course_code"] == "5710201"
+    assert out["data"]["term"] == "20261"
+
+
+def test_long_notes_are_capped_and_a_giant_list_is_cut_structurally():
+    envelope = _sections_envelope(61)
+    for section in envelope["data"]["data"]["sections"]:
+        section["notes"] = "N" * 1000
+    out = project_result("catalog.sections", envelope, expand=True, limit=24_000)
+    data = out["data"]
+    assert data["sections_total"] == 61
+    assert data["sections_omitted"] > 0
+    assert data["sections"][0]["notes"] == "N" * 300
+    assert len(json.dumps(out, ensure_ascii=False, default=str)) <= 24_000
+    assert "truncated" not in out  # a structured cut, not a preview string
 
 
 def test_sections_are_all_kept_when_the_student_asked_for_all():
