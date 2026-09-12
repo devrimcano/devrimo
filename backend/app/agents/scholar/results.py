@@ -135,15 +135,19 @@ def _compact_meeting(item: dict) -> dict:
     elif item.get("day"):
         compact["day"] = item["day"]
     label = item.get("raw_label") or item.get("hour")
+    start = item.get("start_minute")
     if label:
         compact["time"] = label
-    elif item.get("start_minute") is not None:
-        compact["time"] = f"{int(item['start_minute']) // 60:02d}:{int(item['start_minute']) % 60:02d}"
-    minutes = item.get("duration_minutes")
-    if minutes is None and item.get("start_minute") is not None and item.get("end_minute") is not None:
-        minutes = int(item["end_minute"]) - int(item["start_minute"])
-    if minutes:
-        compact["minutes"] = minutes
+    elif start is not None:
+        compact["time"] = f"{int(start) // 60:02d}:{int(start) % 60:02d}"
+    # The duration is only needed when the source gave no readable label; with
+    # one, the start and end are already in the text.
+    if not label and start is not None:
+        minutes = item.get("duration_minutes")
+        if minutes is None and item.get("end_minute") is not None:
+            minutes = int(item["end_minute"]) - int(start)
+        if minutes:
+            compact["minutes"] = minutes
     if item.get("room"):
         compact["room"] = item["room"]
     return compact
