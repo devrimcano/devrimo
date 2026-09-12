@@ -97,6 +97,10 @@ def build_instructions() -> list[str]:
         # and twenty-three model calls re-asking as sections, then prerequisites,
         # then eligibility, for a course that was in none of them. State it as a
         # rule so one 404 ends the search rather than starting another.
+        "Catalog prerequisite reads return groups that are alternatives: the course is satisfied when "
+        "ANY one group is complete, and the requirements inside a group combine with that group's `logic` "
+        "(AND = all of them). Present the groups as alternatives; never merge two groups into a single "
+        "combined list. If the result carries `satisfied_by`, it says the same thing explicitly.",
         "A catalog read that answers \"not available in the published release\" (or \"not found\") for a "
         "course and term is final, whichever resource kind asked: the course is not in that term's catalog. "
         "Do not retry it as another catalog resource kind, another term, or a search. Tell the student the "

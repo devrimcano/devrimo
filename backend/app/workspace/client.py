@@ -40,6 +40,23 @@ _TERMINAL_CATALOG_MISSES = ("not available in the published release",)
 _TERMINAL_MEMORY_REJECTIONS = ("for memorychanges",)
 
 
+def error_detail(exc: BaseException, depth: int = 0) -> str:
+    """The real message, with anyio's task-group wrappers unwrapped.
+
+    A failure that leaves the nested `async with` blocks arrives as
+    ``ExceptionGroup(ExceptionGroup([...]))``, whose own message is "unhandled
+    errors in a TaskGroup (1 sub-exception)". That string tells the model
+    nothing, so it retried a read seven times in one measured run. The real
+    error is inside; this is what makes it visible.
+    """
+    inner = getattr(exc, "exceptions", None)
+    if inner and depth < 4:
+        return "; ".join(error_detail(child, depth + 1) for child in inner[:3])
+    detail = getattr(exc, "detail", None)
+    message = str(detail if detail is not None else exc).strip()
+    return message or exc.__class__.__name__
+
+
 def workspace_error_text(result, name: str) -> str:
     """What the workspace actually said, rather than that something went wrong.
 
@@ -90,20 +107,27 @@ class WorkspaceClient:
         # task groups wrap anything that leaves them, so the agent - and the
         # log - saw the class name of the wrapper and nothing else.
         failure: HTTPException | None = None
-        async with httpx.AsyncClient(headers=headers, timeout=120, transport=self.transport) as http_client:
-            async with streamable_http_client(self.url, http_client=http_client) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    result = await session.call_tool(name, arguments)
-                    if result.isError:
-                        failure = HTTPException(502, workspace_error_text(result, name))
-                    elif result.structuredContent is not None:
-                        return result.structuredContent
-                    else:
-                        for item in result.content:
-                            if item.type == "text":
-                                return json.loads(item.text)
-                        failure = HTTPException(502, f"The workspace returned no result for {name}")
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=120, transport=self.transport) as http_client:
+                async with streamable_http_client(self.url, http_client=http_client) as streams:
+                    async with ClientSession(streams[0], streams[1]) as session:
+                        await session.initialize()
+                        result = await session.call_tool(name, arguments)
+                        if result.isError:
+                            failure = HTTPException(502, workspace_error_text(result, name))
+                        elif result.structuredContent is not None:
+                            return result.structuredContent
+                        else:
+                            for item in result.content:
+                                if item.type == "text":
+                                    return json.loads(item.text)
+                            failure = HTTPException(502, f"The workspace returned no result for {name}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # A transport failure or a server-side exception arrives wrapped in
+            # an ExceptionGroup; surface its real content instead of the wrapper.
+            raise HTTPException(502, f"{name} failed: {error_detail(exc)}") from exc
         raise failure
 
     async def search(self, request):

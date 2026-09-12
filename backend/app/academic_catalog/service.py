@@ -4274,6 +4274,25 @@ def _flat_prerequisites(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _prerequisite_semantics() -> dict[str, Any]:
+    """State how the groups combine, which the group objects alone do not.
+
+    A course is satisfied when ANY one group is complete; inside a group the
+    group's `logic` decides (AND = every requirement). Nothing in the payload
+    said so, and the model merged two alternative groups into one AND list -
+    it told a student ENG 102 required ENG 101 and its alternative at once.
+    """
+    return {
+        "groups_are_alternatives": True,
+        "satisfied_by": "any_group",
+        "semantics": (
+            "The prerequisite is met when ANY one group is complete. Requirements inside a group "
+            "combine with that group's `logic` (AND = all of them). Present the groups as "
+            "alternatives; never merge them into a single combined list."
+        ),
+    }
+
+
 def _public_replacements(
     revision: CatalogCourseRevision,
     children: dict[str, dict[UUID, list[Any]]],
@@ -4707,6 +4726,7 @@ async def read_tool(
         return {
             "prerequisites": _flat_prerequisites(groups),
             "prerequisite_groups": groups,
+            **_prerequisite_semantics(),
             "status": "verified" if effective.get("verified") else "unknown",
             "_catalog": _catalog_metadata(revision, release),
         }
@@ -4852,6 +4872,7 @@ async def published_plan_inputs(
             "course_code": course.course_code,
             "prerequisites": _flat_prerequisites(groups),
             "prerequisite_groups": groups,
+            **_prerequisite_semantics(),
             "replacements": _public_replacements(revision, children),
             "exclusions": [
                 row.related_course_code
