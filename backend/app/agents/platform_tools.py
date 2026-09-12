@@ -50,7 +50,8 @@ def build_platform_tools(user_id: UUID) -> list:
 
         Course kinds take the code in `key` ("EE 201" or 5670201) or a department in `department`; `term`
         defaults to the active term. Find a course by name via catalog.department, then catalog.courses.
-        student.registered_schedule is SAIS; planning.timetable is the editable week.
+        student.registered_schedule is SAIS; planning.timetable is the editable week. Set `expand` true
+        only when the student asked for every item after a partial list.
         """
         return await workspace.read(ResourceRef.model_validate(resource))
 

@@ -97,6 +97,10 @@ class _ScopedRef(BaseModel):
     attachment: str | None = Field(default=None, max_length=255)
     term: str | None = Field(default=None, max_length=32, description="Defaults to the active term.")
     section: str | None = Field(default=None, max_length=32)
+    expand: bool = Field(
+        default=False,
+        description="Set true only when the student asked for every item after a partial list.",
+    )
 
 
 class ResourceRef(_ScopedRef):

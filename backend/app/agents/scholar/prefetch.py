@@ -18,7 +18,7 @@ Failures are swallowed: a prefetch that fails must never fail the turn it was
 meant to speed up.
 """
 
-from app.agents.scholar.results import bound, project
+from app.agents.scholar.results import bound, project_result
 
 # The read each intent almost always needs, and only when the message names
 # exactly one course: a prefetch that guesses wrong costs more than the model
@@ -109,6 +109,7 @@ async def prefetch_dependencies(dependencies: dict, *, client=None) -> dict:
             continue
         if not isinstance(result, dict):
             continue
+        projected = project_result(kind, result)
         entries.append(
             {
                 "kind": kind,
@@ -117,8 +118,8 @@ async def prefetch_dependencies(dependencies: dict, *, client=None) -> dict:
                 # model (and a debugger) never has to assume the active one.
                 "term": plan["term"],
                 "section": plan["section"] if kind == "catalog.eligibility" else None,
-                "data": bound(project(result.get("data"))),
-                "provenance": project(result.get("provenance")),
+                "data": bound(projected.get("data")),
+                "provenance": projected.get("provenance"),
             }
         )
     if not entries:

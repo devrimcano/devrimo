@@ -20,6 +20,151 @@ fields an answer needs.
 from typing import Any
 
 MAX_TOOL_RESULT_CHARS = 6_000
+# An explicit "show me everything" raises the bound; it is the only case where
+# paying for the whole list on every later model step is what the student asked
+# for. It is still bounded, because a result is re-sent on each step.
+EXPANDED_RESULT_CHARS = MAX_TOOL_RESULT_CHARS * 3
+# How much of a long list travels before the answer offers the choice: fifty
+# sections in one prompt cost every step of the turn, and the student rarely
+# wants all of them - they want the one that fits their surname range or week.
+SECTION_PREVIEW = 8
+UPDATES_PREVIEW = 20
+
+_COURSE_FIELDS = (
+    "course_code",
+    "title",
+    "name",
+    "credits",
+    "local_credits",
+    "ects",
+    "level",
+    "availability",
+    "term",
+)
+_RESTRICTION_FIELDS = (
+    "restriction_group",
+    "given_department",
+    "start_char",
+    "end_char",
+    "min_year",
+    "max_year",
+    "min_cgpa",
+    "max_cgpa",
+    "start_grade",
+    "end_grade",
+)
+
+
+def _compact_section(section: dict) -> dict:
+    """One section as the answer needs it: number, who, when, who may take it.
+
+    The raw row carries syllabus plumbing, observation timestamps and a
+    thirty-field restriction object per rule; none of that changes the answer.
+    """
+    compact: dict = {}
+    for key in ("section", "notes", "meetings"):
+        value = section.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = value
+    instructors = section.get("instructors")
+    if isinstance(instructors, list):
+        names = [
+            item.get("source_name")
+            for item in instructors
+            if isinstance(item, dict) and item.get("source_name")
+        ]
+        if names:
+            compact["instructors"] = names
+    restrictions = section.get("restrictions")
+    if isinstance(restrictions, list) and restrictions:
+        compact["restrictions"] = [
+            {key: row.get(key) for key in _RESTRICTION_FIELDS if row.get(key) is not None}
+            for row in restrictions
+            if isinstance(row, dict)
+        ]
+    return compact
+
+
+def _project_sections(envelope: dict, *, expand: bool) -> dict:
+    """Unwrap the double envelope and cap the section list with a count.
+
+    The listing nests the real course under ``data.data`` and repeats a stub
+    list beside it; that duplication is what pushed a five-section course past
+    the bound. Projection keeps the course record, keeps at most
+    ``SECTION_PREVIEW`` sections unless the student asked for all of them, and
+    records how many were left out so the answer can offer the choice instead
+    of silently showing a truncated list.
+    """
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        return envelope
+    inner = data.get("data")
+    course = inner if isinstance(inner, dict) and inner.get("sections") is not None else data
+    sections = course.get("sections")
+    if not isinstance(sections, list):
+        return envelope
+    compact = {key: course.get(key) for key in _COURSE_FIELDS if course.get(key) is not None}
+    cap = len(sections) if expand else SECTION_PREVIEW
+    compact["sections"] = [_compact_section(item) for item in sections[:cap] if isinstance(item, dict)]
+    compact["sections_total"] = len(sections)
+    if len(sections) > cap:
+        compact["sections_omitted"] = len(sections) - cap
+    # Carried so the generic projection below turns it into `freshness`.
+    compact["_catalog"] = course.get("_catalog")
+    # A copy: two projections of one envelope (a preview and an expand) must
+    # not see each other's work.
+    return {**envelope, "data": compact}
+
+
+def _compact_update(item: dict) -> dict:
+    summary = item.get("summary")
+    if not summary:
+        content = item.get("content")
+        summary = f"{str(content)[:240]}…" if content else None
+    compact = {
+        "id": item.get("id"),
+        "type": item.get("type"),
+        "title": item.get("title"),
+        "when": item.get("starts_at") or item.get("published_at") or item.get("retrieved_at"),
+        "summary": summary,
+        "source": item.get("source"),
+        "url": item.get("url"),
+        "origin": item.get("origin"),
+        "read": item.get("read"),
+    }
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def _project_updates(envelope: dict, *, expand: bool) -> dict:
+    """A feed shows its newest few; the rest stay available on request.
+
+    Each item keeps what an answer uses - what, when, where from, a short
+    summary - and drops the retrieval plumbing and the duplicated full text
+    that made thirteen items weigh 18,813 characters.
+    """
+    data = envelope.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return envelope
+    items = data["items"]
+    cap = len(items) if expand else UPDATES_PREVIEW
+    compact = {
+        **data,
+        "items": [_compact_update(item) for item in items[:cap] if isinstance(item, dict)],
+        "items_total": len(items),
+    }
+    if len(items) > cap:
+        compact["items_omitted"] = len(items) - cap
+    return {**envelope, "data": compact}
+
+
+def project_result(kind: str | None, result: Any, *, expand: bool = False) -> Any:
+    """Projection plus the per-kind reshaping the answer actually needs."""
+    if isinstance(result, dict):
+        if kind == "catalog.sections":
+            result = _project_sections(result, expand=expand)
+        elif kind == "my.updates":
+            result = _project_updates(result, expand=expand)
+    return project(result)
 
 
 def _catalog_summary(catalog: dict) -> dict:
@@ -58,21 +203,21 @@ def project(value: Any) -> Any:
     return value
 
 
-def bound(result: Any) -> Any:
+def bound(result: Any, *, limit: int = MAX_TOOL_RESULT_CHARS) -> Any:
     """Cap a result at the size every later model step of the turn pays for."""
-    if isinstance(result, str) and len(result) > MAX_TOOL_RESULT_CHARS:
+    if isinstance(result, str) and len(result) > limit:
         return (
-            result[:MAX_TOOL_RESULT_CHARS]
-            + f"\n\n[Result truncated by Devrimo after {MAX_TOOL_RESULT_CHARS} characters. Narrow the query.]"
+            result[:limit]
+            + f"\n\n[Result truncated by Devrimo after {limit} characters. Narrow the query.]"
         )
     if isinstance(result, (dict, list)):
         import json
 
         serialized = json.dumps(result, ensure_ascii=False, default=str)
-        if len(serialized) > MAX_TOOL_RESULT_CHARS:
+        if len(serialized) > limit:
             return {
                 "truncated": True,
-                "preview": serialized[:MAX_TOOL_RESULT_CHARS],
+                "preview": serialized[:limit],
                 "instruction": "Narrow the query before using this result.",
             }
     return result
