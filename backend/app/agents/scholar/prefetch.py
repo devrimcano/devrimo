@@ -113,6 +113,10 @@ async def prefetch_dependencies(dependencies: dict, *, client=None) -> dict:
             {
                 "kind": kind,
                 "key": plan["course"],
+                # Which term and section the read was actually made for, so the
+                # model (and a debugger) never has to assume the active one.
+                "term": plan["term"],
+                "section": plan["section"] if kind == "catalog.eligibility" else None,
                 "data": bound(project(result.get("data"))),
                 "provenance": project(result.get("provenance")),
             }

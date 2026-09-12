@@ -50,13 +50,15 @@ def test_a_focused_question_reads_the_term_it_names():
     call = client.calls[0]
     assert (call.kind, call.key, call.term, call.section) == ("catalog.prerequisites", "EE 201", "20252", None)
     assert out["prefetched"][0]["kind"] == "catalog.prerequisites"
+    assert out["prefetched"][0]["term"] == "20252"
 
 
 def test_eligibility_reads_the_section_it_names():
     client = FakeClient()
-    _run(_deps("eligibility", term=None, section="2"), client)
+    out = _run(_deps("eligibility", term=None, section="2"), client)
     call = client.calls[0]
     assert (call.kind, call.section) == ("catalog.eligibility", "2")
+    assert out["prefetched"][0]["section"] == "2"
 
 
 def test_eligibility_without_a_section_is_not_prefetched():
