@@ -73,7 +73,7 @@ async def chat_completions(
     agent = await manager.get_or_create_agent(db, user.id)
     await manager.ensure_running(db, agent)
     session = await _get_or_create_chat_session(db, user.id, agent.id, session_id)
-    dependencies = await build_run_dependencies(db, user.id)
+    dependencies = await build_run_dependencies(db, user.id, message=text)
     try:
         run = await enqueue_run(
             db,
