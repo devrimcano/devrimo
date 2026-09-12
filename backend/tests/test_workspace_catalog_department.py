@@ -53,9 +53,13 @@ def test_a_key_that_is_not_a_course_code_is_passed_through_unchanged():
 
 
 def test_no_key_and_no_department_is_absent_rather_than_empty():
-    """An empty string is an argument the source still has to reject."""
+    """An empty string is an argument the source still has to reject.
+
+    A kind that requires a key now refuses an empty one before the call is made
+    (see test_workspace_gateway), so this is the kind that does not.
+    """
     assert department_for(kind="catalog.departments") is None
-    assert department_for(kind="catalog.prerequisites", key="") is None
+    assert department_for(kind="catalog.courses", key="") is None
 
 
 async def test_a_catalog_read_without_a_term_means_this_term(monkeypatch):

@@ -34,6 +34,10 @@ def trusted_workspace_token(token: str, approval_token: str | None = None):
 # the tool result stops the loop even when the same rule in the instructions is
 # ignored.
 _TERMINAL_CATALOG_MISSES = ("not available in the published release",)
+# A memory shape the server rejects is not fixed by sending it again, so the
+# result says so rather than letting the model retry six times and then tell the
+# student it saved the preference.
+_TERMINAL_MEMORY_REJECTIONS = ("for memorychanges",)
 
 
 def workspace_error_text(result, name: str) -> str:
@@ -58,6 +62,11 @@ def workspace_error_text(result, name: str) -> str:
                 detail += (
                     " This is final for the requested term: do not retry it as another catalog resource kind, "
                     "another term, or a search. Tell the student the course is not in the catalog and stop."
+                )
+            elif any(marker in detail.casefold() for marker in _TERMINAL_MEMORY_REJECTIONS):
+                detail += (
+                    " The memory change was rejected and was not saved. Do not retry it and do not tell the "
+                    "student it was saved."
                 )
             return f"{name} failed: {detail}"
     return f"{name} failed, and the workspace gave no reason"

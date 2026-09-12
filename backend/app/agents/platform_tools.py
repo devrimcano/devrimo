@@ -25,12 +25,18 @@ def build_platform_tools(user_id: UUID) -> list:
 
     @tool(name="search")
     async def search(request: SearchRequest) -> dict:
-        """Search a typed campus, catalog or mailbox resource. Results carry provenance."""
+        """Text-search campus.knowledge, researcher, mail.messages, catalog.departments or catalog.department."""
         return await workspace.search(SearchRequest.model_validate(request))
 
     @tool(name="read")
     async def read(resource: ResourceRef) -> dict:
-        """Read a resource; student.registered_schedule is SAIS, planning.timetable is the editable week."""
+        """Read one resource by kind.
+
+        Course kinds take the numeric METU code in `key` (CENG 331 is 5710331) or a department
+        code/abbreviation in `department`; `term` may be left out and defaults to the active term. To find a
+        course by name, read catalog.department first, then read catalog.courses with that department.
+        student.registered_schedule is SAIS; planning.timetable is the editable week.
+        """
         return await workspace.read(ResourceRef.model_validate(resource))
 
     @tool(name="plan")
@@ -51,8 +57,9 @@ def build_platform_tools(user_id: UUID) -> list:
           - planning.timetable: the `application` object a prior `plan` returned,
             copied verbatim - it already holds the exact entries to write. Do not
             hand-build this from section data.
-          - my.preferences / my.update_state: {"key": ..., "value": ...}.
-          - my.memory: {"add": [...]} and/or {"remove": [...]}.
+          - my.preferences / my.update_state: the shape that key expects.
+          - my.memory: {"memories": [{"id": ..., "content": ...}]}. Read my.memory first and send the whole
+            list with its revision; the server replaces it atomically, so a partial list deletes the rest.
         The server validates `changes` against the kind and rejects anything it
         does not recognise, so pass what the resource expects and nothing more.
         """
