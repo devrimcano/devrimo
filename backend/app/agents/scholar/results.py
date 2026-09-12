@@ -53,6 +53,23 @@ _RESTRICTION_FIELDS = (
     "start_grade",
     "end_grade",
 )
+# A row is ~500 characters raw; a section carries up to five of them, which is
+# where the listing's bulk lived. The full range is not a restriction.
+_FULL_RANGE = {"min_cgpa": 0.0, "max_cgpa": 4.0, "min_year": 0, "max_year": 95}
+_MEETING_FIELDS = ("weekday", "raw_label", "room")
+MAX_SECTION_RESTRICTIONS = 4
+
+
+def _compact_restriction(row: dict) -> dict:
+    compact = {}
+    for key in _RESTRICTION_FIELDS:
+        value = row.get(key)
+        if value is None:
+            continue
+        if key in _FULL_RANGE and value == _FULL_RANGE[key]:
+            continue
+        compact[key] = value
+    return compact
 
 
 def _compact_section(section: dict) -> dict:
@@ -60,12 +77,14 @@ def _compact_section(section: dict) -> dict:
 
     The raw row carries syllabus plumbing, observation timestamps and a
     thirty-field restriction object per rule; none of that changes the answer.
+    Meetings keep the weekday, the readable time and the room - `weekday` is a
+    number, so `raw_label` is what a table can show.
     """
     compact: dict = {}
-    for key in ("section", "notes", "meetings"):
-        value = section.get(key)
-        if value not in (None, "", [], {}):
-            compact[key] = value
+    if section.get("section") not in (None, ""):
+        compact["section"] = section["section"]
+    if section.get("notes"):
+        compact["notes"] = section["notes"]
     instructors = section.get("instructors")
     if isinstance(instructors, list):
         names = [
@@ -75,13 +94,20 @@ def _compact_section(section: dict) -> dict:
         ]
         if names:
             compact["instructors"] = names
+    meetings = section.get("meetings")
+    if isinstance(meetings, list) and meetings:
+        compact["meetings"] = [
+            {key: item.get(key) for key in _MEETING_FIELDS if item.get(key) is not None}
+            for item in meetings
+            if isinstance(item, dict)
+        ]
     restrictions = section.get("restrictions")
     if isinstance(restrictions, list) and restrictions:
         compact["restrictions"] = [
-            {key: row.get(key) for key in _RESTRICTION_FIELDS if row.get(key) is not None}
-            for row in restrictions
-            if isinstance(row, dict)
+            _compact_restriction(row) for row in restrictions[:MAX_SECTION_RESTRICTIONS] if isinstance(row, dict)
         ]
+        if len(restrictions) > MAX_SECTION_RESTRICTIONS:
+            compact["restrictions_omitted"] = len(restrictions) - MAX_SECTION_RESTRICTIONS
     return compact
 
 
@@ -105,10 +131,13 @@ def _project_sections(envelope: dict, *, expand: bool) -> dict:
         return envelope
     compact = {key: course.get(key) for key in _COURSE_FIELDS if course.get(key) is not None}
     cap = len(sections) if expand else SECTION_PREVIEW
-    compact["sections"] = [_compact_section(item) for item in sections[:cap] if isinstance(item, dict)]
+    # The totals come before the list they describe: a result that still
+    # overflows is truncated from the end, and a preview that loses "61
+    # sections" invites an invented number instead of the real one.
     compact["sections_total"] = len(sections)
     if len(sections) > cap:
         compact["sections_omitted"] = len(sections) - cap
+    compact["sections"] = [_compact_section(item) for item in sections[:cap] if isinstance(item, dict)]
     # Carried so the generic projection below turns it into `freshness`.
     compact["_catalog"] = course.get("_catalog")
     # A copy: two projections of one envelope (a preview and an expand) must
@@ -147,13 +176,12 @@ def _project_updates(envelope: dict, *, expand: bool) -> dict:
         return envelope
     items = data["items"]
     cap = len(items) if expand else UPDATES_PREVIEW
-    compact = {
-        **data,
-        "items": [_compact_update(item) for item in items[:cap] if isinstance(item, dict)],
-        "items_total": len(items),
-    }
+    compact = {key: value for key, value in data.items() if key != "items"}
+    # Totals before items, for the same reason as sections.
+    compact["items_total"] = len(items)
     if len(items) > cap:
         compact["items_omitted"] = len(items) - cap
+    compact["items"] = [_compact_update(item) for item in items[:cap] if isinstance(item, dict)]
     return {**envelope, "data": compact}
 
 

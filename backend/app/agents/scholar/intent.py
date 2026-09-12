@@ -67,7 +67,8 @@ _GUIDANCE = {
         "the times are not published yet; keep restrictions to a single line. When the result carries "
         "sections_omitted, say how many sections the course has in total, show the ones you have, and ask "
         "whether the student wants all of them or one that fits a specific need (instructor, day, surname "
-        "range); read again with resource.expand true only when they ask for all."
+        "range). Never set resource.expand on the first read of a question; read again with it true only "
+        "after the student says they want all of them."
     ),
     "eligibility": (
         "Answer shape for this question: the verdict first (eligible, not eligible, or unknown), then the "
@@ -84,8 +85,8 @@ _GUIDANCE = {
     "announcements": (
         "Answer shape for this question: at most five newest items, one line each with its date, and how "
         "many more there are. When the student names a category or topic, filter the list by type, title "
-        "and summary and show only the matches; read again with resource.expand true only when they ask "
-        "for everything."
+        "and summary and show only the matches. Never set resource.expand on the first read; read again "
+        "with it true only after the student asks for everything."
     ),
     "knowledge": (
         "Answer shape for this question: the answer in one short paragraph, then the source and when it was "

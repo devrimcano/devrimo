@@ -128,22 +128,54 @@ def test_section_projection_unwraps_and_offers_the_rest():
     assert data["sections"][0] == {
         "section": "1",
         "instructors": ["STAFF"],
-        "restrictions": [
-            {
-                "restriction_group": "1",
-                "start_char": "AA",
-                "end_char": "ÇA",
-                "min_year": 2,
-                "max_year": 95,
-                "min_cgpa": 0.0,
-                "max_cgpa": 4.0,
-            }
-        ],
+        # The full CGPA range and a 95-year ceiling restrict nothing; min_year
+        # 2 does, so it stays.
+        "restrictions": [{"restriction_group": "1", "start_char": "AA", "end_char": "ÇA", "min_year": 2}],
     }
     assert data["title"] == "CIRCUIT THEORY I"
     assert "component_status" not in data and "prerequisite_groups" not in data
     assert "data" not in data
     assert data["freshness"]["components"] == {"sections": {"fresh": True, "verified": True}}
+
+
+def test_totals_survive_a_truncated_result_and_meetings_stay_readable():
+    """A preview cut from the end must keep the number the answer declares."""
+    envelope = _sections_envelope(12)
+    inner = envelope["data"]["data"]
+    first = inner["sections"][0]
+    first["meetings"] = [
+        {
+            "weekday": 3,
+            "start_minute": 520,
+            "end_minute": 630,
+            "room": "M104",
+            "status": "scheduled",
+            "raw_label": "08:40-10:30",
+        }
+    ]
+    first["restrictions"] = [
+        {
+            "restriction_group": "1",
+            "row_index": index,
+            "given_department": "AEE",
+            "start_char": "AA",
+            "end_char": "AZ",
+            "min_cgpa": 0.0,
+            "max_cgpa": 4.0,
+            "min_year": 0,
+            "max_year": 95,
+            "verified": True,
+        }
+        for index in range(5)
+    ]
+    data = project_result("catalog.sections", envelope)["data"]
+    keys = list(data.keys())
+    assert keys.index("sections_total") < keys.index("sections")
+    section = data["sections"][0]
+    assert section["meetings"] == [{"weekday": 3, "raw_label": "08:40-10:30", "room": "M104"}]
+    assert len(section["restrictions"]) == 4
+    assert section["restrictions_omitted"] == 1
+    assert "min_cgpa" not in section["restrictions"][0]
 
 
 def test_sections_are_all_kept_when_the_student_asked_for_all():
@@ -201,6 +233,8 @@ def test_updates_projection_keeps_what_an_answer_uses():
     assert first["when"] == "2026-09-10T00:00:00+00:00"
     assert len(first["summary"]) == 241
     assert "document_id" not in first and "content" not in first and "score" not in first
+    keys = list(data.keys())
+    assert keys.index("items_total") < keys.index("items")
 
 
 def test_updates_are_all_kept_when_asked_for_all():
