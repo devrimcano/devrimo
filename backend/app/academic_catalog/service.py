@@ -4293,6 +4293,65 @@ def _prerequisite_semantics() -> dict[str, Any]:
     }
 
 
+async def _course_titles(
+    db: AsyncSession, organization_id: UUID, term_id: UUID, codes: set[str]
+) -> dict[str, str]:
+    """Titles for course codes, so a prerequisite is never rendered from a guess.
+
+    The prerequisite rows carry a code and a minimum grade and nothing else, so
+    a model that wanted a readable name invented one - MATH 260 came back as
+    "Diferansiyel Denklemler" when the catalog says Basic Linear Algebra.
+    """
+    if not codes:
+        return {}
+    titles: dict[str, str] = {}
+
+    async def collect(where_codes: set[str], term_scoped: bool) -> None:
+        conditions = [
+            CatalogCourse.organization_id == organization_id,
+            CatalogCourse.course_code.in_(where_codes),
+        ]
+        if term_scoped:
+            conditions.append(CatalogCourseRevision.term_id == term_id)
+        rows = await db.execute(
+            select(CatalogCourse.course_code, CatalogCourseRevision.title)
+            .join(CatalogCourseRevision, CatalogCourseRevision.course_id == CatalogCourse.id)
+            .where(*conditions)
+            .order_by(CatalogCourse.course_code, CatalogCourseRevision.revision.desc())
+        )
+        for code, title in rows:
+            if title:
+                titles.setdefault(code, title)
+
+    await collect(codes, True)
+    missing = codes - set(titles)
+    if missing:
+        # A prerequisite can be a course this term does not offer; its name is
+        # still knowable from an earlier term, which beats inventing one.
+        await collect(missing, False)
+    return titles
+
+
+async def _attach_course_titles(
+    db: AsyncSession, organization_id: UUID, term_id: UUID, groups: list[dict[str, Any]]
+) -> None:
+    """Put each requirement's real title beside its code, in place."""
+    codes = {
+        str(requirement.get("course_code") or "")
+        for group in groups
+        for requirement in (group.get("requirements") or [])
+        if isinstance(requirement, dict)
+    }
+    codes.discard("")
+    if not codes:
+        return
+    titles = await _course_titles(db, organization_id, term_id, codes)
+    for group in groups:
+        for requirement in group.get("requirements") or []:
+            if isinstance(requirement, dict):
+                requirement["course_title"] = titles.get(str(requirement.get("course_code") or ""))
+
+
 def _public_replacements(
     revision: CatalogCourseRevision,
     children: dict[str, dict[UUID, list[Any]]],
@@ -4721,6 +4780,7 @@ async def read_tool(
     children = await _bulk_revision_components(db, organization_id, [revision])
     groups = _public_groups(revision, children)
     if tool_suffix == "get_course_prerequisites":
+        await _attach_course_titles(db, organization_id, term.id, groups)
         component = (revision.component_status or {}).get("prerequisites", {})
         effective = _effective_component_status(component if isinstance(component, dict) else {})
         return {
@@ -4864,6 +4924,7 @@ async def published_plan_inputs(
             )
             offerings.append(_jsonable(section_payload))
         groups = _public_groups(revision, children)
+        await _attach_course_titles(db, organization_id, term_row.id, groups)
         prerequisite_component = (revision.component_status or {}).get("prerequisites", {})
         effective_rule = _effective_component_status(
             prerequisite_component if isinstance(prerequisite_component, dict) else {}

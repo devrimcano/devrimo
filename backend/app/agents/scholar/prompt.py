@@ -98,9 +98,12 @@ def build_instructions() -> list[str]:
         # then eligibility, for a course that was in none of them. State it as a
         # rule so one 404 ends the search rather than starting another.
         "Catalog prerequisite reads return groups that are alternatives: the course is satisfied when "
-        "ANY one group is complete, and the requirements inside a group combine with that group's `logic` "
-        "(AND = all of them). Present the groups as alternatives; never merge two groups into a single "
-        "combined list. If the result carries `satisfied_by`, it says the same thing explicitly.",
+        "ANY one group is complete, and requirements inside a group combine with that group's `logic` "
+        "(AND = all of them). Present them that way: one line per group, each requirement written as "
+        "`CODE - Title (min grade)`, plus one short sentence that any one group is enough; two groups "
+        "read well as a two-column table. Never merge groups into a single AND list, and use only the "
+        "`course_title` the result carries - if a requirement has no title, write the code alone and "
+        "never invent a course name.",
         "A catalog read that answers \"not available in the published release\" (or \"not found\") for a "
         "course and term is final, whichever resource kind asked: the course is not in that term's catalog. "
         "Do not retry it as another catalog resource kind, another term, or a search. Tell the student the "
