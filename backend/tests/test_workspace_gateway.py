@@ -40,6 +40,34 @@ def test_resource_reference_rejects_identity_and_arbitrary_operations():
         ResourceRef(kind="delete_everything")
 
 
+def test_a_course_read_without_a_key_is_refused_before_the_tool_runs():
+    """The message names the missing field, so the model corrects in one step.
+
+    "A course code is required" arrived only after the call had gone through and
+    cost a turn; the schema now says it before anything runs.
+    """
+    with pytest.raises(ValidationError, match="needs"):
+        ResourceRef(kind="catalog.sections")
+    assert ResourceRef(kind="catalog.sections", key="5710331").key == "5710331"
+    # Identity-carrying and term-carrying kinds are untouched.
+    ResourceRef(kind="student.transcript")
+    ResourceRef(kind="planning.timetable", term="20261")
+
+
+def test_search_can_only_name_the_kinds_it_actually_searches():
+    """`search catalog.courses` used to be expressible and always failed.
+
+    The model spent a turn discovering it could not, then another recovering.
+    The search schema now admits only the kinds WorkspaceService.search answers.
+    """
+    from app.workspace.resources import SearchRequest
+
+    with pytest.raises(ValidationError):
+        SearchRequest(resource={"kind": "catalog.courses"}, query="ceng 331")
+    assert SearchRequest(resource={"kind": "campus.knowledge"}, query="yönetmelik").resource.kind == "campus.knowledge"
+    assert SearchRequest(resource={"kind": "catalog.department"}, query="bilgisayar").resource.kind == "catalog.department"
+
+
 @pytest.mark.asyncio
 async def test_read_only_resource_cannot_be_written_or_undone(monkeypatch):
     service = WorkspaceService(uuid4())

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ResourceKind = Literal[
     "researcher",
@@ -44,22 +44,92 @@ ResourceKind = Literal[
 ]
 
 
-class ResourceRef(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    kind: ResourceKind
-    key: str | None = Field(default=None, max_length=2048)
-    department: str | None = Field(default=None, max_length=255)
-    category: str | None = Field(default=None, max_length=255)
+# Only these kinds answer a text search. Everything else is read with a key,
+# and WorkspaceService.search already said so - but only after the call had been
+# made, so a model that tried `search catalog.courses` spent a whole turn
+# discovering it could not. Restricting the search schema to this set makes the
+# wrong call impossible instead of punishable.
+SearchableKind = Literal[
+    "researcher",
+    "campus.knowledge",
+    "catalog.departments",
+    "catalog.department",
+    "mail.messages",
+]
+
+# Kinds whose read needs `key` - a course code, message id, page url or
+# preference key. The service answered "A course code is required" for these,
+# again only after the call had gone through.
+KEY_REQUIRED_KINDS = frozenset(
+    {
+        "catalog.sections",
+        "catalog.eligibility",
+        "catalog.prerequisites",
+        "catalog.replacements",
+        "catalog.theses",
+        "catalog.department",
+        "mail.message",
+        "mail.attachment",
+        "my.preferences",
+        "my.update_state",
+        "campus.page",
+        "planning.course_group",
+    }
+)
+
+_SCOPED_DESCRIPTION = (
+    "Address one resource: choose `kind`, then give the field that kind needs. Course kinds take the "
+    "numeric METU code in `key` (CENG 331 is 5710331) or a department code/abbreviation in `department` "
+    "(CENG is 571). Omit `term` to use the student's active term."
+)
+
+
+class _ScopedRef(BaseModel):
+    """Fields shared by the read and search references."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": _SCOPED_DESCRIPTION})
+
+    key: str | None = Field(
+        default=None, max_length=2048, description="Course code, message id, page url or preference key."
+    )
+    department: str | None = Field(
+        default=None, max_length=255, description="Department code (571) or abbreviation (CENG)."
+    )
+    category: str | None = Field(default=None, max_length=255, description="Category id from student.categories.")
     program_type: str | None = Field(default=None, max_length=32)
-    folder: str | None = Field(default=None, max_length=255)
+    folder: str | None = Field(default=None, max_length=255, description="Mailbox folder, e.g. INBOX.")
     attachment: str | None = Field(default=None, max_length=255)
-    term: str | None = Field(default=None, max_length=32)
+    term: str | None = Field(
+        default=None, max_length=32, description="Term code like 20261; omit for the active term."
+    )
     section: str | None = Field(default=None, max_length=32)
+
+
+class ResourceRef(_ScopedRef):
+    kind: ResourceKind = Field(description="Which resource to address.")
+
+    @model_validator(mode="after")
+    def _require_the_field_the_kind_needs(self):
+        """Refuse a keyless read before it becomes a wasted tool call.
+
+        The message names the field and shows a working example, because the
+        model corrects itself from a schema it can read - not from a 422 it
+        only sees after spending a turn.
+        """
+        if self.kind in KEY_REQUIRED_KINDS and not (self.key or "").strip():
+            raise ValueError(
+                f'kind "{self.kind}" needs "key" - e.g. {{"kind": "{self.kind}", "key": "5710331"}}'
+            )
+        return self
+
+
+class SearchResource(_ScopedRef):
+    kind: SearchableKind = Field(description="One of the searchable kinds; every other kind is read with a key.")
 
 
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    resource: ResourceRef
+    resource: SearchResource
     query: str = Field(default="", max_length=2000)
     limit: int = Field(default=10, ge=1, le=25)
     record_types: list[str] = Field(default_factory=list, max_length=25)

@@ -129,7 +129,10 @@ class WorkspaceService:
         if ref.kind == "catalog.department":
             return envelope(ref, await self.domain("lookup_department", value=ref.key or ""))
         if ref.kind in {"catalog.sections", "catalog.eligibility"}:
-            arguments = {"course_code": ref.key or "", "semester": ref.term or ""}
+            # Omit `term` and the read defaulted to an empty semester, which the
+            # catalog answered with "A semester/term is required" - one wasted
+            # turn for the model to discover the term it was never told about.
+            arguments = {"course_code": ref.key or "", "semester": ref.term or current_term()}
             name = "get_course_sections"
             if ref.kind == "catalog.eligibility":
                 name = "check_section_eligibility"
@@ -138,7 +141,9 @@ class WorkspaceService:
         if ref.kind == "planning.course_group":
             return envelope(
                 ref,
-                await self.domain("get_course_group", course=ref.key or "", term=ref.term or "", section=ref.section),
+                await self.domain(
+                    "get_course_group", course=ref.key or "", term=ref.term or current_term(), section=ref.section
+                ),
             )
         if ref.kind == "planning.timetable":
             from app.planning.workspace import read_timetable
