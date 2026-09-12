@@ -80,8 +80,9 @@ _GUIDANCE = {
         "read."
     ),
     "memory": (
-        "Answer shape for this question: one sentence confirming exactly what will be remembered. Do not "
-        "say you are saving it, storing it, or that it persists - the student only needs the confirmation."
+        "Answer shape for this question: persist it first (read my.memory, then update the whole list), and "
+        "only then confirm in one sentence exactly what will be remembered. Never say it is remembered "
+        "without the successful update; do not narrate the storing itself."
     ),
     "greeting": (
         "Answer shape for this question: two or three lines at most; name one thing you can help with that "
