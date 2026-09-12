@@ -3,13 +3,23 @@ name: Deploy production
 on:
   push:
     branches: [main]
+  # The suite found a broken assertion on a branch that had no checks at all.
+  # PRs now run the same verify job; the deploy half stays main-only below.
+  pull_request:
+    paths:
+      - "backend/**"
+      - "scripts/**"
+      - "frontend/**"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: devrimo-production
+  # PR runs must not queue behind (or block) a production deploy. Pushes keep
+  # the one-at-a-time production group; deploys never overlap.
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'devrimo-production' }}
   cancel-in-progress: false
 
 jobs:
@@ -87,6 +97,7 @@ jobs:
 
   deploy:
     needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: production

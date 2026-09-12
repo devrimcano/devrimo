@@ -432,6 +432,10 @@ def _course_code_matches(course: dict, digits: str) -> bool:
     last four digits, so a pasted seven-digit code matched nothing, and the
     free-text gate rejected "CENG 331" because the stored haystack is "ceng331"
     with no space - both spellings a student actually types.
+
+    Matching is by prefix, never by suffix: the planner's contract is that
+    "PHYS21" narrows to PHYS 210 and PHYS 213, and a suffix match would let
+    "31" reach CENG 331 and fill the forty-result limit with unrelated courses.
     """
     if not digits:
         return True
@@ -439,13 +443,30 @@ def _course_code_matches(course: dict, digits: str) -> bool:
     short = re.sub(r"[^0-9]", "", str(course.get("code") or ""))
     if len(digits) >= 7:
         return full == digits or short == digits
-    if short.startswith(digits) or short.endswith(digits):
+    if short.startswith(digits):
         return True
     if len(full) == 7:
         trimmed = full[3:].lstrip("0") or "0"
         if trimmed.startswith(digits) or full.startswith(digits):
             return True
     return False
+
+
+def _published_code_matches(indexed: list[tuple[str, dict]], *, named, digits: str, home) -> list[dict]:
+    """Code lookup on the published index, through the shared matcher.
+
+    The same matcher the legacy path uses, so a spelling that works with
+    published reads enabled works with them disabled too.
+    """
+    matches = [
+        course
+        for _, course in indexed
+        if _course_code_matches(course, digits)
+        and (named is None or course["department"] in {named.abbreviation, named.code})
+    ]
+    if home is not None:
+        matches.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
+    return matches
 
 
 def _short_code(full_code: str, abbreviation: str) -> str:
@@ -470,11 +491,15 @@ _SEARCH_FOLD = str.maketrans(
 def _search_fold(text: str) -> str:
     """Lowercased with Turkish letters folded, for comparing typed text.
 
-    "Tarih" must reach "TARİHİ" and "muhendislik" must reach "Mühendisliği";
-    casefold alone does neither, and a student typing on an English keyboard
-    is the normal case rather than the exception.
+    "Tarih" must reach "TARİHİ" and "Mühendislik" must reach "Mühendisliği";
+    casefold alone does neither, and a student typing on an English keyboard is
+    the normal case rather than the exception. Word-final "k" folds to "g" as
+    well, because Turkish alternates the two in exactly that position -
+    mühendislik/mühendisliği - and without it the query and the title meet as
+    "muhendislik" and "muhendisligi" and never match.
     """
-    return str(text).translate(_SEARCH_FOLD).casefold()
+    folded = str(text).translate(_SEARCH_FOLD).casefold()
+    return re.sub(r"k\b", "g", folded)
 
 
 def _directory_department_options(query: str) -> list[dict]:
@@ -578,14 +603,7 @@ async def search_courses(
             # haystack: "CENG 331" must not have to appear inside the stored
             # "ceng331 ...", and a pasted seven-digit code has to match its full
             # form rather than only its last four digits.
-            matches = [
-                course
-                for _, course in indexed
-                if _course_code_matches(course, digits)
-                and (named is None or course["department"] in {named.abbreviation, named.code})
-            ]
-            if home is not None:
-                matches.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
+            matches = _published_code_matches(indexed, named=named, digits=digits, home=home)
             return {
                 "courses": matches[:40],
                 "searched_departments": len(covered),
@@ -721,7 +739,9 @@ def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list
     wanted_title = _search_fold(title)
     matches: list[dict] = []
     for haystack, course in _index_rows(payload, owner):
-        if digits and not re.sub(r"[^0-9]", "", course["code"]).startswith(digits):
+        # The shared matcher, so the legacy path answers "5710331" and
+        # "CENG 331" exactly as the published path does.
+        if not _course_code_matches(course, digits):
             continue
         if wanted_title and wanted_title not in haystack:
             continue

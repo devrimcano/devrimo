@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
-from app.agents.scholar.results import project
+from app.agents.scholar.results import bound, project
 from app.db.models import AgentToolAudit
 from app.db.session import SessionLocal
 from app.logging import get_logger
@@ -34,7 +34,8 @@ logger = get_logger(__name__)
 # Six thousand characters is still several times the largest answer the model
 # needs to write, and every result is re-sent on each later model step of the
 # turn, so the old 16k was carried forward at four times the necessary cost.
-MAX_TOOL_RESULT_CHARS = 6_000
+# The bound itself lives in results.py, where projection and the prefetch path
+# share it.
 MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email", "send_email", "update", "undo"}
 # Span payloads are bounded separately from tool results: a 16k result is
 # fine for the model but wasteful on every span.
@@ -44,23 +45,6 @@ MAX_SPAN_STATE_CHARS = 4_000
 def _canonical_digest(arguments: dict[str, Any]) -> str:
     serialized = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def _bound_result(result: Any) -> Any:
-    if isinstance(result, str) and len(result) > MAX_TOOL_RESULT_CHARS:
-        return (
-            result[:MAX_TOOL_RESULT_CHARS]
-            + f"\n\n[Result truncated by Devrimo after {MAX_TOOL_RESULT_CHARS} characters. Narrow the query.]"
-        )
-    if isinstance(result, (dict, list)):
-        serialized = json.dumps(result, ensure_ascii=False, default=str)
-        if len(serialized) > MAX_TOOL_RESULT_CHARS:
-            return {
-                "truncated": True,
-                "preview": serialized[:MAX_TOOL_RESULT_CHARS],
-                "instruction": "Narrow the query before using this result.",
-            }
-    return result
 
 
 async def record_confirmation_rejection(
@@ -232,7 +216,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
         if inspect.isawaitable(result):
             result = await result
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
-        result = _bound_result(project(result))
+        result = bound(project(result))
         return result
     except Exception as exc:
         error = exc

@@ -13,9 +13,18 @@ Environment:
     DEVRIMO_API            API base (default http://127.0.0.1:8000)
     DEVRIMO_SITE           Redirect target for the magic link
     DEVRIMO_EVAL_TOKEN     Skip Supabase and use this bearer token instead
+    DEVRIMO_EVAL_ALLOW_MEMORY_WRITE=1
+                           Run the memory scenarios at all. Without it they are
+                           skipped, and no memory endpoint is ever touched.
+    DEVRIMO_EVAL_DISPOSABLE=1
+                           Allow the memory scenarios on an account that
+                           already has memories. Without it the harness refuses
+                           rather than deleting preferences it did not write.
 
-Exit status is non-zero when a scenario fails, so a staging pipeline can gate on
-it. The memory scenario cleans up after itself through DELETE /api/v1/memories.
+The memory cleanup endpoint clears every memory the account owns, so it is
+called only when the memory scenarios ran and the account started empty (or is
+explicitly disposable). Exit status is non-zero when a scenario fails, so a
+staging pipeline can gate on it.
 """
 
 import json
@@ -38,6 +47,31 @@ JARGON = re.compile(
     re.IGNORECASE,
 )
 SPANISH = re.compile(r"\b(el|la|los|las|debe|pero|todos|cursos|requisito)\b")
+
+MEMORY_SCENARIOS = {"memory", "memory_follow_up"}
+ALLOW_MEMORY_WRITE = os.environ.get("DEVRIMO_EVAL_ALLOW_MEMORY_WRITE") == "1"
+DISPOSABLE = os.environ.get("DEVRIMO_EVAL_DISPOSABLE") == "1"
+
+
+def list_memories(headers: dict) -> list[dict] | None:
+    """The account's memories, or None when that could not be verified."""
+    try:
+        response = httpx.get(f"{API}/api/v1/memories", headers=headers, timeout=30)
+    except Exception:
+        return None
+    if response.status_code != 200:
+        return None
+    return response.json().get("memories", [])
+
+
+def memory_write_allowed(existing: list[dict] | None) -> bool:
+    """Whether the memory scenarios may run and clean up after themselves.
+
+    The cleanup endpoint clears every memory the account owns, not just the one
+    this script wrote, so it runs only when the account was verified empty (or
+    explicitly disposable) before the scenarios started.
+    """
+    return ALLOW_MEMORY_WRITE and existing is not None and (not existing or DISPOSABLE)
 
 
 def acquire_token() -> str:
@@ -242,6 +276,19 @@ def main() -> int:
     if only:
         scenarios = [scenario for scenario in scenarios if scenario["name"] in only]
 
+    existing = list_memories(headers)
+    if not memory_write_allowed(existing):
+        if not ALLOW_MEMORY_WRITE:
+            reason = "DEVRIMO_EVAL_ALLOW_MEMORY_WRITE is not set"
+        elif existing is None:
+            reason = "the account's memories could not be read"
+        else:
+            reason = "the account has memories"
+        for scenario in [item for item in scenarios if item["name"] in MEMORY_SCENARIOS]:
+            print(f"SKIP  {scenario['name']:<18} {reason}", flush=True)
+        scenarios = [scenario for scenario in scenarios if scenario["name"] not in MEMORY_SCENARIOS]
+    ran_memory = any(scenario["name"] in MEMORY_SCENARIOS for scenario in scenarios)
+
     failures = 0
     for scenario in scenarios:
         try:
@@ -263,7 +310,9 @@ def main() -> int:
         if problems and result.get("answer"):
             print(f"      answer: {result['answer'][:220]}", flush=True)
 
-    httpx.delete(f"{API}/api/v1/memories", headers=headers, timeout=30)
+    if ran_memory:
+        httpx.delete(f"{API}/api/v1/memories", headers=headers, timeout=30)
+        print("memory cleanup: test preferences removed")
     print(f"\n{len(scenarios) - failures}/{len(scenarios)} scenarios passed")
     return 1 if failures else 0
 

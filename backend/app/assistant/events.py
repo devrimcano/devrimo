@@ -5,10 +5,32 @@ import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
+from app.agents.scholar.audit import jargon, unsupported_claims
 from app.logging import get_logger
+from app.observability import capture
 from app.observability.turns import TurnObservation
 
 logger = get_logger(__name__)
+
+
+def _audit_answer(answer: str, completed_tools: list[str], user_id: str) -> None:
+    """Make the prompt-only guarantees countable. The answer is never altered.
+
+    The success verb and the jargon are the only things reported; the answer
+    text stays out of the event, because it is the student's.
+    """
+    claims = unsupported_claims(answer, completed_tools)
+    internal = jargon(answer)
+    if not claims and not internal:
+        return
+    logger.warning(
+        "agent_answer_audit",
+        user_id=user_id,
+        unsupported_claims=claims,
+        jargon=internal,
+        tools=completed_tools,
+    )
+    capture("agent_answer_audit", distinct_id=user_id, unsupported_claims=claims, jargon=internal)
 
 # How much text is held back before it is committed as the answer rather than
 # an announcement of the next tool call.
@@ -116,6 +138,10 @@ async def _serialize_events(
     # announcement from a reply. One lead-in sentence is not the reported
     # defect; four of them stacked in front of the answer is.
     used_a_tool = False
+    # The answer as it was actually sent, and the mutations that actually
+    # completed, for the end-of-turn audit.
+    answer_parts: list[str] = []
+    completed_tools: list[str] = []
 
     def _hold(content: str):
         """Buffer a fragment, and hand back whatever is safe to send now."""
@@ -149,6 +175,7 @@ async def _serialize_events(
                 if isinstance(content, str) and content:
                     sendable = _hold(content)
                     if sendable:
+                        answer_parts.append(sendable)
                         yield _chunk(model, delta={"role": "assistant", "content": sendable})
 
             elif name == RunEvent.tool_call_started.value:
@@ -165,6 +192,8 @@ async def _serialize_events(
 
             elif name == RunEvent.tool_call_completed.value:
                 tool = _tool_name(event)
+                if tool:
+                    completed_tools.append(tool)
                 yield _chunk(
                     model, extension={"type": "tool_call_completed", "tool": tool, "server": _tool_server(tool)}
                 )
@@ -224,7 +253,9 @@ async def _serialize_events(
         # tool call followed it, which is what makes it the answer rather than
         # an announcement.
         if held and not streaming:
+            answer_parts.append("".join(held))
             yield _chunk(model, delta={"role": "assistant", "content": "".join(held)})
+        _audit_answer("".join(answer_parts), completed_tools, user_id)
         yield _chunk(model, delta={}, finish="stop")
     finally:
         close = getattr(events, "aclose", None)

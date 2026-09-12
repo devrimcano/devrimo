@@ -157,6 +157,45 @@ def guidance(intent: str) -> str | None:
 _COURSE_CODE = re.compile(r"\b([A-Za-zÇĞİÖŞÜçğıöşü]{2,6})\s?-?\s?(\d{3,4})\b")
 _FULL_CODE = re.compile(r"\b(\d{7})\b")
 
+# A five-digit METU term code (20261 = 2026-2027 Fall). A term named only in
+# words - "2026 güz", "gelecek dönem" - cannot be mapped to a code here, and
+# reading the active term for a question about another one is worse than not
+# reading at all, so it is reported unresolved and the caller skips.
+_TERM_CODE = re.compile(r"\b20\d{3}\b")
+_TERM_WORDS = re.compile(r"\b(?:guz|bahar|yaz|fall|spring|summer)\b|gelecek (?:donem|yil)")
+_YEAR = re.compile(r"\b20\d{2}\b")
+
+# "şube 2", "2. şube", "section-3". Before-the-word matches require the
+# punctuation, so the course number in "EE 201 şubesi" is not read as a
+# section; "şubeleri" (plural, no number) resolves to no section.
+_SECTION_AFTER = re.compile(r"(?:sube|section)\s*[.:#/-]?\s*(\d{1,3})")
+_SECTION_BEFORE = re.compile(r"(?<![a-z0-9])(\d{1,3})\s*[.:#/-]\s*(?:sube|section)")
+_SECTION_WORD = re.compile(r"\b(?:sube|section)")
+
+
+def requested_scope(message: str | None) -> dict:
+    """The term and section a message names, and whether either is unresolvable.
+
+    The turn forwards these to a prefetch so "20252'de EE 201" reads 20252 and
+    not silently the active term, and "EE 201 şube 2 uygun mu" reads section 2
+    instead of the whole course. When a term or section is named in a form this
+    cannot resolve, the caller skips the prefetch rather than guessing.
+    """
+    if not message:
+        return {"term": None, "section": None, "term_unresolved": False, "section_unresolved": False}
+    folded = _fold(message)
+    term_match = _TERM_CODE.search(folded)
+    term = term_match.group(0) if term_match else None
+    section_match = _SECTION_AFTER.search(folded) or _SECTION_BEFORE.search(folded)
+    section = section_match.group(1) if section_match else None
+    term_unresolved = term is None and bool(_TERM_WORDS.search(folded) or _YEAR.search(folded))
+    return {
+        "term": term,
+        "section": section,
+        "term_unresolved": term_unresolved,
+        "section_unresolved": section is None and bool(_SECTION_WORD.search(folded)),
+    }
+
 
 def current_focus(message: str | None) -> dict | None:
     """The courses the student just named, so "onun/peki" has an antecedent.

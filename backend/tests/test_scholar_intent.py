@@ -6,7 +6,7 @@ of that trade: the intent shapes the context, and an unrecognised question keeps
 the full context rather than being answered with less than before.
 """
 
-from app.agents.scholar.intent import classify, context_fields, current_focus, guidance
+from app.agents.scholar.intent import classify, context_fields, current_focus, guidance, requested_scope
 
 
 def test_intent_rules_read_both_keyboards():
@@ -62,3 +62,22 @@ def test_guidance_and_focus_are_deterministic():
     assert current_focus("5710331 dersini alabilir miyim") == {"courses": ["5710331"]}
     assert current_focus("EE 201 mi MATH 260 mı") == {"courses": ["EE 201", "MATH 260"]}
     assert current_focus("merhaba") is None
+
+
+def test_requested_scope_reads_the_term_and_section_a_message_names():
+    assert requested_scope("20252'de EE 201'in ön koşulu ne?")["term"] == "20252"
+    assert requested_scope("EE 201 şube 2 uygun mu")["section"] == "2"
+    assert requested_scope("EE 201 2. şubesi uygun mu")["section"] == "2"
+    assert requested_scope("EE 201 section-3 uygun mu")["section"] == "3"
+    assert requested_scope("bu dönem EE 201 kaç kredi")["term_unresolved"] is False
+
+
+def test_a_term_named_in_words_is_reported_unresolved():
+    assert requested_scope("2026 güz EE 201 ön koşulu")["term_unresolved"] is True
+    assert requested_scope("gelecek dönem EE 201 açılır mı")["term_unresolved"] is True
+
+
+def test_a_course_number_is_not_read_as_a_section():
+    scope = requested_scope("EE 201 şubesi uygun mu")
+    assert scope["section"] is None
+    assert scope["section_unresolved"] is True
