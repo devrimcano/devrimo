@@ -108,8 +108,11 @@ async def test_stateless_mcp_seven_tools_and_private_identity(monkeypatch):
         for tool in tools
     )
 
-    # These adapters may differ in descriptions and confirmation mechanics,
-    # but must expose identical argument validation to the model and MCP users.
+    # These adapters may differ in descriptions, confirmation mechanics and
+    # rendered defaults, but must expose identical argument validation to the
+    # model and MCP users. `default` is excluded because FastMCP writes it into
+    # the schema while Agno omits it; it is a hint, not validation, and both
+    # wrappers apply the same value when the argument is absent.
     def contract(value, definitions):
         if isinstance(value, list):
             return [contract(item, definitions) for item in value]
@@ -120,7 +123,7 @@ async def test_stateless_mcp_seven_tools_and_private_identity(monkeypatch):
         return {
             key: contract(item, definitions)
             for key, item in value.items()
-            if key not in {"title", "description", "$defs"}
+            if key not in {"title", "description", "$defs", "default"}
         }
 
     agno_tools = {function.name: function for function in build_platform_tools(user.id)}
