@@ -382,7 +382,15 @@ async def search_departments(
     data = await call_course_info(db, user.id, "search_departments", {"query": query})
     # ``departments`` is the normalized list the schedule page's picker binds to;
     # ``data`` stays for callers that want the untouched catalog payload.
-    return {"data": data, "departments": department_options(data)}
+    options = department_options(data)
+    # The catalog source matches a code or an English name. A student typing the
+    # abbreviation ("CENG") or the Turkish name ("Bilgisayar") got an empty
+    # picker for a department that plainly exists, so the directory's own
+    # resolution is added when the source missed it.
+    found = departments.resolve(query)
+    if found is not None and all(str(option.get("code")) != found.code for option in options):
+        options.insert(0, {"code": found.code, "name": found.name_en or found.name_tr})
+    return {"data": data, "departments": options}
 
 
 @router.get("/courses")
@@ -413,6 +421,30 @@ async def _expand_course(
         db, user_id, course_code, department, session=session
     )
     return compact, owner.code
+
+
+def _course_code_matches(course: dict, digits: str) -> bool:
+    """Whether a typed digit string names this course.
+
+    Three forms have to land: the short code ("CENG331"), the seven-digit code
+    ("5710331") and a bare number ("331"). The old comparison looked only at the
+    last four digits, so a pasted seven-digit code matched nothing, and the
+    free-text gate rejected "CENG 331" because the stored haystack is "ceng331"
+    with no space - both spellings a student actually types.
+    """
+    if not digits:
+        return True
+    full = re.sub(r"[^0-9]", "", str(course.get("full_code") or ""))
+    short = re.sub(r"[^0-9]", "", str(course.get("code") or ""))
+    if len(digits) >= 7:
+        return full == digits or short == digits
+    if short.startswith(digits) or short.endswith(digits):
+        return True
+    if len(full) == 7:
+        trimmed = full[3:].lstrip("0") or "0"
+        if trimmed.startswith(digits) or full.startswith(digits):
+            return True
+    return False
 
 
 def _short_code(full_code: str, abbreviation: str) -> str:
@@ -521,22 +553,18 @@ async def search_courses(
         indexed, covered = await _published_search_index(db, user.id, semester)
         wanted = _search_fold(typed)
         if named is not None or (digits and not letters):
+            # A code lookup is answered by the code itself, never by the folded
+            # haystack: "CENG 331" must not have to appear inside the stored
+            # "ceng331 ...", and a pasted seven-digit code has to match its full
+            # form rather than only its last four digits.
             matches = [
                 course
-                for haystack, course in indexed
-                if (
-                    not digits
-                    or re.sub(r"[^0-9]", "", course["code"]).startswith(digits)
-                    or re.sub(r"[^0-9]", "", course["full_code"])[3:].startswith(digits)
-                )
-                and (not wanted or wanted in haystack)
+                for _, course in indexed
+                if _course_code_matches(course, digits)
+                and (named is None or course["department"] in {named.abbreviation, named.code})
             ]
-            if named is not None:
-                matches = [
-                    course
-                    for course in matches
-                    if course["department"] in {named.abbreviation, named.code}
-                ]
+            if home is not None:
+                matches.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
             return {
                 "courses": matches[:40],
                 "searched_departments": len(covered),

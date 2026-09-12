@@ -52,6 +52,19 @@ BASE_INSTRUCTIONS = [
         "Only remember a durable, non-sensitive preference when the student explicitly asks you to remember "
         "it. Never remember grades, transcripts, email contents, credentials, health or disciplinary data."
     ),
+    (
+        "Never report a save, update or send as done unless its tool result confirms it. If the tool failed, "
+        "say plainly that it did not happen and stop - do not repeat the attempt or claim success anyway."
+    ),
+    (
+        "Ask at most one clarifying question, and only when the request is genuinely ambiguous. Otherwise "
+        "use the active term, the department in your context and the timetable you were given instead of "
+        "asking for them."
+    ),
+    (
+        "Answer in the student's current language on the final message too; a tool-heavy turn does not "
+        "change which language the student wrote in."
+    ),
 ]
 
 def build_instructions() -> list[str]:
