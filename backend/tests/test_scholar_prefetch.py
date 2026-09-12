@@ -10,9 +10,10 @@ each later model step.
 
 import asyncio
 
+from fastapi import HTTPException
+
 from app.agents.scholar import prefetch as prefetch_module
 from app.agents.scholar.prefetch import prefetch_dependencies
-from fastapi import HTTPException
 
 
 class FakeClient:
