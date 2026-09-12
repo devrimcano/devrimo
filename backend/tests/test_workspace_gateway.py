@@ -192,6 +192,22 @@ async def test_memory_revision_retry_isolation_undo_and_privacy_clear(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_new_memory_without_an_id_is_accepted(monkeypatch):
+    """A model saving a fresh preference has no id to give.
+
+    Requiring one failed the write on every "hatırla", and the assistant then
+    told the student it had saved the preference anyway.
+    """
+    from app.agents.memory import mutate_memories
+
+    monkeypatch.setattr("app.agents.memory.legacy_memories", lambda _: [])
+    result = await mutate_memories(uuid4(), {"memories": [{"content": "Keep answers short"}]}, 0, "no-id")
+    assert result["revision"] == 1
+    assert result["memories"][0]["content"] == "Keep answers short"
+    assert result["memories"][0]["id"]
+
+
+@pytest.mark.asyncio
 async def test_memory_rejects_sensitive_content(monkeypatch):
     from app.agents.memory import mutate_memories
 

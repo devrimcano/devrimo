@@ -10,7 +10,6 @@ missing the course.
 """
 
 from app.api.v1.schedule import _course_code_matches, _search_fold, _short_code
-from app.campus import departments
 
 
 def _course(code: str, full_code: str) -> dict:
@@ -48,7 +47,14 @@ def test_folded_search_reaches_turkish_letters_from_an_english_keyboard():
     assert "tarih" in _search_fold("TARİHİ")
 
 
-def test_department_search_resolves_what_the_catalog_source_misses():
-    """The source matches codes and English names; the directory does the rest."""
-    assert departments.resolve("CENG").code == "571"
-    assert departments.resolve("Bilgisayar").code == "571"
+def test_department_search_lists_directory_matches_the_source_misses():
+    """The source matches codes and English names; the directory does the rest.
+
+    An ambiguous name lists every candidate rather than resolving to one:
+    "Bilgisayar" is both Computer Engineering and Computer Education.
+    """
+    from app.api.v1.schedule import _directory_department_options
+
+    assert any(option["code"] == "571" for option in _directory_department_options("CENG"))
+    bilgisayar = {option["code"] for option in _directory_department_options("Bilgisayar")}
+    assert {"571", "430"} <= bilgisayar

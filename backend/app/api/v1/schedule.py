@@ -382,14 +382,11 @@ async def search_departments(
     data = await call_course_info(db, user.id, "search_departments", {"query": query})
     # ``departments`` is the normalized list the schedule page's picker binds to;
     # ``data`` stays for callers that want the untouched catalog payload.
-    options = department_options(data)
     # The catalog source matches a code or an English name. A student typing the
-    # abbreviation ("CENG") or the Turkish name ("Bilgisayar") got an empty
-    # picker for a department that plainly exists, so the directory's own
-    # resolution is added when the source missed it.
-    found = departments.resolve(query)
-    if found is not None and all(str(option.get("code")) != found.code for option in options):
-        options.insert(0, {"code": found.code, "name": found.name_en or found.name_tr})
+    # abbreviation ("CENG") or a Turkish name ("Bilgisayar") got an empty picker
+    # for departments that plainly exist, so the directory answers when the
+    # source misses.
+    options = department_options(data) or _directory_department_options(query)
     return {"data": data, "departments": options}
 
 
@@ -474,6 +471,26 @@ def _search_fold(text: str) -> str:
     is the normal case rather than the exception.
     """
     return str(text).translate(_SEARCH_FOLD).casefold()
+
+
+def _directory_department_options(query: str) -> list[dict]:
+    """Departments whose abbreviation or name matches, straight from the directory.
+
+    Lists every candidate rather than resolving to one: "Bilgisayar" names both
+    Computer Engineering and Computer Education, and the picker should show both
+    instead of guessing or returning nothing.
+    """
+    wanted = _search_fold(query)
+    if not wanted:
+        return []
+    found = [
+        {"code": department.code, "name": department.name_en or department.name_tr}
+        for department in departments.all_departments()
+        if wanted in _search_fold(department.abbreviation)
+        or wanted in _search_fold(department.name_en)
+        or wanted in _search_fold(department.name_tr)
+    ]
+    return found[:20]
 
 
 async def _published_search_index(

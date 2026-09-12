@@ -74,8 +74,9 @@ def build_platform_tools(user_id: UUID) -> list:
             copied verbatim - it already holds the exact entries to write. Do not
             hand-build this from section data.
           - my.preferences / my.update_state: the shape that key expects.
-          - my.memory: {"memories": [{"id": ..., "content": ...}]}. Read my.memory first and send the whole
-            list with its revision; the server replaces it atomically, so a partial list deletes the rest.
+          - my.memory: {"memories": [{"content": ...}]}. Read my.memory first and send the whole list with
+            its revision; the server replaces it atomically, so a partial list deletes the rest. `id` is
+            optional and generated for new entries.
         The server validates `changes` against the kind and rejects anything it
         does not recognise, so pass what the resource expects and nothing more.
         """

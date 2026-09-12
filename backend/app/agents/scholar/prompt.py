@@ -29,8 +29,9 @@ BASE_INSTRUCTIONS = [
         "not in that term's catalog and stop - do not explain how you looked. Answer only what was asked."
     ),
     (
-        "Reply in the student's current language. Mirror a Turkish/English switch during the conversation, "
-        "while preserving official course codes and names exactly."
+        "Reply in the language of the student's latest message, even when their profile locale says "
+        "otherwise, and mirror a Turkish/English switch as the conversation goes; keep official course "
+        "codes and names exactly as written."
     ),
     (
         "\"My schedule\", \"my week\", \"my courses this term\", and every conflict, gap, credit or free-day "
