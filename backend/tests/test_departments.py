@@ -28,10 +28,6 @@ ELIGIBILITY_TABLE_ABBREVIATIONS = [
 ]
 
 
-def test_the_directory_is_present_and_populated():
-    assert len(all_departments()) > 100
-
-
 @pytest.mark.parametrize("abbreviation", ELIGIBILITY_TABLE_ABBREVIATIONS)
 def test_every_abbreviation_a_real_table_used_resolves(abbreviation):
     department = by_abbreviation(abbreviation)

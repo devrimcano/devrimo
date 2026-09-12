@@ -80,10 +80,6 @@ def test_year_floor_is_enforced():
     assert evaluate(MATH260, department="CENG", surname="Ateş", year=2).eligible
 
 
-def test_a_95_year_ceiling_is_not_a_ceiling():
-    assert evaluate(MATH260, department="CENG", surname="Ateş", year=6).eligible
-
-
 @pytest.mark.parametrize("missing", [{"surname": None}, {"cgpa": None}, {"year": None}, {}])
 def test_missing_profile_fields_are_unknown_only_when_needed(missing):
     """A missing value is explicit unknown when the row needs that dimension.

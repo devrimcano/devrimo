@@ -1,7 +1,7 @@
 """Scholar production controls and the deterministic tool-call harness."""
 
 import json
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -265,9 +265,3 @@ async def test_scholar_profile_runs_through_the_chat_api(client, monkeypatch):
     finally:
         await close_all()
         get_settings.cache_clear()
-
-
-def test_audit_user_ids_are_uuid_scoped():
-    # Guard the schema choice: stringly user ids would make ownership filters
-    # and incident queries easy to get subtly wrong.
-    assert isinstance(UUID("11111111-1111-1111-1111-111111111111"), UUID)

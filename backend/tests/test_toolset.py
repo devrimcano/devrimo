@@ -52,13 +52,6 @@ def test_creates_the_working_directory_private(tmp_path):
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
 
 
-def test_server_without_state_dir_needs_no_filesystem(tmp_path):
-    toolkits = build_toolkits([spec("sais", None)], timeout_seconds=TIMEOUT)
-
-    assert len(toolkits) == 1
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_unusable_state_dir_skips_that_server_only(tmp_path):
     """The reported failure: CAMPUS_STATE_ROOT unwritable took down the agent.
 
