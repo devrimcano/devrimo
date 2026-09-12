@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,10 +77,14 @@ class AiScheduleCourse(BaseModel):
 
 
 class AiScheduleRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     # Kept for compatibility with already-open browser tabs. The server ignores
     # it and reads the setup-owned StudentContext instead.
     department: str | None = Field(default=None, max_length=20)
-    semester: str = Field(min_length=4, max_length=20)
+    semester: str = Field(
+        min_length=4, max_length=20, validation_alias=AliasChoices("semester", "term")
+    )
     courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
 
 
@@ -784,16 +788,25 @@ async def course_sections(
 
 
 class BulkConstraintsRequest(BaseModel):
-    semester: str = Field(min_length=1, max_length=20)
+    # `term` and `course_codes` are accepted as spellings of the same fields.
+    # The API grew both names for one thing - and so did the failures: an agent
+    # sending the other spelling got "A semester/term is required" for a request
+    # that named the term. The validation alias is invisible in the schema, so
+    # the published contract keeps one name while both keep working.
+    model_config = ConfigDict(populate_by_name=True)
+
+    semester: str = Field(min_length=1, max_length=20, validation_alias=AliasChoices("semester", "term"))
     # The curriculum is a couple of dozen courses at most. The cap is here so a
     # crafted request cannot turn one HTTP call into hundreds of SAIS fetches.
-    courses: list[str] = Field(min_length=1, max_length=40)
+    courses: list[str] = Field(min_length=1, max_length=40, validation_alias=AliasChoices("courses", "course_codes"))
     department: str | None = Field(default=None, max_length=20)
 
 
 class BulkSectionsRequest(BaseModel):
-    semester: str = Field(min_length=1, max_length=20)
-    courses: list[str] = Field(min_length=1, max_length=40)
+    model_config = ConfigDict(populate_by_name=True)
+
+    semester: str = Field(min_length=1, max_length=20, validation_alias=AliasChoices("semester", "term"))
+    courses: list[str] = Field(min_length=1, max_length=40, validation_alias=AliasChoices("courses", "course_codes"))
     department: str | None = Field(default=None, max_length=20)
 
 
