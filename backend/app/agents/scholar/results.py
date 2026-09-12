@@ -22,8 +22,10 @@ from typing import Any
 MAX_TOOL_RESULT_CHARS = 6_000
 # An explicit "show me everything" raises the bound; it is the only case where
 # paying for the whole list on every later model step is what the student asked
-# for. It is still bounded, because a result is re-sent on each step.
-EXPANDED_RESULT_CHARS = MAX_TOOL_RESULT_CHARS * 3
+# for. It is still bounded, because a result is re-sent on each step: 24,000
+# is what a sixty-one-section course needs in its lean expanded shape, which
+# measured 18,095 at 18,000.
+EXPANDED_RESULT_CHARS = MAX_TOOL_RESULT_CHARS * 4
 # How much of a long list travels before the answer offers the choice: fifty
 # sections in one prompt cost every step of the turn, and the student rarely
 # wants all of them - they want the one that fits their surname range or week.
