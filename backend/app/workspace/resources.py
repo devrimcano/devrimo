@@ -79,8 +79,9 @@ KEY_REQUIRED_KINDS = frozenset(
 
 _SCOPED_DESCRIPTION = (
     "Address one resource: choose `kind`, then give the field that kind needs. Course kinds take the "
-    "numeric METU code in `key` (CENG 331 is 5710331) or a department code/abbreviation in `department` "
-    "(CENG is 571). Omit `term` to use the student's active term."
+    'course code in `key`, written either way a student writes it - "EE 201" and 5670201 both work - or '
+    "a department code/abbreviation in `department` (CENG is 571). Omit `term` to use the student's "
+    "active term."
 )
 
 
