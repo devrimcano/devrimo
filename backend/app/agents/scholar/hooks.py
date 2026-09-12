@@ -42,6 +42,23 @@ MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email", "send_email"
 MAX_SPAN_STATE_CHARS = 4_000
 
 
+def _requested_read(arguments, run_context) -> tuple[str | None, bool]:
+    """The resource kind, and whether ``expand`` may actually be honored.
+
+    The schema lets the model ask for everything, but only the student can
+    grant it: the API marks the turn ``expand_allowed`` when they asked in this
+    message or took a previous offer. A model that sets ``expand`` on its own
+    gets the normal preview and bound, which is what keeps a first "şubeleri
+    neler" from paying for sixty-one sections on every step.
+    """
+    resource = arguments.get("resource") if isinstance(arguments, dict) else None
+    if not isinstance(resource, dict):
+        return None, False
+    requested = bool(resource.get("expand"))
+    dependencies = getattr(run_context, "dependencies", None) or {}
+    return resource.get("kind"), requested and bool(dependencies.get("expand_allowed"))
+
+
 def _canonical_digest(arguments: dict[str, Any]) -> str:
     serialized = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(serialized.encode()).hexdigest()
@@ -216,9 +233,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
         if inspect.isawaitable(result):
             result = await result
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
-        resource = arguments.get("resource") if isinstance(arguments, dict) else None
-        kind = resource.get("kind") if isinstance(resource, dict) else None
-        expand = bool(resource.get("expand")) if isinstance(resource, dict) else False
+        kind, expand = _requested_read(arguments, run_context)
         result = bound(
             project_result(kind, result, expand=expand),
             limit=EXPANDED_RESULT_CHARS if expand else MAX_TOOL_RESULT_CHARS,

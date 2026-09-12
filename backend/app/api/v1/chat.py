@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import manager
 from app.agents.scholar.context import build_run_dependencies
+from app.agents.scholar.intent import wants_everything
 from app.agents.store import get_agno_db
 from app.assistant.models import AssistantRun
 from app.assistant.queue import enqueue_run, get_owned_run, request_cancel, stream_events
@@ -73,7 +74,19 @@ async def chat_completions(
     agent = await manager.get_or_create_agent(db, user.id)
     await manager.ensure_running(db, agent)
     session = await _get_or_create_chat_session(db, user.id, agent.id, session_id)
-    dependencies = await build_run_dependencies(db, user.id, message=text)
+    # "Hepsini göster" is honored only when the student asked for it, or when
+    # the previous reply offered it and they took the offer. Otherwise a model
+    # that decides to fetch everything on its own pays for it on every step.
+    previous_reply = next(
+        (item.content for item in reversed(body.messages) if item.role == "assistant" and item.content),
+        None,
+    )
+    dependencies = await build_run_dependencies(
+        db,
+        user.id,
+        message=text,
+        expand_allowed=wants_everything(text) or wants_everything(previous_reply),
+    )
     try:
         run = await enqueue_run(
             db,

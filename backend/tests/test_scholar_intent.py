@@ -6,7 +6,14 @@ of that trade: the intent shapes the context, and an unrecognised question keeps
 the full context rather than being answered with less than before.
 """
 
-from app.agents.scholar.intent import classify, context_fields, current_focus, guidance, requested_scope
+from app.agents.scholar.intent import (
+    classify,
+    context_fields,
+    current_focus,
+    guidance,
+    requested_scope,
+    wants_everything,
+)
 
 
 def test_intent_rules_read_both_keyboards():
@@ -81,3 +88,16 @@ def test_a_course_number_is_not_read_as_a_section():
     scope = requested_scope("EE 201 şubesi uygun mu")
     assert scope["section"] is None
     assert scope["section_unresolved"] is True
+
+
+def test_wants_everything_reads_both_keyboards():
+    assert wants_everything("Hepsini göster.")
+    assert wants_everything("Tümünü listeler misin?")
+    assert wants_everything("Show all of them")
+    assert wants_everything("İstersen tamamını çıkarayım")
+    assert not wants_everything("Sadece 2. şube uygun mu?")
+    assert wants_everything(None) is False
+
+
+def test_an_events_question_is_an_announcements_question():
+    assert classify("Sadece etkinlikleri göster") == "announcements"

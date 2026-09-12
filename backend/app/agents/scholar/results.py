@@ -58,6 +58,9 @@ _RESTRICTION_FIELDS = (
 _FULL_RANGE = {"min_cgpa": 0.0, "max_cgpa": 4.0, "min_year": 0, "max_year": 95}
 _MEETING_FIELDS = ("weekday", "raw_label", "room")
 MAX_SECTION_RESTRICTIONS = 4
+# An expanded list is a schedule, not an eligibility report: one restriction
+# row per section is the gist, and it is what lets sixty-one sections fit.
+MAX_EXPANDED_SECTION_RESTRICTIONS = 1
 
 
 def _compact_restriction(row: dict) -> dict:
@@ -72,13 +75,15 @@ def _compact_restriction(row: dict) -> dict:
     return compact
 
 
-def _compact_section(section: dict) -> dict:
+def _compact_section(section: dict, *, expand: bool = False) -> dict:
     """One section as the answer needs it: number, who, when, who may take it.
 
     The raw row carries syllabus plumbing, observation timestamps and a
     thirty-field restriction object per rule; none of that changes the answer.
     Meetings keep the weekday, the readable time and the room - `weekday` is a
-    number, so `raw_label` is what a table can show.
+    number, so `raw_label` is what a table can show. An expanded list cuts the
+    restriction rows to their gist, because sixty-one sections have to fit a
+    table the student asked for.
     """
     compact: dict = {}
     if section.get("section") not in (None, ""):
@@ -102,12 +107,11 @@ def _compact_section(section: dict) -> dict:
             if isinstance(item, dict)
         ]
     restrictions = section.get("restrictions")
+    cap = MAX_EXPANDED_SECTION_RESTRICTIONS if expand else MAX_SECTION_RESTRICTIONS
     if isinstance(restrictions, list) and restrictions:
-        compact["restrictions"] = [
-            _compact_restriction(row) for row in restrictions[:MAX_SECTION_RESTRICTIONS] if isinstance(row, dict)
-        ]
-        if len(restrictions) > MAX_SECTION_RESTRICTIONS:
-            compact["restrictions_omitted"] = len(restrictions) - MAX_SECTION_RESTRICTIONS
+        compact["restrictions"] = [_compact_restriction(row) for row in restrictions[:cap] if isinstance(row, dict)]
+        if len(restrictions) > cap:
+            compact["restrictions_omitted"] = len(restrictions) - cap
     return compact
 
 
@@ -137,7 +141,7 @@ def _project_sections(envelope: dict, *, expand: bool) -> dict:
     compact["sections_total"] = len(sections)
     if len(sections) > cap:
         compact["sections_omitted"] = len(sections) - cap
-    compact["sections"] = [_compact_section(item) for item in sections[:cap] if isinstance(item, dict)]
+    compact["sections"] = [_compact_section(item, expand=expand) for item in sections[:cap] if isinstance(item, dict)]
     # Carried so the generic projection below turns it into `freshness`.
     compact["_catalog"] = course.get("_catalog")
     # A copy: two projections of one envelope (a preview and an expand) must

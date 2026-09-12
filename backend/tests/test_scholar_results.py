@@ -10,6 +10,7 @@ kept, because an answer must not present stale data as current.
 
 from app.agents.scholar.results import SECTION_PREVIEW, UPDATES_PREVIEW, project, project_result
 from app.agents.scholar.context import _selected
+from app.agents.scholar.hooks import _requested_read
 from app.agents.scholar.intent import context_fields, guidance
 
 
@@ -184,6 +185,31 @@ def test_sections_are_all_kept_when_the_student_asked_for_all():
     assert "sections_omitted" not in out["data"]
 
 
+def test_expand_keeps_a_giant_list_lean():
+    envelope = _sections_envelope(30)
+    for section in envelope["data"]["data"]["sections"]:
+        section["restrictions"] = section["restrictions"] * 3
+    out = project_result("catalog.sections", envelope, expand=True)
+    sections = out["data"]["sections"]
+    assert len(sections) == 30
+    assert len(sections[0]["restrictions"]) == 1
+    assert sections[0]["restrictions_omitted"] == 2
+
+
+class _Context:
+    def __init__(self, dependencies):
+        self.dependencies = dependencies
+
+
+def test_expand_is_only_honored_when_the_student_allowed_it():
+    arguments = {"resource": {"kind": "catalog.sections", "expand": True}}
+    assert _requested_read(arguments, _Context({"expand_allowed": True})) == ("catalog.sections", True)
+    assert _requested_read(arguments, _Context({"expand_allowed": False})) == ("catalog.sections", False)
+    assert _requested_read(arguments, _Context({})) == ("catalog.sections", False)
+    unrequested = {"resource": {"kind": "catalog.sections"}}
+    assert _requested_read(unrequested, _Context({"expand_allowed": True})) == ("catalog.sections", False)
+
+
 def test_projection_does_not_mutate_the_envelope():
     """A preview and an expand project the same input independently."""
     envelope = _sections_envelope(12)
@@ -246,6 +272,7 @@ def test_updates_are_all_kept_when_asked_for_all():
 def test_the_guidance_tells_the_model_to_offer_the_rest():
     assert "sections_omitted" in guidance("sections")
     assert "resource.expand" in guidance("sections")
+    assert "my.updates" in guidance("announcements")
     assert "resource.expand" in guidance("announcements")
 
 
@@ -257,8 +284,10 @@ def test_selection_keeps_the_diet_fields_whatever_the_intent():
         "current_focus": {"courses": ["EE 201"]},
         "intent": "credits",
         "requested_scope": {"term": "20252", "section": None},
+        "expand_allowed": True,
     }
     kept = _selected(payload, context_fields("knowledge"))
-    for key in ("display_name", "answer_guidance", "current_focus", "intent", "requested_scope"):
+    for key in ("display_name", "answer_guidance", "current_focus", "intent", "requested_scope", "expand_allowed"):
         assert key in kept
+    assert kept["expand_allowed"] is True
     assert "planned_timetable" not in kept

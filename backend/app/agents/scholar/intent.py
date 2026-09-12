@@ -41,7 +41,7 @@ _RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = tuple(
     for intent, needles in (
         ("memory", ("hatirla", "unutma", "aklinda tut", "remember")),
         ("mail", ("mail", "e-posta", "eposta", "email", "gelen kutusu", "inbox")),
-        ("announcements", ("duyuru", "announcement", "ilan", "guncelleme")),
+        ("announcements", ("duyuru", "announcement", "ilan", "guncelleme", "etkinlik", "event")),
         ("prerequisites", ("on kosul", "prerequisite", "prereq", "kosulu")),
         ("eligibility", ("uygun", "alabilir", "kisit", "eligible", "kayit olabil")),
         ("sections", ("sube", "section", "hoca", "ogretim uyesi")),
@@ -67,8 +67,8 @@ _GUIDANCE = {
         "the times are not published yet; keep restrictions to a single line. When the result carries "
         "sections_omitted, say how many sections the course has in total, show the ones you have, and ask "
         "whether the student wants all of them or one that fits a specific need (instructor, day, surname "
-        "range). Never set resource.expand on the first read of a question; read again with it true only "
-        "after the student says they want all of them."
+        "range). `resource.expand` is only honored when the student asked for everything in this message, "
+        "or you offered it in the previous reply and they took the offer."
     ),
     "eligibility": (
         "Answer shape for this question: the verdict first (eligible, not eligible, or unknown), then the "
@@ -83,10 +83,12 @@ _GUIDANCE = {
         "that sends waits for explicit confirmation."
     ),
     "announcements": (
-        "Answer shape for this question: at most five newest items, one line each with its date, and how "
-        "many more there are. When the student names a category or topic, filter the list by type, title "
-        "and summary and show only the matches. Never set resource.expand on the first read; read again "
-        "with it true only after the student asks for everything."
+        "Answer shape for this question: read my.updates for the personalized feed - it carries campus "
+        "announcements and events; use student.announcements only when the student means their own SAIS "
+        "board. Show at most five newest items, one line each with its date, and how many more there are. "
+        "When the student names a category or topic (events are type event), filter the list by type, "
+        "title and summary and show only the matches. `resource.expand` is only honored when the student "
+        "asked for everything in this message, or you offered it in the previous reply."
     ),
     "knowledge": (
         "Answer shape for this question: the answer in one short paragraph, then the source and when it was "
@@ -177,6 +179,23 @@ _YEAR = re.compile(r"\b20\d{2}\b")
 _SECTION_AFTER = re.compile(r"(?:sube|section)\s*[.:#/-]?\s*(\d{1,3})")
 _SECTION_BEFORE = re.compile(r"(?<![a-z0-9])(\d{1,3})\s*[.:#/-]\s*(?:sube|section)")
 _SECTION_WORD = re.compile(r"\b(?:sube|section)")
+
+
+# "hepsini göster", "tamamını çıkar", "tümünü listele", "show all". Both the
+# student's request and the assistant's offer use these, which is what lets the
+# broker tell "they asked for everything" from "the model decided to fetch
+# everything on its own".
+_EVERYTHING = re.compile(
+    r"\b(hepsi|hepsini|tamami|tamamini|tumu|tumunu|butun|butununu|"
+    r"all of them|all of it|everything|show all|the rest)"
+)
+
+
+def wants_everything(message: str | None) -> bool:
+    """Whether a message asks for (or offers) every item of a list."""
+    if not message:
+        return False
+    return bool(_EVERYTHING.search(_fold(message)))
 
 
 def requested_scope(message: str | None) -> dict:

@@ -92,7 +92,11 @@ def _selected(payload: dict[str, object], allowed: frozenset[str] | None) -> dic
     ("other") keeps the full set: less context must never be the way an
     unclassifiable question is answered.
     """
-    keep = None if allowed is None else allowed | {"answer_guidance", "current_focus", "intent", "requested_scope"}
+    keep = (
+        None
+        if allowed is None
+        else allowed | {"answer_guidance", "current_focus", "intent", "requested_scope", "expand_allowed"}
+    )
     return {
         key: value
         for key, value in payload.items()
@@ -101,7 +105,7 @@ def _selected(payload: dict[str, object], allowed: frozenset[str] | None) -> dic
 
 
 async def build_run_dependencies(
-    db: AsyncSession, user_id, message: str | None = None
+    db: AsyncSession, user_id, message: str | None = None, *, expand_allowed: bool = False
 ) -> dict[str, object]:
     from app.agents.memory import read_memories
     from app.agents.scholar.intent import classify, context_fields, current_focus, guidance, requested_scope
@@ -167,5 +171,7 @@ async def build_run_dependencies(
         "current_focus": focus,
         "intent": intent,
         "requested_scope": requested_scope(message),
+        # The tool hook only honors `resource.expand` when this is true.
+        "expand_allowed": expand_allowed,
     }
     return _selected(payload, context_fields(intent))
