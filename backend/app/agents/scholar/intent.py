@@ -32,17 +32,24 @@ def _fold(text: str) -> str:
 # "planımdaki dersler" is a schedule question, not a credits one. Needles are
 # written folded, and the schedule ones are narrow on purpose: "program" alone
 # would read "Python programlama nedir" as a scheduling question.
-_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("memory", ("hatirla", "unutma", "aklinda tut", "remember")),
-    ("mail", ("mail", "e-posta", "eposta", "email", "gelen kutusu", "inbox")),
-    ("announcements", ("duyuru", "announcement", "ilan")),
-    ("prerequisites", ("on kosul", "prerequisite", "prereq", "kosulu")),
-    ("eligibility", ("uygun", "alabilir", "kisit", "eligible", "kayit olabil")),
-    ("sections", ("sube", "section", "hoca", "ogretim uyesi")),
-    ("credits", ("kredi", "akts", "ects", "credit")),
-    ("schedule", ("ders program", "programi", "planim", "planla", "takvim", "cakis", "hafta", "schedule", "timetable")),
-    ("knowledge", ("yonetmelik", "nedir", "nasil", "neden", "kural")),
-    ("greeting", ("merhaba", "selam", "hello")),
+# Each needle is matched at a word start, so "ilan" does not fire on "açılan"
+# (inside a sections question) and "sube" still fires on "şubeleri". Turkish
+# suffixes attach to the end of a word, which is why the boundary is only at
+# the start.
+_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = tuple(
+    (intent, tuple(re.compile(r"\b" + re.escape(needle)) for needle in needles))
+    for intent, needles in (
+        ("memory", ("hatirla", "unutma", "aklinda tut", "remember")),
+        ("mail", ("mail", "e-posta", "eposta", "email", "gelen kutusu", "inbox")),
+        ("announcements", ("duyuru", "announcement", "ilan")),
+        ("prerequisites", ("on kosul", "prerequisite", "prereq", "kosulu")),
+        ("eligibility", ("uygun", "alabilir", "kisit", "eligible", "kayit olabil")),
+        ("sections", ("sube", "section", "hoca", "ogretim uyesi")),
+        ("credits", ("kredi", "akts", "ects", "credit")),
+        ("schedule", ("ders program", "programi", "planim", "planla", "takvim", "cakis", "hafta", "schedule", "timetable")),
+        ("knowledge", ("yonetmelik", "nedir", "nasil", "neden", "kural")),
+        ("greeting", ("merhaba", "selam", "hello")),
+    )
 )
 
 _GUIDANCE = {
@@ -117,8 +124,8 @@ def classify(message: str) -> str:
     folded = _fold(message)
     if not folded.strip():
         return "other"
-    for intent, needles in _RULES:
-        if any(needle in folded for needle in needles):
+    for intent, patterns in _RULES:
+        if any(pattern.search(folded) for pattern in patterns):
             return intent
     return "other"
 

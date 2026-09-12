@@ -27,6 +27,12 @@ def test_a_programming_question_is_not_a_scheduling_question():
     assert classify("merhaba") == "greeting"
 
 
+def test_a_word_that_merely_contains_a_needle_does_not_fire_it():
+    # "açılan" contains "ilan"; the question is about prerequisites, not duyurular.
+    assert classify("EE201 dersinin ön koşulu nedir? Açılan şubeleri de yaz.") == "prerequisites"
+    assert classify("Açılan şubeler hangileri?") == "sections"
+
+
 def test_unknown_questions_keep_the_whole_context():
     assert classify("") == "other"
     assert classify("CENG 232 hakkında bir şey söyle") == "other"
