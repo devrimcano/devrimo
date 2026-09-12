@@ -5,7 +5,7 @@ from uuid import UUID
 from agno.tools.decorator import tool
 
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest
+from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest, SearchResource
 from app.workspace.service import WorkspaceService
 
 
@@ -24,9 +24,25 @@ def build_platform_tools(user_id: UUID) -> list:
         workspace = WorkspaceService(user_id)
 
     @tool(name="search")
-    async def search(request: SearchRequest) -> dict:
+    async def search(
+        resource: SearchResource,
+        query: str = "",
+        limit: int = 10,
+        record_types: list[str] | None = None,
+        starts_after: str | None = None,
+        starts_before: str | None = None,
+    ) -> dict:
         """Text-search campus.knowledge, researcher, mail.messages, catalog.departments or catalog.department."""
-        return await workspace.search(SearchRequest.model_validate(request))
+        return await workspace.search(
+            SearchRequest(
+                resource=resource,
+                query=query,
+                limit=limit,
+                record_types=record_types or [],
+                starts_after=starts_after,
+                starts_before=starts_before,
+            )
+        )
 
     @tool(name="read")
     async def read(resource: ResourceRef) -> dict:

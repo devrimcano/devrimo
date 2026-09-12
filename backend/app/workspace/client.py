@@ -107,7 +107,9 @@ class WorkspaceClient:
         raise failure
 
     async def search(self, request):
-        return await self.call("search", {"request": request.model_dump()})
+        # Flat arguments: the gateway's search takes resource/query/limit
+        # directly. See gateway.create_gateway.
+        return await self.call("search", request.model_dump())
 
     async def read(self, resource):
         return await self.call("read", {"resource": resource.model_dump()})

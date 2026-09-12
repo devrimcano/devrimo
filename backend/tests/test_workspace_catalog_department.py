@@ -45,6 +45,33 @@ def test_an_explicit_department_wins_over_anything_derived():
     assert department_for(kind="catalog.prerequisites", key="2360219", department="571") == "571"
 
 
+def test_a_lettered_course_resolves_to_the_numeric_pair_the_catalog_reads():
+    """The model guessed the department prefix and reported a real course missing.
+
+    "EE 201" is 5670201 in the catalog; the model sent 5710201 (Computer
+    Engineering's prefix) and the read 404'd. Resolving the pair here removes the
+    guess.
+    """
+    from app.workspace.service import WorkspaceService
+
+    assert WorkspaceService._course_scope(ResourceRef(kind="catalog.prerequisites", key="EE 201")) == (
+        "5670201",
+        "567",
+    )
+    assert WorkspaceService._course_scope(ResourceRef(kind="catalog.sections", key="CENG 331")) == (
+        "5710331",
+        "571",
+    )
+    assert WorkspaceService._course_scope(ResourceRef(kind="catalog.prerequisites", key="2360219")) == (
+        "2360219",
+        "236",
+    )
+    # An explicit department still wins over the one the code carries.
+    assert WorkspaceService._course_scope(
+        ResourceRef(kind="catalog.prerequisites", key="2360219", department="CENG")
+    ) == ("2360219", "571")
+
+
 def test_a_key_that_is_not_a_course_code_is_passed_through_unchanged():
     """Truncation is only ever right for a seven-digit numeric code."""
     assert department_for(kind="catalog.prerequisites", key="MATH 219") == "MATH 219"
