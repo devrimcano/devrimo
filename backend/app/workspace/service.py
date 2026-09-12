@@ -7,10 +7,25 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app.admin.directory import active_account
+from app.campus import departments as department_directory
 from app.campus.mcp_results import mcp_payload
 from app.campus.sessions import integration_session
 from app.db.session import SessionLocal
 from app.workspace.resources import UPSTREAM, EmailDraft, ResourceRef, SearchRequest
+
+# Catalog resources whose key is a course. A student says "EE 201"; the catalog
+# keys on 5670201 with a department of 567. Resolving both here means the model
+# never has to guess a numeric prefix - it did (`5710201`, the wrong department)
+# and answered that a course which is in the catalog did not exist.
+_COURSE_KEY_KINDS = frozenset(
+    {
+        "catalog.sections",
+        "catalog.eligibility",
+        "catalog.prerequisites",
+        "catalog.replacements",
+        "catalog.theses",
+    }
+)
 
 
 def current_term():
@@ -79,13 +94,17 @@ class WorkspaceService:
         if request.query:
             # Names the call that works, because this is read by a model that
             # will otherwise try the same search again with different wording.
-            # It did: twelve failing search calls on one free-elective question,
-            # because "supports read, not text search" said what was wrong and
-            # not what to do instead.
+            # The example is concrete on purpose: a "<identifier>" placeholder
+            # in this message was copied verbatim into eleven reads.
+            example_key = "2360219" if ref.kind.startswith("catalog.") else "example-id"
+            example = (
+                '{"kind": "catalog.courses", "department": "571"}'
+                if ref.kind == "catalog.courses"
+                else f'{{"kind": "{ref.kind}", "key": "{example_key}"}}'
+            )
             raise HTTPException(
                 422,
-                f"{ref.kind} has no text search. Call read with "
-                f'{{"kind": "{ref.kind}", "key": "<identifier>"}} instead. '
+                f"{ref.kind} has no text search. Call read with {example} instead. "
                 "To find a course by name, search catalog.departments for the department, "
                 "then read catalog.courses with that department.",
             )
@@ -180,20 +199,45 @@ class WorkspaceService:
             return key[:3]
         return key or None
 
+    @staticmethod
+    def _course_scope(ref) -> tuple[str | None, str | None]:
+        """The numeric course code and department the catalog expects.
+
+        "EE 201" and "5670201" are the same course; the catalog only answers to
+        the second, paired with department 567. The model guessed the prefix once
+        and concluded a course that is in the catalog was not offered.
+        """
+        key = (ref.key or "").strip() or None
+        department = ref.department or None
+        if key:
+            expanded = department_directory.expand_course_code(key)
+            if expanded is not None:
+                key, owner = expanded
+                department = department or owner.code
+        if department:
+            resolved = department_directory.resolve(department)
+            if resolved is not None:
+                department = resolved.code
+        return key, department
+
     async def upstream(self, ref, *, query="", limit=10):
         integration, method = UPSTREAM[ref.kind]
         if ref.kind == "mail.messages" and query:
             method = "search_emails"
         if ref.kind == "catalog.departments" and query:
             method = "search_departments"
+        key = ref.key
+        department = self._department(ref)
+        if ref.kind in _COURSE_KEY_KINDS:
+            key, department = self._course_scope(ref)
         values = {
             "query": query,
             "limit": limit,
             "mark_as_read": False,
-            "course_id": ref.key,
-            "course_code": ref.key,
-            "course": ref.key,
-            "department": self._department(ref),
+            "course_id": key,
+            "course_code": key,
+            "course": key,
+            "department": department,
             "message_id": ref.key,
             "email_id": ref.key,
             "uid": ref.key,

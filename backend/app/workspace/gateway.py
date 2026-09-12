@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse
 from app.auth.jwt import verify_access_token
 from app.config import get_settings
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest
+from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest, SearchResource
 from app.workspace.service import WorkspaceService
 
 
@@ -60,9 +60,31 @@ def create_gateway():
         return WorkspaceService(user.id)
 
     @server.tool()
-    async def search(request: SearchRequest, ctx: Context) -> dict:
-        """Search an authenticated workspace resource."""
-        return await service(ctx).search(request)
+    async def search(
+        resource: SearchResource,
+        query: str = "",
+        limit: int = 10,
+        record_types: list[str] | None = None,
+        starts_after: str | None = None,
+        starts_before: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """Search an authenticated workspace resource.
+
+        Flat arguments rather than a nested `request` object: the model kept
+        sending the resource and query at the top level, which the wrapper
+        rejected as a missing field. platform_tools.search must match this.
+        """
+        return await service(ctx).search(
+            SearchRequest(
+                resource=resource,
+                query=query,
+                limit=limit,
+                record_types=record_types or [],
+                starts_after=starts_after,
+                starts_before=starts_before,
+            )
+        )
 
     @server.tool()
     async def read(resource: ResourceRef, ctx: Context) -> dict:
