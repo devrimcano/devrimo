@@ -4288,7 +4288,9 @@ def _prerequisite_semantics() -> dict[str, Any]:
         "semantics": (
             "The prerequisite is met when ANY one group is complete. Requirements inside a group "
             "combine with that group's `logic` (AND = all of them). Present the groups as "
-            "alternatives; never merge them into a single combined list."
+            "alternatives, and write each requirement exactly as its `course_label` - never invent, "
+            "translate or replace a course code or name; if a requirement has no label, write its "
+            "`course_code`."
         ),
     }
 
@@ -4332,10 +4334,27 @@ async def _course_titles(
     return titles
 
 
+def _course_label(code: str, title: str | None) -> str:
+    """The label a student recognises: "MATH 260 - BASIC LINEAR ALGEBRA".
+
+    Built here rather than left to the model, which turned 3590101 into
+    "ENG 103" and dropped the codes altogether. The abbreviation comes from the
+    department directory, so an unmapped department keeps its numeric code.
+    """
+    code = (code or "").strip()
+    if not code:
+        return ""
+    lettered = len(code) == 7 and code.isdigit()
+    department = department_directory.by_code(code[:3]) if lettered else None
+    number = code[3:].lstrip("0") if lettered else ""
+    head = f"{department.abbreviation} {number}".strip() if department and department.abbreviation and number else code
+    return f"{head} - {title}" if title else head
+
+
 async def _attach_course_titles(
     db: AsyncSession, organization_id: UUID, term_id: UUID, groups: list[dict[str, Any]]
 ) -> None:
-    """Put each requirement's real title beside its code, in place."""
+    """Put each requirement's real title and ready-made label beside its code, in place."""
     codes = {
         str(requirement.get("course_code") or "")
         for group in groups
@@ -4349,7 +4368,10 @@ async def _attach_course_titles(
     for group in groups:
         for requirement in group.get("requirements") or []:
             if isinstance(requirement, dict):
-                requirement["course_title"] = titles.get(str(requirement.get("course_code") or ""))
+                code = str(requirement.get("course_code") or "")
+                title = titles.get(code)
+                requirement["course_title"] = title
+                requirement["course_label"] = _course_label(code, title)
 
 
 def _public_replacements(
