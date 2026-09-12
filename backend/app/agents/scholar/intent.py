@@ -80,8 +80,8 @@ _GUIDANCE = {
         "read."
     ),
     "memory": (
-        "Answer shape for this question: one sentence confirming exactly what will be remembered, and "
-        "nothing about how it is stored."
+        "Answer shape for this question: one sentence confirming exactly what will be remembered. Do not "
+        "say you are saving it, storing it, or that it persists - the student only needs the confirmation."
     ),
     "greeting": (
         "Answer shape for this question: two or three lines at most; name one thing you can help with that "
@@ -106,7 +106,9 @@ _ALWAYS = frozenset(
 _TIMETABLE_INTENTS = frozenset({"schedule", "prerequisites", "credits", "sections", "eligibility", "greeting"})
 # A one-line list of connected campus servers, only where a campus tool may be reached.
 _CAMPUS_INTENTS = frozenset({"sections", "eligibility", "schedule", "announcements", "mail", "knowledge"})
-_CLOCK_INTENTS = frozenset({"schedule", "prerequisites", "credits", "sections", "eligibility", "announcements"})
+# Questions that name a term or a moment. `academic_term_hint` is what says
+# 20261 is Fall; without it one run labelled the term "2026-2026 Bahar".
+_TIME_INTENTS = frozenset({"schedule", "prerequisites", "credits", "sections", "eligibility", "announcements"})
 
 
 def classify(message: str) -> str:
@@ -134,8 +136,9 @@ def context_fields(intent: str) -> frozenset[str] | None:
         fields.add("planned_timetable")
     if intent in _CAMPUS_INTENTS:
         fields.add("enabled_tools")
-    if intent in _CLOCK_INTENTS:
+    if intent in _TIME_INTENTS:
         fields.add("local_datetime")
+        fields.add("academic_term_hint")
     return frozenset(fields)
 
 

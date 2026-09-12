@@ -37,12 +37,14 @@ def test_context_follows_the_intent():
     schedule = context_fields("schedule")
     assert "planned_timetable" in schedule
     assert "enabled_tools" in schedule
+    assert "academic_term_hint" in schedule
     mail = context_fields("mail")
     assert "enabled_tools" in mail
     assert "planned_timetable" not in mail
     knowledge = context_fields("knowledge")
     assert "planned_timetable" not in knowledge
     assert "local_datetime" not in knowledge
+    assert "academic_term_hint" not in knowledge
     for fields in (schedule, mail, knowledge):
         assert {"display_name", "academic_identity", "explicit_memories"} <= fields
 
