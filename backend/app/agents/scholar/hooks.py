@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
+from app.agents.scholar.results import project
 from app.db.models import AgentToolAudit
 from app.db.session import SessionLocal
 from app.logging import get_logger
@@ -231,7 +232,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
         if inspect.isawaitable(result):
             result = await result
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
-        result = _bound_result(result)
+        result = _bound_result(project(result))
         return result
     except Exception as exc:
         error = exc

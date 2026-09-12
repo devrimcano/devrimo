@@ -84,6 +84,58 @@ def _timetable(row: "StudentTimetable | None") -> dict | None:
     }
 
 
+# The read each of these questions almost always needs. Prefetched on the API
+# side, so the data is already in the prompt and the turn does not spend a model
+# step asking for it. Only when the question names exactly one course: a
+# prefetch that guesses wrong costs more than the step it saves.
+_PREFETCH_BY_INTENT = {
+    "prerequisites": ("catalog.prerequisites",),
+    "credits": ("catalog.sections",),
+    "sections": ("catalog.sections",),
+    "eligibility": ("catalog.eligibility",),
+}
+
+
+async def _prefetch(intent: str, focus: dict | None, user_id) -> list[dict] | None:
+    """Read the resources this question will ask for anyway.
+
+    A course's 404 is included as the answer rather than swallowed: "not
+    available in the published release" is final, and handing it to the model
+    up front is what ends a CENG 334-style search before it starts.
+    """
+    from fastapi import HTTPException
+
+    from app.agents.scholar.results import project
+    from app.workspace.resources import ResourceRef
+    from app.workspace.service import WorkspaceService
+
+    kinds = _PREFETCH_BY_INTENT.get(intent)
+    courses = (focus or {}).get("courses") or []
+    if not kinds or len(courses) != 1:
+        return None
+    code = courses[0]
+    service = WorkspaceService(user_id)
+    entries: list[dict] = []
+    for kind in kinds:
+        try:
+            result = await service.read(ResourceRef(kind=kind, key=code))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                entries.append({"kind": kind, "key": code, "error": str(exc.detail)})
+            continue
+        except Exception:  # a prefetch must never fail the turn it was meant to speed up
+            continue
+        entries.append(
+            {
+                "kind": kind,
+                "key": code,
+                "data": project(result.get("data")),
+                "provenance": project(result.get("provenance")),
+            }
+        )
+    return entries or None
+
+
 def _selected(payload: dict[str, object], allowed: frozenset[str] | None) -> dict[str, object]:
     """Drop empty values, and everything this turn's intent does not justify.
 
@@ -92,7 +144,7 @@ def _selected(payload: dict[str, object], allowed: frozenset[str] | None) -> dic
     ("other") keeps the full set: less context must never be the way an
     unclassifiable question is answered.
     """
-    keep = None if allowed is None else allowed | {"answer_guidance", "current_focus"}
+    keep = None if allowed is None else allowed | {"answer_guidance", "current_focus", "intent", "prefetched"}
     return {
         key: value
         for key, value in payload.items()
@@ -107,6 +159,7 @@ async def build_run_dependencies(
     from app.agents.scholar.intent import classify, context_fields, current_focus, guidance
 
     intent = classify(message) if message else "other"
+    focus = current_focus(message)
     memories = await read_memories(user_id)
     profile = await campus_service.get_profile(db, user_id)
     student_context = await student_service.get_context(db, user_id)
@@ -162,6 +215,8 @@ async def build_run_dependencies(
         # The answer shape for this intent, and the courses the student just
         # named so "onun/peki" has an antecedent. Both are deterministic.
         "answer_guidance": guidance(intent),
-        "current_focus": current_focus(message),
+        "current_focus": focus,
+        "intent": intent,
+        "prefetched": await _prefetch(intent, focus, user_id),
     }
     return _selected(payload, context_fields(intent))

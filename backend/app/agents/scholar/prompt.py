@@ -146,6 +146,11 @@ def runtime_instructions():
             )
             if shape:
                 instructions.append(shape)
+            if dependencies.get("prefetched"):
+                instructions.append(
+                    "`prefetched` holds resources already read for this question. Use it first, and read the "
+                    "same resource again only when the answer needs a newer read."
+                )
         return instructions
 
     return _instructions
