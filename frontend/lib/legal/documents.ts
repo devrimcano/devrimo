@@ -144,6 +144,44 @@ export const LEGAL_DOCUMENTS: readonly LegalDocument[] = [
       },
     ],
   },
+  {
+    slug: "kullanim-kosullari",
+    id: "legal.kullanim-kosullari",
+    version: "2026-09-14.1",
+    effectiveFrom: "2026-09-14",
+    title: "Kullanım Koşulları",
+    summary:
+      "Devrimo'yu kullanırken geçerli olacak kurallar, hizmetin sınırları ve sorumluluk çerçevesi. Henüz taslak.",
+    status: "draft",
+    sections: [
+      {
+        heading: "Hizmetin kapsamı",
+        body: [
+          "Devrimo, ODTÜ ile resmî bir ilişkisi olmayan, öğrencinin kendi kampüs bilgilerini kendi hesabı üzerinden kullanmasına yardımcı olan bir araçtır.",
+          "[[Bu ifadenin bağlayıcı hukuki karşılığı ve hizmet tanımı.]]",
+        ],
+      },
+      {
+        heading: "Hesap ve kabul edilebilir kullanım",
+        body: [
+          "[[Hesap güvenliği, başkasının hesabına erişim, otomatik kullanım sınırları ve askıya alma koşulları.]]",
+        ],
+      },
+      {
+        heading: "Yapay zekâ çıktıları",
+        body: [
+          "Asistan hata yapabilir; ders seçimi ve kayıt gibi kritik kararlar danışman veya öğrenci işleriyle doğrulanmalıdır.",
+          "[[Sorumluluk sınırı ve garanti reddi.]]",
+        ],
+      },
+      {
+        heading: "Değişiklikler ve uygulanacak hukuk",
+        body: [
+          "[[Metin güncellendiğinde kabulün nasıl yenileneceği, uygulanacak hukuk ve yetkili yer.]]",
+        ],
+      },
+    ],
+  },
 ];
 
 export function findDocument(slug: string): LegalDocument | undefined {
@@ -171,4 +209,28 @@ export function consentTarget(document: LegalDocument): { id: string; version: s
     throw new Error(`${document.id} is still a draft and cannot be the target of a recorded consent`);
   }
   return { id: document.id, version: document.version };
+}
+
+/**
+ * What a sign-up records about the texts it showed.
+ *
+ * Unlike :func:`consentTarget` this never throws on a draft: the acceptance
+ * funnel has to keep working before a lawyer's text lands. A published
+ * document is stamped with the id and version a consent record needs; a draft
+ * carries its status in the stamp itself, so nobody can later mistake it for
+ * proof of consent. The shape does not change when a document is published —
+ * only the status does.
+ */
+export function legalAcceptanceStamp(at: Date = new Date()): {
+  accepted_at: string;
+  documents: Array<{ id: string; version: string; status: LegalDocument["status"] }>;
+} {
+  return {
+    accepted_at: at.toISOString(),
+    documents: LEGAL_DOCUMENTS.map((document) => ({
+      id: document.id,
+      version: document.version,
+      status: document.status,
+    })),
+  };
 }
