@@ -16,7 +16,7 @@ import asyncio
 import inspect
 import re
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 from uuid import UUID
@@ -28,7 +28,6 @@ from app.campus import departments as department_directory
 from app.campus import service as campus_service
 from app.campus.mcp_results import mcp_payload, parse_json_document
 from app.core.digest import stable_digest
-from app.core.persistent_cache import read_cached, read_many_cached, write_cached
 from app.core.ttl_cache import TTLCache
 from app.logging import get_logger
 
@@ -124,42 +123,6 @@ def catalog_key(tool_suffix: str, values: dict[str, str]) -> tuple[tuple[str, ..
     """
     identity = (tool_suffix, *(f"{key}={value}" for key, value in sorted(values.items())))
     return identity, stable_digest({"namespace": CATALOG_NAMESPACE, "identity": list(identity)})
-
-
-async def prefetch(pairs: Iterable[tuple[str, dict[str, str]]]) -> None:
-    """Seed the in-process cache for many shared answers from one database read.
-
-    A batch endpoint otherwise probes the persistent layer once per course, and
-    each probe opens its own session: forty courses meant forty connection
-    checkouts before a single campus call. Answers already in memory are left
-    alone, and a miss here is simply a miss — the caller fetches it as usual.
-
-    Silent by design about anything not shared: a per-student tool has no
-    business in a cache keyed without the student.
-    """
-    # Once the reviewed catalog is enabled, the old raw Course Info cache is
-    # deliberately dead for shared data.  Seeding it here would make a later
-    # flag rollback (or an un-migrated consumer) observe an importer payload
-    # that has never passed the draft/review/publication boundary.  The
-    # published reader owns its own database reads and release pinning.
-    if _published_catalog_reads_enabled():
-        return
-
-    wanted: dict[str, tuple[str, ...]] = {}
-    for tool_suffix, values in pairs:
-        if tool_suffix not in _SHARED_TOOL_TTLS:
-            continue
-        identity, key_hash = catalog_key(tool_suffix, values)
-        if _catalog.get(identity, _UNCACHED) is not _UNCACHED:
-            continue
-        wanted[key_hash] = identity
-    if not wanted:
-        return
-    for key_hash, payload in (await read_many_cached(list(wanted))).items():
-        # Same reason as the single read: a stored failure is not an answer, and
-        # seeding one here would spread it to the in-process cache as well.
-        if tool_error_text(payload) is None:
-            _catalog.set(wanted[key_hash], payload)
 
 
 def section_numbers(payload: Any) -> list[str]:
@@ -335,25 +298,21 @@ async def call_course_info(
 ) -> Any:
     """Call one Course Info function and return its payload as plain data.
 
-    Three layers, cheapest first: the in-process cache collapses a burst of
-    identical lookups, the database cache survives restarts and is shared
-    across students for catalog tools, and only a miss on both reaches the
-    campus server — which costs that student's whole toolkit being spawned.
-
-    Student-specific tools are absent from :data:`_SHARED_TOOL_TTLS`, so their
-    keys stay scoped to the user and never touch the shared layer.
+    Shared catalog facts are read from the reviewed, published catalog — the
+    raw campus integration is no longer an authority for them.  A personal
+    ``get_student_*`` tool goes through the consent gate, the in-process cache
+    that collapses a burst of identical lookups, and then reaches the student's
+    own campus session; it never touches a shared layer.
 
     Pass ``session`` when a request makes several of these calls, so they share
     one connection instead of spawning a campus server each.
     """
-    shared_ttl = _SHARED_TOOL_TTLS.get(tool_suffix)
-
-    # Shared catalog facts have a separate authority once the rollout flag is
-    # enabled.  They must remain readable for a student who has not connected
-    # their own Course Info credential: the published catalog is an
-    # organization-owned resource.  Personal ``get_student_*`` tools continue
-    # through the consent and credential gate below.
-    if shared_ttl is not None:
+    # Shared catalog facts have a separate authority.  They must remain
+    # readable for a student who has not connected their own Course Info
+    # credential: the published catalog is an organization-owned resource.
+    # Personal ``get_student_*`` tools continue through the consent and
+    # credential gate below.
+    if tool_suffix in _SHARED_TOOL_TTLS:
         await require_published_catalog_access(db, user_id)
         return await _read_published_tool(db, user_id, tool_suffix, values)
 
@@ -361,10 +320,10 @@ async def call_course_info(
         await require_catalog_access(db, user_id)
     else:
         await session.authorize()
-    identity, key_hash = catalog_key(tool_suffix, values)
-    # A shared answer must not be keyed by the student who happened to ask for
-    # it first, or every account would still pay for its own copy.
-    memory_key = identity if shared_ttl else (str(user_id), *identity)
+    identity = catalog_key(tool_suffix, values)[0]
+    # A personal answer is keyed by the student as well, so one student's
+    # lookup is never served to another.
+    memory_key = (str(user_id), *identity)
 
     # Which layer answered. Read here rather than set from inside ``load``,
     # because a caller that joins a fill already in flight never runs ``load``
@@ -374,24 +333,8 @@ async def call_course_info(
 
     async def load() -> Any:
         nonlocal source
-        if shared_ttl is None:
-            source = "campus"
-            return await _invoke(db, user_id, tool_suffix, values, session)
-        cached = await read_cached(key_hash)
-        # A row written before failures were recognised holds a tool's error
-        # sentence rather than a catalog page. Treated as a miss so it is read
-        # again and overwritten now, instead of serving an empty department
-        # listing to everyone for the rest of its thirty days.
-        if cached is not None and tool_error_text(cached) is None:
-            source = "database"
-            return cached
         source = "campus"
-        value = await _invoke(db, user_id, tool_suffix, values, session)
-        # owner_hash stays None: this row belongs to the catalog, not to the
-        # student who triggered the fetch, so erasing their data must not
-        # delete a course list every other student is reading.
-        await write_cached(key_hash, value, namespace=CATALOG_NAMESPACE, ttl_seconds=shared_ttl)
-        return value
+        return await _invoke(db, user_id, tool_suffix, values, session)
 
     started = time.monotonic()
     try:
@@ -408,17 +351,7 @@ async def call_course_info(
             tool=tool_suffix,
             duration_ms=round((time.monotonic() - started) * 1000),
             source=source,
-            shared=shared_ttl is not None,
         )
-
-
-def _published_catalog_reads_enabled() -> bool:
-    """Shared catalog facts always come from the reviewed catalog.
-
-    The raw Course Info path for shared tools was removed with the rollout
-    flag; the helper stays so the call sites read naturally.
-    """
-    return True
 
 
 async def require_published_catalog_access(db: AsyncSession, user_id: UUID) -> None:

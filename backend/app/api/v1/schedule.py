@@ -29,7 +29,6 @@ from app.campus.course_info import (
     call_course_info,
     catalog_session,
     department_options,
-    prefetch,
     section_numbers,
 )
 from app.core.digest import owner_digest, stable_digest
@@ -819,11 +818,6 @@ async def bulk_course_sections(
                 logger.info("bulk_sections_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"error": str(exc.detail)}
 
-        await prefetch(
-            ("get_course_info", {"department": owner, "semester": body.semester, "course": course})
-            for course, owner in expanded.values()
-        )
-
         for raw, (compact_course, lookup_department) in expanded.items():
             try:
                 data = await call_course_info(
@@ -878,13 +872,6 @@ async def bulk_constraints(
                 logger.info("bulk_constraints_skipped", course=raw, detail=str(exc.detail))
                 results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
 
-        # One database read for every course page in the batch, instead of one
-        # per course each opening its own session.
-        await prefetch(
-            ("get_course_info", {"department": owner, "semester": body.semester, "course": course})
-            for course, owner in expanded.values()
-        )
-
         async def load_course_info(raw: str, compact_course: str, lookup_department: str):
             try:
                 info = await call_course_info(
@@ -913,24 +900,6 @@ async def bulk_constraints(
             for raw, (compact_course, lookup_department) in expanded.items()
         ]
         course_info = {raw: info for raw, info in loaded if info is not _NOT_PRELOADED}
-
-        # Once the course pages reveal the section numbers, seed every section
-        # restriction from one persistent-cache query. Warm batches then avoid
-        # one database checkout per section (150 in the measured six-course
-        # case) before any verdict can be shown.
-        await prefetch(
-            (
-                "get_section_constraints",
-                {
-                    "department": expanded[raw][1],
-                    "semester": body.semester,
-                    "course": expanded[raw][0],
-                    "section": number,
-                },
-            )
-            for raw, info in course_info.items()
-            for number in section_numbers(info)
-        )
 
         async def check_course(raw: str, compact_course: str, lookup_department: str):
             try:
