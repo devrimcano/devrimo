@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock
 
 from app.db.models import StudentAcademicSnapshot
 from app.db.session import SessionLocal
-from app.planning.models import PlanChanges, PlanState
-from app.planning.proposals import proposal_changes
 from app.planning import service as planning_service
 from app.planning import workspace as planning_workspace
+from app.planning.models import PlanChanges, PlanState
+from app.planning.proposals import proposal_changes
 from app.planning.workspace import _apply_changes, projection_from_state, read_timetable, update_timetable
 from app.workspace.resources import ResourceRef
 from app.workspace.service import WorkspaceService
@@ -124,9 +124,6 @@ def test_projection_keeps_only_the_selected_untimed_section():
 
 
 async def test_mixed_published_proposal_saves_and_reads_untimed_course(monkeypatch):
-    from app.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
     user_id = new_user_id()
     term = "20261"
     now = datetime.now(UTC)

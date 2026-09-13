@@ -55,12 +55,7 @@ def current_term():
 
 
 def _catalog_source() -> str:
-    try:
-        from app.planning.catalog_service import published_catalog_reads_enabled
-
-        return "academic_catalog" if published_catalog_reads_enabled() else "course_info"
-    except Exception:
-        return "course_info"
+    return "academic_catalog"
 
 
 def envelope(ref: ResourceRef, data, *, source: str = "devrimo", freshness: str = "cached") -> dict:

@@ -162,10 +162,8 @@ async def test_concurrent_first_writes_are_ordered_by_revision(client):
 
 
 async def test_published_write_uses_server_credits_and_preserves_tentative_entries(monkeypatch):
-    from app.config import get_settings
     from app.db.models import StudentAcademicSnapshot
 
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
     user_id = new_user_id()
     term = "20261"
     fetched_at = datetime.now(UTC)
@@ -225,11 +223,9 @@ async def test_published_write_uses_server_credits_and_preserves_tentative_entri
 
 
 async def test_published_plan_keeps_explicitly_untimed_course_for_credit_planning(monkeypatch):
-    from app.config import get_settings
     from app.db.models import StudentAcademicSnapshot
     from app.planning.service import SemesterPlanRequest
 
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
     user_id = new_user_id()
     term = "20261"
     snapshot = StudentAcademicSnapshot(

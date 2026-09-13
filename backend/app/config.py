@@ -263,9 +263,7 @@ class Settings(BaseSettings):
     # change, not a rebuild.
     course_info_nav_elision: bool = True
 
-    # Enable published-only reads after administrators publish the initial catalog.
     # Ingestion can be enabled first so migration never exposes an unreviewed draft.
-    academic_catalog_reads_enabled: bool = False
     academic_catalog_ingestion_enabled: bool = False
     academic_catalog_registration_start: str = ""
     academic_catalog_registration_end: str = ""

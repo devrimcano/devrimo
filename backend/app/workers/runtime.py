@@ -32,7 +32,7 @@ async def _pass(kind):
 
         async with get_session_factory("catalog")() as db:
             swept = await sweep_expired_schedule_cache(db)
-        if get_settings().academic_catalog_ingestion_enabled or get_settings().academic_catalog_reads_enabled:
+        if get_settings().academic_catalog_ingestion_enabled:
             from app.academic_catalog.retention import sweep_failed_observations
 
             swept += await sweep_failed_observations()
@@ -43,12 +43,8 @@ async def _pass(kind):
             from app.academic_catalog.worker import run_once
 
             return await run_once()
-        if settings.academic_catalog_reads_enabled:
-            # Published mode must never fall back to the old raw-cache warmer.
-            return 0
-        from app.campus.warmer import warm_once
-
-        return await warm_once()
+        # Published mode must never fall back to the old raw-cache warmer.
+        return 0
     else:
         from app.researchers.worker import run_next
 
@@ -166,7 +162,11 @@ async def run(kind: str, stop_event: asyncio.Event | None = None) -> None:
     periods = {
         "directory": settings.admin_directory_sync_seconds,
         "retention": settings.schedule_cache_sweep_seconds,
-        "catalog": min(settings.catalog_warm_poll_seconds, 5) if settings.academic_catalog_ingestion_enabled else settings.catalog_warm_poll_seconds,
+        "catalog": (
+            min(settings.catalog_warm_poll_seconds, 5)
+            if settings.academic_catalog_ingestion_enabled
+            else settings.catalog_warm_poll_seconds
+        ),
         "researcher": 5,
     }
     worker_id = f"{service}:{os.getpid()}"

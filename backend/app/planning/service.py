@@ -372,9 +372,8 @@ def _published_mode() -> bool:
     """Read the catalog rollout switch lazily for this planning process."""
 
     try:
-        from app.config import get_settings
 
-        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
+        return True
     except Exception:
         return False
 
@@ -830,7 +829,10 @@ async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRe
                 rule_fresh = getattr(rule, "fresh", None)
                 if isinstance(rule, dict) and rule_fresh is None:
                     rule_fresh = rule.get("fresh", rule.get("freshness"))
-                if _published_mode() and (rule_status in {"unknown", "unavailable", "unverified", "stale"} or not _fresh_value(rule_fresh, default=False)):
+                if _published_mode() and (
+                    rule_status in {"unknown", "unavailable", "unverified", "stale"}
+                    or not _fresh_value(rule_fresh, default=False)
+                ):
                     met, prerequisite_reason = None, "prerequisite data could not be verified"
                 else:
                     met, prerequisite_reason = _prerequisite_met(

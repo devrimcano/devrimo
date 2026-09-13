@@ -286,9 +286,8 @@ def _validate_state(state: PlanState) -> None:
 
 def _published_mode() -> bool:
     try:
-        from app.config import get_settings
 
-        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
+        return True
     except Exception:
         return False
 
@@ -605,7 +604,9 @@ async def _validate_published_state(
             "pool": normalized_pool,
             "sections": normalized_sections,
             "catalog_release_id": release_id,
-            "academic_snapshot_fetched_at": snapshot.fetched_at if snapshot is not None else state.academic_snapshot_fetched_at,
+            "academic_snapshot_fetched_at": (
+                snapshot.fetched_at if snapshot is not None else state.academic_snapshot_fetched_at
+            ),
             "needs_revalidation": False,
         }
     )

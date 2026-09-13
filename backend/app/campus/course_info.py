@@ -353,7 +353,7 @@ async def call_course_info(
     # their own Course Info credential: the published catalog is an
     # organization-owned resource.  Personal ``get_student_*`` tools continue
     # through the consent and credential gate below.
-    if shared_ttl is not None and _published_catalog_reads_enabled():
+    if shared_ttl is not None:
         await require_published_catalog_access(db, user_id)
         return await _read_published_tool(db, user_id, tool_suffix, values)
 
@@ -413,23 +413,12 @@ async def call_course_info(
 
 
 def _published_catalog_reads_enabled() -> bool:
-    """Return the rollout switch without importing settings at module load.
+    """Shared catalog facts always come from the reviewed catalog.
 
-    Keeping this lookup lazy lets the Course Info unit tests and lightweight
-    worker modules import this adapter without constructing the full settings
-    object.  ``getattr`` is intentional during the migration window: an older
-    settings object means the published reader is off.
+    The raw Course Info path for shared tools was removed with the rollout
+    flag; the helper stays so the call sites read naturally.
     """
-
-    try:
-        from app.config import get_settings
-
-        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
-    except Exception:
-        # Configuration errors are handled by application startup. A helper
-        # call should not accidentally bypass the legacy, explicitly gated
-        # Course Info path while settings are unavailable.
-        return False
+    return True
 
 
 async def require_published_catalog_access(db: AsyncSession, user_id: UUID) -> None:

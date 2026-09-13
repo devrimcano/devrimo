@@ -9,17 +9,13 @@ either. The title path worked, which is what made it look like the catalog was
 missing the course.
 """
 
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.api.v1.schedule import (
     AiScheduleRequest,
     _course_code_matches,
-    _course_owner_for_search,
     _index_rows,
-    _match_courses,
-    _published_code_matches,
     _search_fold,
     _short_code,
 )
@@ -31,7 +27,7 @@ def _course(code: str, full_code: str) -> dict:
 
 
 def _indexed(*rows: tuple[str, str], abbreviation: str = "CENG"):
-    """The same (haystack, course) pairs both search paths are handed."""
+    """The same (haystack, course) pairs the published search is handed."""
     owner = departments.resolve(abbreviation)
     payload = {"courses": [{"course_code": full, "name": name} for full, name in rows]}
     return owner, _index_rows(payload, owner)
@@ -68,57 +64,26 @@ def test_matching_is_prefix_only():
     assert _course_code_matches(ceng, "331")
 
 
-def test_both_search_paths_answer_every_code_spelling():
-    """Flag state must not change which spellings work.
-
-    The published path and the legacy path are the same lookup, so each is
-    driven through the same matcher and the same index rows here.
-    """
-    owner, indexed = _indexed(("5710331", "COMPUTER ORGANIZATION"))
-    for digits in ("331", "5710331", "571"):
-        published = _published_code_matches(indexed, named=owner, digits=digits, home=owner)
-        legacy = _match_courses(
-            {"courses": [{"course_code": "5710331", "name": "COMPUTER ORGANIZATION"}]},
-            owner,
-            digits=digits,
-            title="",
-        )
-        assert [course["code"] for course in published] == ["CENG331"], digits
-        assert [course["code"] for course in legacy] == ["CENG331"], digits
-    assert _published_code_matches(indexed, named=None, digits="332", home=None) == []
-    assert _match_courses({"courses": [{"course_code": "5710331", "name": "X"}]}, owner, digits="332", title="") == []
+def test_a_query_without_digits_does_not_filter_by_code():
+    assert _course_code_matches(_course("CENG331", "5710331"), "")
 
 
-def test_legacy_full_code_search_uses_the_code_owner_not_the_home_department():
-    ceng = departments.resolve("CENG")
-    math = departments.resolve("MATH")
-    assert _course_owner_for_search(None, ceng, "2360119").code == math.code
-    assert _course_owner_for_search(None, ceng, "119").code == ceng.code
+def test_short_codes_drop_the_catalogs_zero_padding():
+    assert _short_code("2400101", "HIST") == "HIST101"
+    assert _short_code("5710331", "CENG") == "CENG331"
 
 
-async def test_legacy_full_code_search_fetches_the_owning_department(monkeypatch):
-    import app.api.v1.schedule as schedule
+def test_folded_search_reaches_turkish_letters_from_an_english_keyboard():
+    # Both sides are folded, and the k/ğ alternation is folded away with them:
+    # a student typing "muhendislik" is looking for "Mühendisliği".
+    assert _search_fold("Mühendislik") in _search_fold("Mühendisliği")
+    assert "tarih" in _search_fold("TARİHİ")
 
-    calls = []
 
-    @asynccontextmanager
-    async def catalog_session(_db, _user_id):
-        yield object()
-
-    async def call_course_info(_db, _user_id, tool, values, *, session=None):
-        calls.append((tool, values, session))
-        return {"courses": [{"course_code": "2360119", "name": "Calculus I"}]}
-
-    monkeypatch.setattr(schedule, "published_catalog_reads_enabled", lambda: False)
-    monkeypatch.setattr(schedule, "catalog_session", catalog_session)
-    monkeypatch.setattr(schedule, "call_course_info", call_course_info)
-    db = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(department="CENG", program_code=None)))
-    user = SimpleNamespace(id="user-1")
-
-    result = await schedule.search_courses(query="2360119", semester="20261", user=user, db=db)
-
-    assert calls[0][1] == {"department": "236", "semester": "20261"}
-    assert result["courses"][0]["code"] == "MATH119"
+def test_a_turkish_suffix_search_finds_the_title():
+    owner, indexed = _indexed(("5710331", "BİLGİSAYAR MÜHENDİSLİĞİ"))
+    haystack = indexed[0][0]
+    assert _search_fold("muhendislik") in haystack
 
 
 async def test_department_search_merges_partial_source_and_directory_matches(monkeypatch):
@@ -140,36 +105,6 @@ def test_ai_schedule_request_accepts_term_and_course_codes_compatibility_aliases
     request = AiScheduleRequest.model_validate({"term": "20261", "course_codes": ["MATH260"]})
     assert request.semester == "20261"
     assert [course.code for course in request.courses] == ["MATH260"]
-
-
-def test_a_query_without_digits_does_not_filter_by_code():
-    assert _course_code_matches(_course("CENG331", "5710331"), "")
-
-
-def test_short_codes_drop_the_catalogs_zero_padding():
-    assert _short_code("2400101", "HIST") == "HIST101"
-    assert _short_code("5710331", "CENG") == "CENG331"
-
-
-def test_folded_search_reaches_turkish_letters_from_an_english_keyboard():
-    # Both sides are folded, and the k/ğ alternation is folded away with them:
-    # a student typing "muhendislik" is looking for "Mühendisliği".
-    assert _search_fold("Mühendislik") in _search_fold("Mühendisliği")
-    assert "tarih" in _search_fold("TARİHİ")
-
-
-def test_a_turkish_suffix_search_finds_the_title():
-    owner, indexed = _indexed(("5710331", "BİLGİSAYAR MÜHENDİSLİĞİ"))
-    haystack = indexed[0][0]
-    wanted = _search_fold("muhendislik")
-    assert wanted in haystack
-    matches = _match_courses(
-        {"courses": [{"course_code": "5710331", "name": "BİLGİSAYAR MÜHENDİSLİĞİ"}]},
-        owner,
-        digits="",
-        title="muhendislik",
-    )
-    assert [course["code"] for course in matches] == ["CENG331"]
 
 
 def test_department_search_lists_directory_matches_the_source_misses():

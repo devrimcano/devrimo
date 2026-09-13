@@ -10,7 +10,6 @@ seconds in production and made opening the planner during a chat turn fail with
 a 409. It now reads the student's own curriculum listing directly.
 """
 
-import asyncio
 import re
 import time
 from datetime import UTC, datetime
@@ -29,16 +28,13 @@ from app.campus import curriculum, departments, prerequisites
 from app.campus.course_info import (
     CatalogSession,
     call_course_info,
-    catalog_key,
     catalog_session,
     department_options,
     prefetch,
     section_numbers,
 )
-from app.campus.warmer import record_wanted_courses
 from app.core.digest import owner_digest, stable_digest
-from app.core.persistent_cache import read_cached, read_many_cached, write_cached
-from app.core.ttl_cache import TTLCache
+from app.core.persistent_cache import read_cached, write_cached
 from app.db.models import StudentAcademicSnapshot, StudentContext
 from app.db.session import get_db
 from app.logging import get_logger
@@ -48,7 +44,6 @@ from app.planning.catalog_service import (
     constraint_rows,
     course_grade,
     load_student_profile,
-    published_catalog_reads_enabled,
     section_verdict,
 )
 from app.planning.catalog_service import expand_course_code as expand_catalog_course_code
@@ -501,22 +496,6 @@ def _published_code_matches(indexed: list[tuple[str, dict]], *, named, digits: s
     return matches
 
 
-def _course_owner_for_search(named, home, digits: str):
-    """Choose the owning department for the legacy catalog lookup.
-
-    A seven-digit METU code carries its owner in the first three digits. That
-    prefix is authoritative even when the student is enrolled elsewhere (and
-    even when a client supplied an inconsistent department abbreviation).
-    An unknown prefix is rejected by the caller rather than guessed from the
-    student's home department. Short numeric queries still use the home
-    department because they do not contain enough information to identify an
-    owner.
-    """
-    if len(digits) == 7:
-        return departments.by_code(digits[:3])
-    return named or home
-
-
 def _short_code(full_code: str, abbreviation: str) -> str:
     """``("2400101", "HIST")`` -> ``"HIST101"``.
 
@@ -640,97 +619,30 @@ async def search_courses(
     context = await db.get(StudentContext, user.id)
     home = departments.resolve((context.department or context.program_code) if context else None)
 
-    if published_catalog_reads_enabled():
-        # The published reader supports a semester-only listing. Keep both code
-        # and title search on that source so an old shared cache row can never
-        # leak into a published response.
-        indexed, covered = await _published_search_index(db, user.id, semester)
-        wanted = _search_fold(typed)
-        if named is not None or (digits and not letters):
-            # A code lookup is answered by the code itself, never by the folded
-            # haystack: "CENG 331" must not have to appear inside the stored
-            # "ceng331 ...", and a pasted seven-digit code has to match its full
-            # form rather than only its last four digits.
-            matches = _published_code_matches(indexed, named=named, digits=digits, home=home)
-            return {
-                "courses": matches[:40],
-                "searched_departments": len(covered),
-                "scope": "published_catalog",
-            }
-        courses = [course for haystack, course in indexed if wanted in haystack]
-        if home is not None:
-            courses.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
+    # The published reader supports a semester-only listing. Keep both code
+    # and title search on that source so an old shared cache row can never
+    # leak into a published response.
+    indexed, covered = await _published_search_index(db, user.id, semester)
+    wanted = _search_fold(typed)
+    if named is not None or (digits and not letters):
+        # A code lookup is answered by the code itself, never by the folded
+        # haystack: "CENG 331" must not have to appear inside the stored
+        # "ceng331 ...", and a pasted seven-digit code has to match its full
+        # form rather than only its last four digits.
+        matches = _published_code_matches(indexed, named=named, digits=digits, home=home)
         return {
-            "courses": courses[:40],
+            "courses": matches[:40],
             "searched_departments": len(covered),
             "scope": "published_catalog",
         }
-
-    # A code lookup: the letters name a department, or there are only digits.
-    if named is not None or (digits and not letters):
-        owner = _course_owner_for_search(named, home, digits)
-        if owner is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "Type a course code with its department (PHYS213), or set your department in Settings.",
-            )
-        async with catalog_session(db, user.id) as catalog:
-            payload = await call_course_info(
-                db, user.id, "list_program_courses",
-                {"department": owner.code, "semester": semester},
-                session=catalog,
-            )
-        courses = _match_courses(payload, owner, digits=digits, title="")
-        return {"courses": courses[:40], "searched_departments": 1, "scope": owner.abbreviation or owner.code}
-
-    # A title search, across whatever the cache already holds.
-    indexed, covered = await _search_index(semester)
-    extra: list[tuple[str, dict]] = []
-    if home is not None and home.code not in covered:
-        async with catalog_session(db, user.id) as catalog:
-            payload = await call_course_info(
-                db, user.id, "list_program_courses",
-                {"department": home.code, "semester": semester},
-                session=catalog,
-            )
-        extra = _index_rows(payload, home)
-    wanted = _search_fold(typed)
-    # Every department is scanned rather than stopping at the first sixty hits:
-    # breaking early ordered results by department id, so a match in a late
-    # department was invisible while an unrelated one filled the box.
-    courses = [course for haystack, course in (*indexed, *extra) if wanted in haystack]
-    # The student's own department first: an elective search is usually still
-    # anchored to what they are studying.
+    courses = [course for haystack, course in indexed if wanted in haystack]
     if home is not None:
         courses.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
     return {
         "courses": courses[:40],
-        "searched_departments": len(covered) + (1 if extra else 0),
-        "scope": "catalog",
+        "searched_departments": len(covered),
+        "scope": "published_catalog",
     }
-
-
-def _listing_key(department_code: str, semester: str) -> str:
-    """The cache key ``call_course_info`` stores a department listing under."""
-    return catalog_key("list_program_courses", {"department": department_code, "semester": semester})[1]
-
-
-async def _cached_listings(semester: str) -> dict[str, Any]:
-    """Every department listing already in the shared cache, by department code."""
-    if published_catalog_reads_enabled():
-        return {}
-    wanted = {_listing_key(entry.code, semester): entry.code for entry in departments.all_departments()}
-    found = await read_many_cached(list(wanted))
-    return {wanted[key]: payload for key, payload in found.items()}
-
-
-# The whole term's catalog, shaped and folded once. A title search used to pull
-# 153 department listings out of Postgres and re-fold every course title in all
-# of them, synchronously, on every keystroke of a 300 ms debounce. Ten minutes
-# is short next to the thirty-day lifetime of the listings underneath, so the
-# staleness this can introduce is a department the warmer added tonight not
-# being searchable until the top of the hour.
-_SEARCH_INDEX = TTLCache(ttl_seconds=10 * 60, max_entries=4)
 
 
 def _index_rows(payload: Any, owner: Any) -> list[tuple[str, dict]]:
@@ -757,44 +669,6 @@ def _index_rows(payload: Any, owner: Any) -> list[tuple[str, dict]]:
             },
         ))
     return rows
-
-
-async def _search_index(semester: str) -> tuple[list[tuple[str, dict]], set[str]]:
-    """Every cached department's courses for one term, and which departments those were.
-
-    The course dicts are shared with every request that searches this term, so
-    callers read them and never mutate them; the endpoint only ever puts them
-    in a response.
-    """
-
-    async def build() -> tuple[list[tuple[str, dict]], set[str]]:
-        listings = await _cached_listings(semester)
-        rows: list[tuple[str, dict]] = []
-        for code, payload in listings.items():
-            owner = departments.by_code(code)
-            if owner is None:
-                continue
-            rows.extend(_index_rows(payload, owner))
-        return rows, set(listings)
-
-    # Single-flighted, so a burst of keystrokes past the debounce builds it
-    # once and the rest wait on that build rather than starting their own.
-    return await _SEARCH_INDEX.run(semester, build)
-
-
-def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list[dict]:
-    """Rows of one department's listing that answer the query."""
-    wanted_title = _search_fold(title)
-    matches: list[dict] = []
-    for haystack, course in _index_rows(payload, owner):
-        # The shared matcher, so the legacy path answers "5710331" and
-        # "CENG 331" exactly as the published path does.
-        if not _course_code_matches(course, digits):
-            continue
-        if wanted_title and wanted_title not in haystack:
-            continue
-        matches.append(course)
-    return matches
 
 
 def _catalog_rows(payload: Any) -> list[dict]:
@@ -890,13 +764,6 @@ async def planner_inputs(
     for the requested courses avoids the previous course-by-course SQL loop
     and keeps sections and verdicts pinned to the same immutable release.
     """
-
-    if not published_catalog_reads_enabled():
-        sections = await bulk_course_sections(body, user, db)
-        constraints = await bulk_constraints(
-            BulkConstraintsRequest(**body.model_dump()), user, db
-        )
-        return {"sections": sections["courses"], "constraints": constraints["courses"]}
 
     expanded: dict[str, str] = {}
     async with catalog_session(db, user.id) as catalog:
@@ -1070,22 +937,14 @@ async def bulk_constraints(
                 results[raw] = {"course": raw, "error": str(exc.detail), "sections": {}}
                 return raw, _NOT_PRELOADED
 
-        if published_catalog_reads_enabled():
-            # The published reader performs SQL through this request's one
-            # AsyncSession. SQLAlchemy forbids concurrent operations on that
-            # session, and the catalog service already batches whole-plan
-            # reads; keep this endpoint's section pages serialized as well.
-            loaded = [
-                await load_course_info(raw, compact_course, lookup_department)
-                for raw, (compact_course, lookup_department) in expanded.items()
-            ]
-        else:
-            loaded = await asyncio.gather(
-                *(
-                    load_course_info(raw, compact_course, lookup_department)
-                    for raw, (compact_course, lookup_department) in expanded.items()
-                )
-            )
+        # The published reader performs SQL through this request's one
+        # AsyncSession. SQLAlchemy forbids concurrent operations on that
+        # session, and the catalog service already batches whole-plan
+        # reads; keep this endpoint's section pages serialized as well.
+        loaded = [
+            await load_course_info(raw, compact_course, lookup_department)
+            for raw, (compact_course, lookup_department) in expanded.items()
+        ]
         course_info = {raw: info for raw, info in loaded if info is not _NOT_PRELOADED}
 
         # Once the course pages reveal the section numbers, seed every section
@@ -1129,18 +988,10 @@ async def bulk_constraints(
             for raw, (compact_course, lookup_department) in expanded.items()
             if raw in course_info
         ]
-        if published_catalog_reads_enabled():
-            checked = [
-                await check_course(raw, compact_course, lookup_department)
-                for raw, compact_course, lookup_department in checks
-            ]
-        else:
-            checked = await asyncio.gather(
-                *(
-                    check_course(raw, compact_course, lookup_department)
-                    for raw, compact_course, lookup_department in checks
-                )
-            )
+        checked = [
+            await check_course(raw, compact_course, lookup_department)
+            for raw, compact_course, lookup_department in checks
+        ]
         results.update(checked)
     return {"courses": results}
 
@@ -1564,10 +1415,6 @@ async def curriculum_plan(
     # Only a result worth reusing. An empty list means something upstream gave
     # us nothing, and caching that turns one bad minute into six bad hours.
     if courses and complete:
-        # What a student asked for tonight is what the warmer should have ready
-        # tomorrow. Course codes only, never who wanted them.
-        if not published_catalog_reads_enabled():
-            await record_wanted_courses(body.semester.strip(), [course["code"] for course in courses])
         await write_cached(
             cache_key,
             response,

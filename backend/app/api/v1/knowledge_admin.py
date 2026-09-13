@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -13,14 +13,12 @@ from app.admin.auth import AdminPermission, AdminPrincipal, require
 from app.admin.directory import METU_ID
 from app.core.crypto import encrypt_secret
 from app.db.models import (
+    AdminRole,
     CampusIngestionJob,
     CampusKnowledgeRecord,
     CampusSource,
     CampusSourceRevision,
-    AdminRole,
     CourseGroupLink,
-    CourseOffering,
-    CourseRule,
     KnowledgeEmbeddingSettings,
     PlanningPolicy,
 )
@@ -912,60 +910,8 @@ async def replace_academic_catalog(
     principal: AdminPrincipal = Depends(require(AdminPermission.planning_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    from app.config import get_settings
 
-    if get_settings().academic_catalog_reads_enabled or get_settings().academic_catalog_ingestion_enabled:
-        return await _import_reviewed_catalog(body, principal, db)
-    if principal.role != AdminRole.super_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "The legacy shared catalog requires a super admin")
-    offerings_written = 0
-    for item in body.offerings:
-        code = "".join(item.course_code.upper().split())
-        row = (
-            await db.execute(
-                select(CourseOffering).where(
-                    CourseOffering.term == item.term,
-                    CourseOffering.course_code == code,
-                    CourseOffering.section == item.section,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            row = CourseOffering(
-                term=item.term,
-                course_code=code,
-                section=item.section,
-                title=item.title,
-                credits=item.credits,
-            )
-            db.add(row)
-        for key, value in item.model_dump(exclude={"course_code"}).items():
-            setattr(row, key, value)
-        row.fetched_at = datetime.now(UTC)
-        offerings_written += 1
-    for item in body.rules:
-        code = "".join(item.course_code.upper().split())
-        row = await db.get(CourseRule, code)
-        if row is None:
-            row = CourseRule(course_code=code, revision=1)
-            db.add(row)
-        else:
-            row.revision += 1
-        row.prerequisites = item.prerequisites
-        row.exclusions = item.exclusions
-        row.catalog_url = item.catalog_url
-        row.fetched_at = datetime.now(UTC)
-    await db.commit()
-    await record_event(
-        db,
-        actor_user_id=principal.user.id,
-        organization_id=_org(principal),
-        action="planning_catalog.import",
-        result="success",
-        reason=body.reason,
-        after={"offerings": offerings_written, "rules": len(body.rules)},
-    )
-    return {"offerings": offerings_written, "rules": len(body.rules)}
+    return await _import_reviewed_catalog(body, principal, db)
 
 
 async def _import_reviewed_catalog(body: AcademicCatalogIn, principal: AdminPrincipal, db: AsyncSession) -> dict:

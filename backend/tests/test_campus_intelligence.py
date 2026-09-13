@@ -39,7 +39,6 @@ from tests.conftest import auth_header, new_user_id
 async def test_scoped_admin_cannot_configure_network_providers_or_write_global_catalog(client, monkeypatch):
     admin_id = new_user_id()
     headers = auth_header(admin_id)
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", False)
     monkeypatch.setattr(get_settings(), "academic_catalog_ingestion_enabled", False)
     await client.get("/api/v1/profile", headers=headers)
     async with SessionLocal() as db:
