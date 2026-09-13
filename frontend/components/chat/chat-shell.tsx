@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { captureError, captureProductEvent, captureRequestFailure } from "@/components/posthog-analytics";
 import type { ChatConfirmation, ChatStreamError, ChatToolEvent } from "@/lib/api/chat";
-import { requestIdOf } from "@/lib/api/errors";
+import { requestIdOf, userFacingError } from "@/lib/api/errors";
 import { jsonFetch } from "@/lib/api/fetcher";
 import { REQUEST_ID_HEADER, newRequestId } from "@/lib/telemetry";
 import { Button } from "@/components/ui/button";
@@ -566,7 +566,7 @@ export function ChatShell() {
       captureProductEvent("chat_opened", { source: "history" });
     } catch (error) {
       captureError(error, { source: "chat_load_session" });
-      toast.error(error instanceof Error ? error.message : "Could not load session");
+      toast.error(userFacingError(error, pick));
     }
   }
 
@@ -592,7 +592,7 @@ export function ChatShell() {
       toast.success(pick({ tr: "Sohbet silindi.", en: "Chat deleted." }));
     } catch (error) {
       captureError(error, { source: "chat_delete_session" });
-      toast.error(error instanceof Error ? error.message : "Could not delete session");
+      toast.error(userFacingError(error, pick));
     }
   }
 
@@ -605,7 +605,7 @@ export function ChatShell() {
       toast.success(pick({ tr: `${deleted} sohbet silindi.`, en: `${deleted} chats deleted.` }));
     } catch (error) {
       captureError(error, { source: "chat_delete_all_sessions" });
-      toast.error(error instanceof Error ? error.message : "Could not delete chats");
+      toast.error(userFacingError(error, pick));
     }
   }
 

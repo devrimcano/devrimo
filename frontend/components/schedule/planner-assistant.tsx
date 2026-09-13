@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { newId } from "@/lib/new-id";
+import { userFacingError } from "@/lib/api/errors";
+import { captureError } from "@/components/posthog-analytics";
 
 /**
  * Ask the assistant about the schedule being built, without leaving the page.
@@ -77,7 +79,10 @@ export function PlannerAssistant({ className }: { className?: string }) {
               streamed += part.delta;
               setAnswer(streamed);
             } else if (part.type === "error" && part.errorText) {
-              setFailed(part.errorText);
+              // The stream carries the broker's technical English; record it
+              // for debugging and show the student a sentence they can act on.
+              captureError(new Error(part.errorText), { source: "planner_assistant_stream" });
+              setFailed(t("Yanıt oluşturulamadı. Birkaç saniye sonra tekrar dene.", "The answer could not be generated. Try again in a moment."));
             }
           } catch {
             // A partial or unrecognised part is not worth failing the answer for.
@@ -87,7 +92,8 @@ export function PlannerAssistant({ className }: { className?: string }) {
       if (!streamed) setFailed((current) => current || t("Yanıt alınamadı.", "No answer came back."));
     } catch (error) {
       if ((error as Error)?.name === "AbortError") return;
-      setFailed(error instanceof Error ? error.message : t("Bir şeyler ters gitti.", "Something went wrong."));
+      captureError(error, { source: "planner_assistant_request" });
+      setFailed(userFacingError(error, pick));
     } finally {
       setBusy(false);
     }

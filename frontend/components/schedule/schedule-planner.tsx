@@ -2332,7 +2332,11 @@ export function SchedulePlanner() {
         ) : planning.saveError ? (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             <span className="min-w-0 flex-1">
-              {planning.saveError}
+              {t("Program kaydedilemedi.", "The schedule could not be saved.")}
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs opacity-80">{t("Teknik ayrıntı", "Technical detail")}</summary>
+                <p className="mt-1 break-words text-xs opacity-80">{planning.saveError}</p>
+              </details>
               {/* A failure that cannot be replayed leaves the screen showing a
                   change the server does not have, and the raw message is the
                   broker's own English. Say what it means for the plan, and give

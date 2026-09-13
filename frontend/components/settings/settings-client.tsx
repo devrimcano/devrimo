@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { userFacingError } from "@/lib/api/errors";
 import {
   BrainIcon,
   CableIcon,
@@ -269,7 +270,7 @@ function AcademicDataManager() {
       // data was not saved. Re-read rather than assume the worst.
       void client.invalidateQueries({ queryKey: ["student", "academic-data"] });
       void client.invalidateQueries({ queryKey: ["student", "context"] });
-      toast.error(error.message);
+      toast.error(userFacingError(error, pick));
     },
   });
   const reset = useMutation({
@@ -279,7 +280,7 @@ function AcademicDataManager() {
       void client.invalidateQueries({ queryKey: ["student", "context"] });
       toast.success(pick({ tr: "Bölüm ve transkript verileri silindi.", en: "Department and transcript data deleted." }));
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error) => toast.error(userFacingError(error, pick)),
   });
   const latest = query.data?.snapshots[0];
   return <div className="rounded-xl border bg-background/55 p-4">
