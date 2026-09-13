@@ -520,8 +520,13 @@ async def schedule_due() -> int:
                 CatalogImportJob.created_at > now - timedelta(days=30),
             ).limit(1))
             if directory_job is None and discovery_jobs < settings.catalog_warm_discoveries_per_pass:
-                await catalog_service.enqueue_import(db, term.organization_id, term.term_code, reason="Scheduled catalog discovery",
-                                     payload={"scheduled": True, "discovery_only": True})
+                await catalog_service.enqueue_import(
+                    db,
+                    term.organization_id,
+                    term.term_code,
+                    reason="Scheduled catalog discovery",
+                    payload={"scheduled": True, "discovery_only": True},
+                )
                 discovery_jobs += 1
                 made += 1
         await db.commit()
@@ -578,7 +583,9 @@ async def run_once() -> CatalogPassResult:
         # there is one.
         _reclaimed_on_boot = True
         await _reclaim_leases_from_a_previous_process()
-    background_allowed = settings.catalog_warm_enabled and _within_hours(datetime.now(ISTANBUL), settings.catalog_warm_hours)
+    background_allowed = settings.catalog_warm_enabled and _within_hours(
+        datetime.now(ISTANBUL), settings.catalog_warm_hours
+    )
     scheduled_count = await schedule_due() if background_allowed else 0
     job = await _claim(manual_only=not background_allowed)
     if job is None:

@@ -541,7 +541,7 @@ async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monke
         await db.flush()
         courses = []
         drafts = []
-        for term, code in zip(terms, ("2402201", "2402202")):
+        for term, code in zip(terms, ("2402201", "2402202"), strict=True):
             course = CatalogCourse(organization_id=METU_ID, course_code=code, department="240")
             courses.append(course)
             db.add(course)
