@@ -362,7 +362,7 @@ async def read_timetable(
 @router.get("/departments/search")
 async def search_departments(
     query: str = Query(min_length=1, max_length=100),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     data = await call_course_info(db, user.id, "search_departments", {"query": query})
@@ -392,7 +392,7 @@ async def search_departments(
 async def courses(
     department: str = Query(min_length=1, max_length=20),
     semester: str = Query(min_length=1, max_length=20),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     return {
@@ -679,7 +679,7 @@ async def course_sections(
     course_code: str = Path(min_length=3, max_length=20),
     department: str = Query(min_length=1, max_length=20),
     semester: str = Query(min_length=1, max_length=20),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     async with catalog_session(db, user.id) as catalog:
@@ -722,7 +722,7 @@ class BulkSectionsRequest(BaseModel):
 @router.post("/planner-inputs")
 async def planner_inputs(
     body: BulkSectionsRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     """Return section times and student verdicts in one pool-sized read.
@@ -938,7 +938,7 @@ async def course_section_constraints(
     course_code: str = Path(min_length=3, max_length=20),
     department: str = Query(min_length=1, max_length=20),
     semester: str = Query(min_length=1, max_length=20),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     """Who may register for each section of this course, and whether this student may.
@@ -1368,4 +1368,3 @@ async def curriculum_plan(
             owner_hash=owner_hash,
         )
     return response
-

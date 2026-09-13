@@ -109,15 +109,7 @@ async def test_two_catalog_reads_for_one_student_never_overlap(monkeypatch):
         finally:
             depth[0] -= 1
 
-    async def read_cached(key_hash):
-        return None
-
-    async def write_cached(*args, **kwargs):
-        return None
-
     monkeypatch.setattr(course_info, "_call_toolkit", call_toolkit)
-    monkeypatch.setattr(course_info, "read_cached", read_cached)
-    monkeypatch.setattr(course_info, "write_cached", write_cached)
 
     user_id = uuid.uuid4()
     async with catalog_session(None, user_id) as session:

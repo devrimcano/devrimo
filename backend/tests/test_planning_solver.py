@@ -273,3 +273,44 @@ def test_server_legacy_converter_owns_aliases_clamps_and_generated_entries():
     assert (entry.day, entry.start_minute, entry.duration_minutes) == ("Mon", 1439, 1)
     assert state.pool[0].raw_code == "2360101"
     assert state.favorites[0][0].start_minute == 580
+
+    payload = state.to_payload()
+    assert payload["pool"][0]["raw_code"] == "2360101"
+    assert "rawCode" not in payload["pool"][0]
+    for persisted_entry in (payload["entries"][0], payload["favorites"][0][0]):
+        assert "start" not in persisted_entry
+        assert "duration" not in persisted_entry
+        assert "startMinute" not in persisted_entry
+        assert "durationMinutes" not in persisted_entry
+
+
+def test_persisted_plan_state_strips_top_level_legacy_aliases():
+    state = PlanState.from_legacy_payload(
+        {
+            "departmentLabel": "Computer Engineering",
+            "emptyDays": ["Fri"],
+            "avoidConflicts": False,
+            "catalogReleaseId": "release-1",
+            "academicSnapshotFetchedAt": "2026-09-14T08:00:00Z",
+            "needsRevalidation": True,
+        }
+    )
+
+    payload = state.to_payload()
+
+    assert payload["department_label"] == "Computer Engineering"
+    assert payload["empty_days"] == ["Fri"]
+    assert payload["avoid_conflicts"] is False
+    assert payload["catalog_release_id"] == "release-1"
+    assert payload["academic_snapshot_fetched_at"] == "2026-09-14T08:00:00Z"
+    assert payload["needs_revalidation"] is True
+    assert set(payload).isdisjoint(
+        {
+            "departmentLabel",
+            "emptyDays",
+            "avoidConflicts",
+            "catalogReleaseId",
+            "academicSnapshotFetchedAt",
+            "needsRevalidation",
+        }
+    )

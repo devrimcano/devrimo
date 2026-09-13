@@ -357,18 +357,18 @@ async def test_exact_reply_uses_approved_text_and_thread_headers(monkeypatch):
 @pytest.mark.asyncio
 async def test_revoked_catalog_consent_blocks_cached_answer(monkeypatch):
     from app.campus import course_info
-    from app.db.session import SessionLocal
 
     user_id = uuid4()
     monkeypatch.setattr("app.admin.directory.active_account", AsyncMock(return_value=object()))
     monkeypatch.setattr(course_info.campus_service, "get_credential", AsyncMock(return_value=None))
-    read_cache = AsyncMock(return_value={"cached": "private curriculum"})
-    monkeypatch.setattr(course_info, "read_cached", read_cache)
-    async with SessionLocal() as db:
-        with pytest.raises(HTTPException) as error:
-            await course_info.call_course_info(db, user_id, "get_course_info", {"course": "2360111"})
+    invoke = AsyncMock(return_value={"cached": "private curriculum"})
+    monkeypatch.setattr(course_info, "_invoke", invoke)
+    identity, _ = course_info.catalog_key("get_student_curriculum", {})
+    course_info._catalog.set((str(user_id), *identity), {"cached": "private curriculum"})
+    with pytest.raises(HTTPException) as error:
+        await course_info.call_course_info(None, user_id, "get_student_curriculum", {})
     assert error.value.status_code == 403
-    read_cache.assert_not_called()
+    invoke.assert_not_awaited()
 
 
 def test_pinned_webmail_patch_preserves_draft_and_exposes_thread_headers():

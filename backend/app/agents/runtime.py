@@ -71,7 +71,14 @@ class RateLimitConfig:
     catalog_per_minute: int
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        # The runtime-settings API has always namespaced these controls. Keep
+        # the internal names concise without leaking a different response
+        # contract to the admin client.
+        return {
+            "rate_limit_enabled": self.enabled,
+            "rate_limit_chat_per_minute": self.chat_per_minute,
+            "rate_limit_catalog_per_minute": self.catalog_per_minute,
+        }
 
 
 def default_rate_limit_config() -> RateLimitConfig:

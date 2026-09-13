@@ -17,6 +17,7 @@ from sqlalchemy.engine import make_url
 from app.auth.jwt import verify_access_token
 from app.config import Settings, get_settings
 from app.db.engine import database_pool_options, postgres_connect_args
+from app.db.models import AgentRuntimeSettings
 from app.db.release_roles import provision_release_roles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,42 @@ def test_migration_graph_has_one_head_and_revision_ids_fit_version_table():
     scripts = ScriptDirectory.from_config(config)
     assert scripts.get_heads() == ["0040_rate_limit_settings"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
+
+
+def test_legacy_runtime_columns_remain_mapped_for_source_only_rollback():
+    assert {"profile", "legacy_history_runs"} <= set(AgentRuntimeSettings.__table__.columns.keys())
+
+
+def test_legacy_purge_canonicalizes_all_persisted_planner_aliases():
+    migration = runpy.run_path(str(ROOT / "alembic/versions/0039_legacy_purge.py"))
+
+    assert migration["_canonical"](
+        {
+            "catalogReleaseId": "release-1",
+            "academicSnapshotFetchedAt": "2026-09-14T08:00:00Z",
+            "needsRevalidation": True,
+            "entries": [
+                {
+                    "start": 8,
+                    "duration": 2,
+                    "startMinute": 520,
+                    "durationMinutes": 110,
+                    "verificationStatus": "verified",
+                }
+            ],
+        }
+    ) == {
+        "catalog_release_id": "release-1",
+        "academic_snapshot_fetched_at": "2026-09-14T08:00:00Z",
+        "needs_revalidation": True,
+        "entries": [
+            {
+                "start_minute": 520,
+                "duration_minutes": 110,
+                "verification_status": "verified",
+            }
+        ],
+    }
 
 
 def test_public_migration_metadata_is_denied_even_with_supabase_default_grants():

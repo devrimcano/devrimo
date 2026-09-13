@@ -33,6 +33,53 @@ PlanOperation = Literal[
     "import_legacy",
 ]
 
+_PERSISTED_ALIASES = {
+    "stateVersion": "state_version",
+    "departmentLabel": "department_label",
+    "emptyDays": "empty_days",
+    "avoidConflicts": "avoid_conflicts",
+    "ignoreConstraints": "ignore_constraints",
+    "alternativeIndex": "alternative_index",
+    "favoriteIndex": "favorite_index",
+    "whatIf": "what_if",
+    "whatIfBackup": "what_if_backup",
+    "lockedSections": "locked_sections",
+    "unscheduledCourses": "unscheduled_courses",
+    "generationError": "generation_error",
+    "rawCode": "raw_code",
+    "selectedSection": "selected_section",
+    "isTentative": "tentative",
+    "verificationStatus": "verification_status",
+    "verificationReason": "verification_reason",
+    "restrictionOverrideScope": "restriction_override_scope",
+    "catalogReleaseId": "catalog_release_id",
+    "academicSnapshotFetchedAt": "academic_snapshot_fetched_at",
+    "needsRevalidation": "needs_revalidation",
+    "startMinute": "start_minute",
+    "durationMinutes": "duration_minutes",
+}
+
+
+def _canonical_payload(value: Any) -> Any:
+    """Strip compatibility aliases from the representation persisted in PostgreSQL."""
+
+    if isinstance(value, dict):
+        result = dict(value)
+        for legacy, canonical in _PERSISTED_ALIASES.items():
+            if legacy not in result:
+                continue
+            if canonical not in result:
+                result[canonical] = result[legacy]
+            del result[legacy]
+        if "start_minute" in result:
+            result.pop("start", None)
+        if "duration_minutes" in result:
+            result.pop("duration", None)
+        return {key: _canonical_payload(item) for key, item in result.items()}
+    if isinstance(value, list):
+        return [_canonical_payload(item) for item in value]
+    return value
+
 
 def _legacy_start(value: Any) -> int:
     """Convert the pre-canonical ``start`` hour into METU minutes.
@@ -210,19 +257,6 @@ class PlanMeeting(BaseModel):
             raise ValueError("meeting must end before midnight")
         return self
 
-    def to_legacy(self) -> dict[str, Any]:
-        """Return the compact shape understood by the existing grid and chat."""
-
-        return {
-            "day": self.day,
-            "start": self.start_minute // 60,
-            "duration": max(1, (self.duration_minutes + 59) // 60),
-            "room": self.room,
-            "start_minute": self.start_minute,
-            "duration_minutes": self.duration_minutes,
-        }
-
-
 class PlanSection(BaseModel):
     """Catalog section returned to planner clients in one typed shape."""
 
@@ -302,30 +336,6 @@ class PlanEntry(BaseModel):
             if self.verification_status == "verified":
                 self.verification_status = "tentative"
         return self
-
-    def to_legacy(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "code": self.code,
-            "name": self.name,
-            "section": self.section,
-            "day": self.day,
-            "start": self.start_minute // 60,
-            "duration": max(1, (self.duration_minutes + 59) // 60),
-            "room": self.room,
-            "credits": self.credits,
-            "color": self.color,
-            "kind": self.kind,
-            "instructor": self.instructor,
-            "start_minute": self.start_minute,
-            "duration_minutes": self.duration_minutes,
-            "tentative": self.tentative,
-            "verification_status": self.verification_status,
-            "verification_reason": self.verification_reason,
-            "restriction_override_scope": self.restriction_override_scope,
-            "catalog_release_id": self.catalog_release_id,
-        }
-
 
 class PlanCourse(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -477,7 +487,10 @@ class PlanState(BaseModel):
                 continue
             raw_code = _legacy_text(value.get("raw_code", value.get("rawCode", code)), code, limit=32)
             identity = "".join(code.upper().split())
-            existing = next((item for item in pool if "".join(str(item.get("code", "")).upper().split()) == identity), None)
+            existing = next(
+                (item for item in pool if "".join(str(item.get("code", "")).upper().split()) == identity),
+                None,
+            )
             if existing is not None:
                 existing["selected"] = True
                 existing["timing_status"] = "untimed"
@@ -602,32 +615,9 @@ class PlanState(BaseModel):
         return cls.model_validate(data)
 
     def to_payload(self) -> dict[str, Any]:
-        """Serialize the canonical state with compact legacy aliases included."""
+        """Serialize the canonical-only representation persisted in PostgreSQL."""
 
-        data = self.model_dump(mode="json")
-        data["entries"] = [entry.to_legacy() for entry in self.entries]
-        data["alternatives"] = [[entry.to_legacy() for entry in alternative] for alternative in self.alternatives]
-        data["favorites"] = [[entry.to_legacy() for entry in favorite] for favorite in self.favorites]
-        # Keep the old names for clients that have one release of the browser
-        # cached.  New clients use the snake-case canonical fields above.
-        data.update(
-            {
-                "departmentLabel": self.department_label,
-                "emptyDays": self.empty_days,
-                "avoidConflicts": self.avoid_conflicts,
-                "ignoreConstraints": self.ignore_constraints,
-                "alternativeIndex": self.alternative_index,
-                "favoriteIndex": self.favorite_index,
-                "catalogReleaseId": self.catalog_release_id,
-                "academicSnapshotFetchedAt": (
-                    self.academic_snapshot_fetched_at.isoformat()
-                    if self.academic_snapshot_fetched_at is not None
-                    else None
-                ),
-                "needsRevalidation": self.needs_revalidation,
-            }
-        )
-        return data
+        return _canonical_payload(self.model_dump(mode="json"))
 
 
 class PlanChanges(BaseModel):

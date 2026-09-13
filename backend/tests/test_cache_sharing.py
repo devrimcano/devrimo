@@ -28,35 +28,24 @@ def _empty_catalog():
 
 
 class _Layers:
-    """Stands in for the two cache layers and the campus, and records the traffic.
+    """Stand in for the personal campus path and record its traffic.
 
-    These used to be assertions about the *text* of ``call_course_info``, which
-    meant a refactor that preserved every property they care about still failed
-    them. What matters is where an answer goes, so that is what is checked.
+    Shared catalog reads now have their own published-database seam. Personal
+    reads retain only the per-user in-process cache, so the relevant boundary is
+    whether a request reaches the student's campus session at all.
     """
 
     def __init__(self, answer):
         self.answer = answer
-        self.reads: list[str] = []
-        self.writes: list[tuple[str, dict]] = []
         self.campus_calls = 0
 
     def install(self, monkeypatch):
         monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
 
-        async def read_cached(key_hash):
-            self.reads.append(key_hash)
-            return None
-
-        async def write_cached(key_hash, value, **kwargs):
-            self.writes.append((key_hash, kwargs))
-
         async def invoke(db, user_id, tool_suffix, values, session=None):
             self.campus_calls += 1
             return self.answer
 
-        monkeypatch.setattr(course_info, "read_cached", read_cached)
-        monkeypatch.setattr(course_info, "write_cached", write_cached)
         monkeypatch.setattr(course_info, "_invoke", invoke)
         return self
 
@@ -91,8 +80,8 @@ def test_a_shared_key_does_not_depend_on_who_asked():
     assert "user" not in " ".join(identity)
 
 
-async def test_the_second_student_is_served_the_first_student_answer(monkeypatch):
-    """The point of sharing, on the path that is left: personal calls stay apart.
+async def test_a_second_student_is_not_served_the_first_students_personal_answer(monkeypatch):
+    """Personal calls stay isolated even when their tool and arguments match.
 
     Shared catalog tools now read the published release, which is a database
     read rather than a campus fetch; the in-process layer still collapses two
@@ -109,15 +98,16 @@ async def test_the_second_student_is_served_the_first_student_answer(monkeypatch
 
 
 @pytest.mark.parametrize("tool", ["get_student_course_categories", "get_student_curriculum"])
-async def test_a_student_scoped_answer_never_reaches_the_persistent_layer(monkeypatch, tool):
-    """No shared TTL means no persistent traffic at all, not a private row."""
+async def test_a_student_scoped_answer_is_reused_only_for_that_student(monkeypatch, tool):
+    """No shared authority means only a per-student in-process entry is reused."""
     layers = _Layers({"course_categories": [{"id": "1-236"}]}).install(monkeypatch)
 
-    await course_info.call_course_info(None, uuid.uuid4(), tool, {})
-    assert layers.reads == []
-    assert layers.writes == []
+    first_user = uuid.uuid4()
+    await course_info.call_course_info(None, first_user, tool, {})
+    await course_info.call_course_info(None, first_user, tool, {})
+    assert layers.campus_calls == 1
 
-    # Nor may one student's curriculum be answered from another's memory entry.
+    # Another student's identical request must not reuse the first student's entry.
     await course_info.call_course_info(None, uuid.uuid4(), tool, {})
     assert layers.campus_calls == 2
 
@@ -141,6 +131,4 @@ async def test_a_shared_tool_never_reaches_the_campus_cache_layers(monkeypatch):
     answer = await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
 
     assert answer == ["published"]
-    assert layers.reads == []
-    assert layers.writes == []
     assert layers.campus_calls == 0

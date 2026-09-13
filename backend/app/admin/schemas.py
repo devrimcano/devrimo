@@ -46,8 +46,9 @@ class RuntimeSettingsIn(BaseModel):
     learning_enabled: bool
     input_token_price: float = Field(ge=0, le=1)
     output_token_price: float = Field(ge=0, le=1)
-    # Infrastructure switches. They default to off so an admin who only edits
-    # the agent defaults never turns request limits on by accident.
+    # These defaults keep the fields optional for older admin clients. The PUT
+    # handler uses ``model_fields_set`` so an omitted field preserves the
+    # current database/environment value instead of writing this default.
     rate_limit_enabled: bool = False
     rate_limit_chat_per_minute: int = Field(default=20, ge=0, le=100000)
     rate_limit_catalog_per_minute: int = Field(default=120, ge=0, le=100000)

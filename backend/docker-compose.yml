@@ -66,6 +66,9 @@ services:
       POSTHOG_DEBUG: "${POSTHOG_DEBUG:-false}"
       POSTHOG_INPUT_TOKEN_PRICE: "${POSTHOG_INPUT_TOKEN_PRICE:-0}"
       POSTHOG_OUTPUT_TOKEN_PRICE: "${POSTHOG_OUTPUT_TOKEN_PRICE:-0}"
+      RATE_LIMIT_ENABLED: "${RATE_LIMIT_ENABLED:-false}"
+      RATE_LIMIT_CHAT_PER_MINUTE: "${RATE_LIMIT_CHAT_PER_MINUTE:-20}"
+      RATE_LIMIT_CATALOG_PER_MINUTE: "${RATE_LIMIT_CATALOG_PER_MINUTE:-120}"
       # The local .env uses a relative path for non-container development;
       # inside Docker MCP working directories must use the writable volume.
       CAMPUS_MCP_ROOT: "${CAMPUS_MCP_ROOT:-/opt/mcp}"

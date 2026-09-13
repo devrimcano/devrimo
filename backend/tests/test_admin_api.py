@@ -84,7 +84,7 @@ async def test_runtime_settings_are_persisted_and_audited(client, monkeypatch):
         "learning_enabled": False,
         "input_token_price": 0.000003,
         "output_token_price": 0.000015,
-        "rate_limit_enabled": False,
+        "rate_limit_enabled": True,
         "rate_limit_chat_per_minute": 5,
         "rate_limit_catalog_per_minute": 60,
         "reason": "Validate a safer production default",
@@ -93,7 +93,22 @@ async def test_runtime_settings_are_persisted_and_audited(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["model_id"] == "openai/gpt-test"
     assert response.json()["revision"] == 2
-    assert response.json()["rate_limit_enabled"] is False
+    assert response.json()["rate_limit_enabled"] is True
+    assert response.json()["rate_limit_chat_per_minute"] == 5
+    assert response.json()["rate_limit_catalog_per_minute"] == 60
+
+    # A client loaded before these fields existed can still update the agent
+    # defaults without silently disabling the infrastructure control.
+    legacy_body = {
+        key: value
+        for key, value in body.items()
+        if key not in {"rate_limit_enabled", "rate_limit_chat_per_minute", "rate_limit_catalog_per_minute"}
+    }
+    legacy_body["model_id"] = "openai/gpt-test-2"
+    legacy_body["reason"] = "Update the model from an older admin client"
+    response = await client.put("/api/v1/admin/runtime-settings", headers=auth_header(user_id), json=legacy_body)
+    assert response.status_code == 200
+    assert response.json()["rate_limit_enabled"] is True
     assert response.json()["rate_limit_chat_per_minute"] == 5
     assert response.json()["rate_limit_catalog_per_minute"] == 60
 

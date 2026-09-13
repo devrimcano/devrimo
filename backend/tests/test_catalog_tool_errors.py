@@ -87,26 +87,26 @@ async def test_a_failed_tool_raises_instead_of_answering_with_its_error():
     assert "semester form was not found" in raised.value.detail
 
 
-async def test_a_failure_is_never_written_to_the_shared_cache(monkeypatch):
-    """Thirty days of an empty department listing started here."""
-    writes: list[str] = []
+async def test_a_failure_is_never_retained_in_the_personal_cache(monkeypatch):
+    """A failed personal read must be retried instead of becoming an answer."""
     monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
-    monkeypatch.setattr(course_info, "read_cached", AsyncMock(return_value=None))
-
-    async def write_cached(key_hash, value, **kwargs):
-        writes.append(key_hash)
-
-    async def invoke(db, user_id, tool_suffix, values, session=None):
-        raise HTTPException(502, "SAIS is unreachable")
-
-    monkeypatch.setattr(course_info, "write_cached", write_cached)
+    invoke = AsyncMock(
+        side_effect=[
+            HTTPException(502, "SAIS is unreachable"),
+            {"semesters": [{"code": "20261"}]},
+        ]
+    )
     monkeypatch.setattr(course_info, "_invoke", invoke)
 
     with pytest.raises(HTTPException):
         await course_info.call_course_info(
             None, USER, "get_student_curriculum", {"department": "236", "semester": "20261"}
         )
-    assert writes == []
+    answer = await course_info.call_course_info(
+        None, USER, "get_student_curriculum", {"department": "236", "semester": "20261"}
+    )
+    assert answer == {"semesters": [{"code": "20261"}]}
+    assert invoke.await_count == 2
 
 
 def test_an_unreadable_board_reports_what_was_received_instead():

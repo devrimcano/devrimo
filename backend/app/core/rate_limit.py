@@ -14,6 +14,7 @@ tracked here is a bug in the caller, and the dependency refuses it at import
 time rather than silently letting requests through.
 """
 
+import math
 import time
 from collections import deque
 
@@ -57,7 +58,7 @@ def retry_after_seconds(scope: str, user_id: str, per_minute: int) -> int | None
 
     stamps = scope_windows.get(user_id)
     if stamps is not None and len(stamps) >= per_minute:
-        return max(1, int(WINDOW_SECONDS - (now - stamps[0])))
+        return max(1, math.ceil(WINDOW_SECONDS - (now - stamps[0])))
     if stamps is None:
         stamps = scope_windows[user_id] = deque()
     stamps.append(now)

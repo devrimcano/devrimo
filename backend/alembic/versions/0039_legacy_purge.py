@@ -5,7 +5,9 @@ published path never reads it. `course_offerings` and `course_rules` are empty
 and only the deleted flag-off planner path ever wrote them. Planner payloads
 were written in a dual shape (camelCase aliases beside canonical snake_case
 fields); this converts the stored rows to canonical-only so the aliases can be
-removed from the writer afterwards.
+removed from the writer in the same release. The retired runtime-setting
+columns remain in place for source-only rollback compatibility; active code no
+longer reads or writes them.
 
 The conversion rule is mechanical: a camelCase key whose snake_case sibling
 exists in the same object is removed; a known camelCase alias without a sibling
@@ -39,6 +41,14 @@ _ALIASES = {
     "unscheduledCourses": "unscheduled_courses",
     "generationError": "generation_error",
     "rawCode": "raw_code",
+    "selectedSection": "selected_section",
+    "isTentative": "tentative",
+    "verificationStatus": "verification_status",
+    "verificationReason": "verification_reason",
+    "restrictionOverrideScope": "restriction_override_scope",
+    "catalogReleaseId": "catalog_release_id",
+    "academicSnapshotFetchedAt": "academic_snapshot_fetched_at",
+    "needsRevalidation": "needs_revalidation",
     "startMinute": "start_minute",
     "durationMinutes": "duration_minutes",
 }
@@ -83,15 +93,9 @@ def upgrade():
     _convert_payloads(bind, "student_timetables", ["user_id", "term"])
     op.drop_table("course_offerings")
     op.drop_table("course_rules")
-    with op.batch_alter_table("agent_runtime_settings") as batch:
-        batch.drop_column("legacy_history_runs")
-        batch.drop_column("profile")
 
 
 def downgrade():
-    with op.batch_alter_table("agent_runtime_settings") as batch:
-        batch.add_column(sa.Column("legacy_history_runs", sa.Integer(), nullable=True))
-        batch.add_column(sa.Column("profile", sa.String(length=32), nullable=True))
     op.create_table(
         "course_offerings",
         sa.Column("id", sa.Uuid(), nullable=False),
