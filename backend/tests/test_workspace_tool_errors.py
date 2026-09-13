@@ -110,7 +110,10 @@ async def test_a_failed_call_raises_the_message_and_not_a_task_group(monkeypatch
             return None
 
         async def call_tool(self, _name, _arguments):
-            return _result(is_error=True, text="Course Info tool schema is unsupported; missing arguments: semester_code")
+            return _result(
+                is_error=True,
+                text="Course Info tool schema is unsupported; missing arguments: semester_code",
+            )
 
     class _Streams:
         async def __aenter__(self):
@@ -129,6 +132,67 @@ async def test_a_failed_call_raises_the_message_and_not_a_task_group(monkeypatch
     assert raised.value.status_code == 502
     assert "semester_code" in raised.value.detail
     assert "TaskGroup" not in raised.value.detail
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "detail", "expected_status"),
+    (
+        (
+            "read",
+            {"resource": {"kind": "catalog.prerequisites", "key": "EE 201"}},
+            "Course is not available in the published release",
+            404,
+        ),
+        (
+            "read",
+            {"resource": {"kind": "catalog.prerequisites", "key": "EE 201"}},
+            "host not found",
+            502,
+        ),
+        (
+            "search",
+            {"resource": {"kind": "catalog.department"}, "query": "EE"},
+            "Course is not available in the published release",
+            502,
+        ),
+    ),
+)
+async def test_only_an_authoritative_catalog_read_miss_becomes_404(
+    monkeypatch, name, arguments, detail, expected_status
+):
+    client = WorkspaceClient("http://workspace.invalid/mcp/")
+
+    class _Session:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, _name, _arguments):
+            return _result(is_error=True, text=detail)
+
+    class _Streams:
+        async def __aenter__(self):
+            return (object(), object())
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("app.workspace.client.ClientSession", _Session)
+    monkeypatch.setattr("app.workspace.client.streamable_http_client", lambda *_args, **_kwargs: _Streams())
+
+    with trusted_workspace_token("a-token"):
+        with pytest.raises(HTTPException) as raised:
+            await client.call(name, arguments)
+
+    assert raised.value.status_code == expected_status
 
 
 async def test_a_successful_call_still_returns_its_content(monkeypatch):

@@ -3,13 +3,23 @@ name: Deploy production
 on:
   push:
     branches: [main]
+  # The suite found a broken assertion on a branch that had no checks at all.
+  # PRs now run the same verify job; the deploy half stays main-only below.
+  pull_request:
+    paths:
+      - "backend/**"
+      - "scripts/**"
+      - "frontend/**"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: devrimo-production
+  # PR runs must not queue behind (or block) a production deploy. Pushes keep
+  # the one-at-a-time production group; deploys never overlap.
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'devrimo-production' }}
   cancel-in-progress: false
 
 jobs:
@@ -58,6 +68,25 @@ jobs:
           python -m unittest discover -s scripts/tests
           bash -n scripts/deploy-vps.sh
 
+      # The tree predates the Ruff config: 165 findings, almost all long lines
+      # in older files. The gate is therefore "no new findings" - lint the
+      # Python files this PR changes - so the existing debt can be cleaned on
+      # its own schedule instead of blocking every change behind it. The three
+      # findings this branch introduced are fixed rather than ignored.
+      - name: Lint changed backend files
+        if: github.event_name == 'pull_request'
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements-dev.txt
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          files=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}" HEAD -- '*.py' ':(exclude)vendor_patches/*' | sed 's|^backend/||')
+          if [ -z "$files" ]; then
+            echo "no changed Python files"
+            exit 0
+          fi
+          echo "$files"
+          ruff check $files
+
       - name: Test backend
         working-directory: backend
         env:
@@ -87,6 +116,7 @@ jobs:
 
   deploy:
     needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: production

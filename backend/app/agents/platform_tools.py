@@ -48,10 +48,10 @@ def build_platform_tools(user_id: UUID) -> list:
     async def read(resource: ResourceRef) -> dict:
         """Read one resource by kind.
 
-        Course kinds take the course code in `key`, written either way a student does - "EE 201" or
-        5670201 - or a department code/abbreviation in `department`; `term` may be left out and defaults to
-        the active term. To find a course by name, read catalog.department first, then read catalog.courses
-        with that department. student.registered_schedule is SAIS; planning.timetable is the editable week.
+        Course kinds take the code in `key` ("EE 201" or 5670201) or a department in `department`; `term`
+        defaults to the active term. Find a course by name via catalog.department, then catalog.courses.
+        student.registered_schedule is SAIS; planning.timetable is the editable week. Set `expand` true
+        only when the student asked for every item after a partial list.
         """
         return await workspace.read(ResourceRef.model_validate(resource))
 
@@ -69,15 +69,13 @@ def build_platform_tools(user_id: UUID) -> list:
     ) -> dict:
         """Save an editable resource against its current revision with a unique request key.
 
-        `changes` is a JSON object whose shape follows `resource.kind`:
-          - planning.timetable: the `application` object a prior `plan` returned,
-            copied verbatim - it already holds the exact entries to write. Do not
-            hand-build this from section data.
+        `changes` follows `resource.kind`:
+          - planning.timetable: the `application` object a prior `plan` returned, copied verbatim - it
+            already holds the exact entries to write.
           - my.preferences / my.update_state: the shape that key expects.
-          - my.memory: {"memories": [{"id": ..., "content": ...}]}. Read my.memory first and send the whole
-            list with its revision; the server replaces it atomically, so a partial list deletes the rest.
-        The server validates `changes` against the kind and rejects anything it
-        does not recognise, so pass what the resource expects and nothing more.
+          - my.memory: {"memories": [{"content": ...}]}. Read my.memory first and send the whole list with
+            its revision; the server replaces it atomically, so a partial list deletes the rest. `id` is
+            optional for new entries.
         """
         return await workspace.update(
             ResourceRef.model_validate(resource),

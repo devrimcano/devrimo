@@ -185,6 +185,10 @@ class Settings(BaseSettings):
     # How many prior runs of a session are replayed into the model's context.
     agent_history_runs: int = 10
     scholar_history_runs: int = 3
+    # Prefetch the one cached catalog read a focused question usually needs, so
+    # the turn does not spend a model step asking for it. Off without a deploy
+    # if a read ever misbehaves.
+    scholar_prefetch_enabled: bool = True
     agent_tool_call_limit: int = 10
     agent_compress_tool_results: bool = False
     agent_compress_tool_results_limit: int = 3

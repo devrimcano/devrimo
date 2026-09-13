@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,13 +75,37 @@ _NOT_PRELOADED = object()
 class AiScheduleCourse(BaseModel):
     code: str = Field(min_length=3, max_length=20)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_code_string(cls, value: Any) -> Any:
+        """Normalize the legacy ``course_codes`` list item shape.
+
+        The old planner client sent a list of strings while the newer request
+        schema names each item (``{"code": "EE201"}``). Keeping the
+        normalization at the item boundary lets one field accept both wire
+        spellings without weakening the validated internal representation.
+        """
+        return {"code": value} if isinstance(value, str) else value
+
 
 class AiScheduleRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     # Kept for compatibility with already-open browser tabs. The server ignores
     # it and reads the setup-owned StudentContext instead.
     department: str | None = Field(default=None, max_length=20)
-    semester: str = Field(min_length=4, max_length=20)
-    courses: list[AiScheduleCourse] = Field(default_factory=list, max_length=20)
+    semester: str = Field(
+        min_length=4, max_length=20, validation_alias=AliasChoices("semester", "term")
+    )
+    # ``course_codes`` was the legacy list-of-strings spelling. It is a
+    # validation alias, not a second source of planning truth: the curriculum
+    # endpoint reads the setup-owned SAIS board and currently ignores this
+    # compatibility list after validation.
+    courses: list[AiScheduleCourse] = Field(
+        default_factory=list,
+        max_length=20,
+        validation_alias=AliasChoices("courses", "course_codes"),
+    )
 
 
 class PrerequisiteRejectionOut(BaseModel):
@@ -382,7 +406,24 @@ async def search_departments(
     data = await call_course_info(db, user.id, "search_departments", {"query": query})
     # ``departments`` is the normalized list the schedule page's picker binds to;
     # ``data`` stays for callers that want the untouched catalog payload.
-    return {"data": data, "departments": department_options(data)}
+    # The catalog source matches a code or an English name. A student typing the
+    # abbreviation ("CENG") or a Turkish name ("Bilgisayar") got an empty picker
+    # for departments that plainly exist, so the directory answers when the
+    # source misses.
+    source_options = department_options(data)
+    # Course Info can return a valid but partial match set. The bundled
+    # directory is the complete identity map for codes/abbreviations and may
+    # know additional Turkish-name matches, so merge it instead of consulting
+    # it only when the source happened to return zero rows.
+    options_by_code = {
+        str(option.get("code")): option
+        for option in source_options
+        if isinstance(option, dict) and option.get("code")
+    }
+    for option in _directory_department_options(query):
+        options_by_code.setdefault(str(option["code"]), option)
+    options = list(options_by_code.values())[:20]
+    return {"data": data, "departments": options}
 
 
 @router.get("/courses")
@@ -415,6 +456,67 @@ async def _expand_course(
     return compact, owner.code
 
 
+def _course_code_matches(course: dict, digits: str) -> bool:
+    """Whether a typed digit string names this course.
+
+    Three forms have to land: the short code ("CENG331"), the seven-digit code
+    ("5710331") and a bare number ("331"). The old comparison looked only at the
+    last four digits, so a pasted seven-digit code matched nothing, and the
+    free-text gate rejected "CENG 331" because the stored haystack is "ceng331"
+    with no space - both spellings a student actually types.
+
+    Matching is by prefix, never by suffix: the planner's contract is that
+    "PHYS21" narrows to PHYS 210 and PHYS 213, and a suffix match would let
+    "31" reach CENG 331 and fill the forty-result limit with unrelated courses.
+    """
+    if not digits:
+        return True
+    full = re.sub(r"[^0-9]", "", str(course.get("full_code") or ""))
+    short = re.sub(r"[^0-9]", "", str(course.get("code") or ""))
+    if len(digits) >= 7:
+        return full == digits or short == digits
+    if short.startswith(digits):
+        return True
+    if len(full) == 7:
+        trimmed = full[3:].lstrip("0") or "0"
+        if trimmed.startswith(digits) or full.startswith(digits):
+            return True
+    return False
+
+
+def _published_code_matches(indexed: list[tuple[str, dict]], *, named, digits: str, home) -> list[dict]:
+    """Code lookup on the published index, through the shared matcher.
+
+    The same matcher the legacy path uses, so a spelling that works with
+    published reads enabled works with them disabled too.
+    """
+    matches = [
+        course
+        for _, course in indexed
+        if _course_code_matches(course, digits)
+        and (named is None or course["department"] in {named.abbreviation, named.code})
+    ]
+    if home is not None:
+        matches.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
+    return matches
+
+
+def _course_owner_for_search(named, home, digits: str):
+    """Choose the owning department for the legacy catalog lookup.
+
+    A seven-digit METU code carries its owner in the first three digits. That
+    prefix is authoritative even when the student is enrolled elsewhere (and
+    even when a client supplied an inconsistent department abbreviation).
+    An unknown prefix is rejected by the caller rather than guessed from the
+    student's home department. Short numeric queries still use the home
+    department because they do not contain enough information to identify an
+    owner.
+    """
+    if len(digits) == 7:
+        return departments.by_code(digits[:3])
+    return named or home
+
+
 def _short_code(full_code: str, abbreviation: str) -> str:
     """``("2400101", "HIST")`` -> ``"HIST101"``.
 
@@ -437,11 +539,35 @@ _SEARCH_FOLD = str.maketrans(
 def _search_fold(text: str) -> str:
     """Lowercased with Turkish letters folded, for comparing typed text.
 
-    "Tarih" must reach "TARİHİ" and "muhendislik" must reach "Mühendisliği";
-    casefold alone does neither, and a student typing on an English keyboard
-    is the normal case rather than the exception.
+    "Tarih" must reach "TARİHİ" and "Mühendislik" must reach "Mühendisliği";
+    casefold alone does neither, and a student typing on an English keyboard is
+    the normal case rather than the exception. Word-final "k" folds to "g" as
+    well, because Turkish alternates the two in exactly that position -
+    mühendislik/mühendisliği - and without it the query and the title meet as
+    "muhendislik" and "muhendisligi" and never match.
     """
-    return str(text).translate(_SEARCH_FOLD).casefold()
+    folded = str(text).translate(_SEARCH_FOLD).casefold()
+    return re.sub(r"k\b", "g", folded)
+
+
+def _directory_department_options(query: str) -> list[dict]:
+    """Departments whose abbreviation or name matches, straight from the directory.
+
+    Lists every candidate rather than resolving to one: "Bilgisayar" names both
+    Computer Engineering and Computer Education, and the picker should show both
+    instead of guessing or returning nothing.
+    """
+    wanted = _search_fold(query)
+    if not wanted:
+        return []
+    found = [
+        {"code": department.code, "name": department.name_en or department.name_tr}
+        for department in departments.all_departments()
+        if wanted in _search_fold(department.abbreviation)
+        or wanted in _search_fold(department.name_en)
+        or wanted in _search_fold(department.name_tr)
+    ]
+    return found[:20]
 
 
 async def _published_search_index(
@@ -521,22 +647,11 @@ async def search_courses(
         indexed, covered = await _published_search_index(db, user.id, semester)
         wanted = _search_fold(typed)
         if named is not None or (digits and not letters):
-            matches = [
-                course
-                for haystack, course in indexed
-                if (
-                    not digits
-                    or re.sub(r"[^0-9]", "", course["code"]).startswith(digits)
-                    or re.sub(r"[^0-9]", "", course["full_code"])[3:].startswith(digits)
-                )
-                and (not wanted or wanted in haystack)
-            ]
-            if named is not None:
-                matches = [
-                    course
-                    for course in matches
-                    if course["department"] in {named.abbreviation, named.code}
-                ]
+            # A code lookup is answered by the code itself, never by the folded
+            # haystack: "CENG 331" must not have to appear inside the stored
+            # "ceng331 ...", and a pasted seven-digit code has to match its full
+            # form rather than only its last four digits.
+            matches = _published_code_matches(indexed, named=named, digits=digits, home=home)
             return {
                 "courses": matches[:40],
                 "searched_departments": len(covered),
@@ -553,7 +668,7 @@ async def search_courses(
 
     # A code lookup: the letters name a department, or there are only digits.
     if named is not None or (digits and not letters):
-        owner = named or home
+        owner = _course_owner_for_search(named, home, digits)
         if owner is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -672,7 +787,9 @@ def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list
     wanted_title = _search_fold(title)
     matches: list[dict] = []
     for haystack, course in _index_rows(payload, owner):
-        if digits and not re.sub(r"[^0-9]", "", course["code"]).startswith(digits):
+        # The shared matcher, so the legacy path answers "5710331" and
+        # "CENG 331" exactly as the published path does.
+        if not _course_code_matches(course, digits):
             continue
         if wanted_title and wanted_title not in haystack:
             continue
@@ -739,16 +856,25 @@ async def course_sections(
 
 
 class BulkConstraintsRequest(BaseModel):
-    semester: str = Field(min_length=1, max_length=20)
+    # `term` and `course_codes` are accepted as spellings of the same fields.
+    # The API grew both names for one thing - and so did the failures: an agent
+    # sending the other spelling got "A semester/term is required" for a request
+    # that named the term. The validation alias is invisible in the schema, so
+    # the published contract keeps one name while both keep working.
+    model_config = ConfigDict(populate_by_name=True)
+
+    semester: str = Field(min_length=1, max_length=20, validation_alias=AliasChoices("semester", "term"))
     # The curriculum is a couple of dozen courses at most. The cap is here so a
     # crafted request cannot turn one HTTP call into hundreds of SAIS fetches.
-    courses: list[str] = Field(min_length=1, max_length=40)
+    courses: list[str] = Field(min_length=1, max_length=40, validation_alias=AliasChoices("courses", "course_codes"))
     department: str | None = Field(default=None, max_length=20)
 
 
 class BulkSectionsRequest(BaseModel):
-    semester: str = Field(min_length=1, max_length=20)
-    courses: list[str] = Field(min_length=1, max_length=40)
+    model_config = ConfigDict(populate_by_name=True)
+
+    semester: str = Field(min_length=1, max_length=20, validation_alias=AliasChoices("semester", "term"))
+    courses: list[str] = Field(min_length=1, max_length=40, validation_alias=AliasChoices("courses", "course_codes"))
     department: str | None = Field(default=None, max_length=20)
 
 
@@ -1004,10 +1130,16 @@ async def bulk_constraints(
             if raw in course_info
         ]
         if published_catalog_reads_enabled():
-            checked = [await check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks]
+            checked = [
+                await check_course(raw, compact_course, lookup_department)
+                for raw, compact_course, lookup_department in checks
+            ]
         else:
             checked = await asyncio.gather(
-                *(check_course(raw, compact_course, lookup_department) for raw, compact_course, lookup_department in checks)
+                *(
+                    check_course(raw, compact_course, lookup_department)
+                    for raw, compact_course, lookup_department in checks
+                )
             )
         results.update(checked)
     return {"courses": results}
