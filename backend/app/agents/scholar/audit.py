@@ -74,6 +74,85 @@ _GENERIC_SUCCESS = re.compile(
     r"\b(?:yapıldı|yapildi|tamamlandı|tamamlandi|gerçekleştirildi|gerceklestirildi)\b",
     re.IGNORECASE,
 )
+
+_CLAIM_PHRASES = frozenset(
+    phrase.casefold()
+    for phrases in _CLAIM_OPERATIONS.values()
+    for phrase in phrases
+) | frozenset(
+    {
+        "yapıldı",
+        "yapildi",
+        "tamamlandı",
+        "tamamlandi",
+        "gerçekleştirildi",
+        "gerceklestirildi",
+    }
+)
+
+# Prefixes that can become an affirmative English assertion once a claim verb
+# arrives in a later model delta. Turkish finite claim verbs are detected from
+# their own partial word; the nouns below cover the common object-first form
+# ("Tercihini kaydettim") before that verb starts arriving.
+_ASSERTION_SUBJECTS = (
+    "i",
+    "we",
+    "email",
+    "message",
+    "draft",
+    "preference",
+    "change",
+    "plan",
+    "schedule",
+    "timetable",
+    "the email",
+    "the message",
+    "the draft",
+    "the preference",
+    "the change",
+    "the plan",
+    "the schedule",
+    "the timetable",
+    "tercih",
+    "tercihin",
+    "tercihini",
+    "değişiklik",
+    "degisiklik",
+    "plan",
+    "program",
+    "takvim",
+    "kayıt",
+    "kayit",
+    "e-posta",
+    "eposta",
+    "mail",
+    "mesaj",
+)
+_ASSERTION_PREFIXES = frozenset(
+    prefix
+    for subject in _ASSERTION_SUBJECTS
+    for prefix in (
+        subject,
+        f"{subject} have",
+        f"{subject} has",
+        f"{subject} have been",
+        f"{subject} has been",
+        f"{subject} was",
+        f"{subject} were",
+        f"{subject} is",
+        f"{subject} are",
+        f"{subject} just",
+        f"{subject} already",
+        f"{subject} successfully",
+        f"{subject} was just",
+        f"{subject} was already",
+        f"{subject} was successfully",
+        f"{subject} has just",
+        f"{subject} has already",
+        f"{subject} has successfully",
+        f"{subject} has been successfully",
+    )
+)
 _NEGATED_ASSERTION = re.compile(
     r"\b(?:not|never|no|didn['’]?t|did\s+not|don['’]?t|do\s+not|cannot|can['’]?t|"
     r"couldn['’]?t|could\s+not|degil|değil|hayir|hayır|demedim|söylemedim|soylemedim|"
@@ -283,6 +362,45 @@ def unsupported_claims(answer: str, completed_tools) -> list[str]:
     completed = completed_operations(completed_tools)
     return sorted(
         {text.casefold() for text, operation, _start, _end in claim_matches(answer) if operation not in completed}
+    )
+
+
+def may_become_claim(fragment: str) -> bool:
+    """Whether an unfinished fragment must wait for a later model delta.
+
+    This is deliberately narrower than buffering every incomplete sentence.
+    It recognizes partial claim words and the small set of grammatical leads
+    accepted by :func:`claim_matches`, so ordinary model deltas keep their
+    original streaming behavior.
+    """
+    if not fragment:
+        return False
+    # A sentence boundary inside a still-open quote is not a real answer
+    # boundary. Retain the quote until its closing delimiter arrives so claim
+    # examples remain eligible for the quoted-text exclusion as a whole.
+    if (
+        fragment.count("`") % 2
+        or fragment.count('"') % 2
+        or fragment.count("“") > fragment.count("”")
+        or fragment.count("‘") > fragment.count("’")
+    ):
+        return True
+    clause = re.split(r"[.!?\n]", fragment)[-1].casefold().strip()
+    if not clause:
+        return False
+
+    # A claim word or phrase may itself be split at any character boundary.
+    # Check each word-boundary suffix so "Email del" retains only until the
+    # following delta can prove whether it is "delivered".
+    for match in re.finditer(r"\b", clause):
+        suffix = clause[match.start():].strip()
+        if suffix and any(phrase.startswith(suffix) for phrase in _CLAIM_PHRASES):
+            return True
+
+    # Keep an assertion lead only while it still exactly describes a possible
+    # lead. Once it becomes ordinary prose ("I think"), it streams normally.
+    return clause in _ASSERTION_PREFIXES or any(
+        prefix.startswith(clause) for prefix in _ASSERTION_PREFIXES
     )
 
 

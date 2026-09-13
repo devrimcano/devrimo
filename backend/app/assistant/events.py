@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.agents.scholar.audit import (
     completed_tool_names,
     jargon,
+    may_become_claim,
     remove_unsupported_claims,
     unsupported_claims,
 )
@@ -180,7 +181,7 @@ async def _serialize_events(
         return preamble.strip() or None
 
     def _safe_sentences(content: str) -> list[str]:
-        """Return complete sentences safe to emit, retaining blocked text."""
+        """Return safe text now, retaining only possible mutation claims."""
         nonlocal pending_blocked, pending_text
         combined = pending_text + content
         pending_text = ""
@@ -204,8 +205,15 @@ async def _serialize_events(
         if trailing:
             if blocked:
                 kept.append(trailing)
-            else:
+            elif trailing.isspace() and output:
+                output[-1] += trailing
+            elif unsupported_claims(trailing, completed_tools):
                 pending_text = trailing
+                blocked = True
+            elif may_become_claim(trailing):
+                pending_text = trailing
+            else:
+                output.append(trailing)
         pending_text = "".join(kept) + pending_text
         pending_blocked = blocked
         return output

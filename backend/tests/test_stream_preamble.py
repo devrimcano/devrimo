@@ -132,6 +132,12 @@ async def test_a_turn_that_calls_no_tool_is_never_held_back():
     assert len(frames) == 2, "a toolless reply was buffered instead of streamed"
 
 
+async def test_unpunctuated_safe_deltas_keep_their_stream_boundaries():
+    chunks = await _collect([_content("[echo]"), _content(" Merhaba")])
+    frames = [_answer([chunk]) for chunk in chunks if _answer([chunk])]
+    assert frames == ["[echo]", " Merhaba"]
+
+
 async def test_the_first_announcement_survives_and_the_rest_do_not():
     """Before the first tool call there is no way to tell the two apart.
 
@@ -200,6 +206,11 @@ async def test_a_claim_split_at_any_boundary_never_reaches_the_student():
 
 async def test_an_incomplete_claim_prefix_is_preserved_as_ordinary_text():
     assert _answer(await _collect([_content("kay")])) == "kay"
+
+
+async def test_a_split_claim_inside_a_quote_is_not_rewritten_or_leaked():
+    chunks = await _collect([_content('He wrote "I '), _content('saved it."')])
+    assert _answer(chunks) == 'He wrote "I saved it."'
 
 
 async def test_mutation_claims_are_operation_and_result_specific():
