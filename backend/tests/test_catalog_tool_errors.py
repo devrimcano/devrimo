@@ -104,32 +104,9 @@ async def test_a_failure_is_never_written_to_the_shared_cache(monkeypatch):
 
     with pytest.raises(HTTPException):
         await course_info.call_course_info(
-            None, USER, "list_program_courses", {"department": "236", "semester": "20261"}
+            None, USER, "get_student_curriculum", {"department": "236", "semester": "20261"}
         )
     assert writes == []
-
-
-async def test_a_poisoned_row_heals_on_the_next_read(monkeypatch):
-    """Rows written before this check existed must not be served for weeks."""
-    fresh = [{"course_code": "5670201", "name": "Circuit Theory"}]
-    writes: list = []
-    monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
-    monkeypatch.setattr(course_info, "read_cached", AsyncMock(return_value=MCP_ERROR))
-
-    async def write_cached(key_hash, value, **kwargs):
-        writes.append(value)
-
-    async def invoke(db, user_id, tool_suffix, values, session=None):
-        return fresh
-
-    monkeypatch.setattr(course_info, "write_cached", write_cached)
-    monkeypatch.setattr(course_info, "_invoke", invoke)
-
-    answered = await course_info.call_course_info(
-        None, USER, "list_program_courses", {"department": "236", "semester": "20261"}
-    )
-    assert answered == fresh
-    assert writes == [fresh]
 
 
 def test_an_unreadable_board_reports_what_was_received_instead():

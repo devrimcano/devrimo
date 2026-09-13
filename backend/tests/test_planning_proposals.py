@@ -219,6 +219,10 @@ async def test_mixed_published_proposal_saves_and_reads_untimed_course(monkeypat
 
 
 async def test_proposal_is_unsaved_and_applies_through_revisioned_update(client, monkeypatch):
+    async def passthrough(_db, _user_id, _term, state):
+        return state
+
+    monkeypatch.setattr(planning_workspace, "_validate_published_state", passthrough)
     user = new_user_id()
     headers = auth_header(user)
     path = "/api/v1/schedule/timetable?term=20261"

@@ -28,7 +28,11 @@ def _entry(entry_id: str = "math-mon") -> dict:
     }
 
 
-async def test_timetable_revision_idempotency_conflict_undo_and_user_scope(client):
+async def test_timetable_revision_idempotency_conflict_undo_and_user_scope(client, monkeypatch):
+    async def passthrough(_db, _user_id, _term, state):
+        return state
+
+    monkeypatch.setattr(planning_workspace, "_validate_published_state", passthrough)
     user_id = new_user_id()
     other_user_id = new_user_id()
     headers = auth_header(user_id)
@@ -87,7 +91,11 @@ async def test_timetable_revision_idempotency_conflict_undo_and_user_scope(clien
     assert undone.json()["state"]["entries"] == []
 
 
-async def test_first_edit_seeds_and_undoes_an_existing_projection(client):
+async def test_first_edit_seeds_and_undoes_an_existing_projection(client, monkeypatch):
+    async def passthrough(_db, _user_id, _term, state):
+        return state
+
+    monkeypatch.setattr(planning_workspace, "_validate_published_state", passthrough)
     user_id = new_user_id()
     headers = auth_header(user_id)
     term = "20261"
@@ -137,7 +145,11 @@ async def test_first_edit_seeds_and_undoes_an_existing_projection(client):
     assert [entry["code"] for entry in undone.json()["state"]["entries"]] == ["HIST 2201"]
 
 
-async def test_concurrent_first_writes_are_ordered_by_revision(client):
+async def test_concurrent_first_writes_are_ordered_by_revision(client, monkeypatch):
+    async def passthrough(_db, _user_id, _term, state):
+        return state
+
+    monkeypatch.setattr(planning_workspace, "_validate_published_state", passthrough)
     user_id = new_user_id()
     headers = auth_header(user_id)
     term = "20261"

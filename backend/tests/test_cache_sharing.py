@@ -92,23 +92,20 @@ def test_a_shared_key_does_not_depend_on_who_asked():
 
 
 async def test_the_second_student_is_served_the_first_student_answer(monkeypatch):
-    """The point of sharing: one fetch, and the row is keyed the same both times."""
+    """The point of sharing, on the path that is left: personal calls stay apart.
+
+    Shared catalog tools now read the published release, which is a database
+    read rather than a campus fetch; the in-process layer still collapses two
+    identical personal reads for one student.
+    """
     layers = _Layers(["a course"]).install(monkeypatch)
 
-    answer = await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
+    answer = await course_info.call_course_info(None, uuid.uuid4(), "get_student_curriculum", {})
     assert answer == ["a course"]
     assert layers.campus_calls == 1
 
-    # In memory it is already shared, so a second student costs nothing at all.
-    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
-    assert layers.campus_calls == 1
-
-    # And past the process cache they still meet on one persistent row, which is
-    # what survives a restart and what makes the sharing worth anything.
-    course_info._catalog.purge(lambda key: True)
-    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
-    assert len(set(layers.reads)) == 1
-    assert len({key for key, _ in layers.writes}) == 1
+    await course_info.call_course_info(None, uuid.uuid4(), "get_student_curriculum", {})
+    assert layers.campus_calls == 2
 
 
 @pytest.mark.parametrize("tool", ["get_student_course_categories", "get_student_curriculum"])
@@ -125,12 +122,25 @@ async def test_a_student_scoped_answer_never_reaches_the_persistent_layer(monkey
     assert layers.campus_calls == 2
 
 
-async def test_catalog_rows_are_written_unowned(monkeypatch):
-    """owner_hash None is what stops one student's erasure deleting the catalog."""
+async def test_a_shared_tool_never_reaches_the_campus_cache_layers(monkeypatch):
+    """Shared catalog facts come from the published release, not this cache."""
     layers = _Layers(["a course"]).install(monkeypatch)
+    monkeypatch.setattr(
+        course_info,
+        "require_published_catalog_access",
+        AsyncMock(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        course_info,
+        "_read_published_tool",
+        AsyncMock(return_value=["published"]),
+        raising=False,
+    )
 
-    await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
-    assert layers.writes
-    for _, kwargs in layers.writes:
-        assert kwargs["namespace"] == course_info.CATALOG_NAMESPACE
-        assert kwargs.get("owner_hash") is None
+    answer = await course_info.call_course_info(None, uuid.uuid4(), "list_program_courses", dict(SHARED_VALUES))
+
+    assert answer == ["published"]
+    assert layers.reads == []
+    assert layers.writes == []
+    assert layers.campus_calls == 0
