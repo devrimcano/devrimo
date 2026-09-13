@@ -719,6 +719,7 @@ export function SchedulePlanner() {
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [alternativesOpen, setAlternativesOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
@@ -1726,8 +1727,8 @@ export function SchedulePlanner() {
         ));
       } else if (solved.state.alternatives.length > 1) {
         toast.success(t(
-          `${solved.state.alternatives.length} alternatif program bulundu. Oklarla aralarında geçiş yap.`,
-          `${solved.state.alternatives.length} possible schedules found. Use the arrows to switch between them.`,
+          `${solved.state.alternatives.length} alternatif program bulundu. Listeden birini seç.`,
+          `${solved.state.alternatives.length} possible schedules found. Pick one from the list.`,
         ));
       } else if (!unavailable.length && !unpublished.length && !restricted.length && !unplaced.length) {
         toast.success(t("Tek bir çakışmasız program mümkün.", "Exactly one conflict-free schedule is possible."));
@@ -2190,6 +2191,43 @@ export function SchedulePlanner() {
           </ul>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFavoritesOpen(false)}>{t("Kapat", "Close")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={alternativesOpen} onOpenChange={setAlternativesOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("Alternatif programlar", "Alternative schedules")}</DialogTitle>
+            <DialogDescription>
+              {t("Çakışmasız bulunan haftalar. Birini seçtiğinde ekrandaki program onunla değişir.", "The conflict-free weeks that were found. Picking one replaces the schedule on screen.")}
+            </DialogDescription>
+          </DialogHeader>
+          {/* Arrows alone told nobody how many options there were or what
+              distinguished them; a list answers both. */}
+          <ul className="max-h-[50vh] space-y-2 overflow-y-auto">
+            {alternatives.map((saved, index) => {
+              const summary = favoriteSummary(saved);
+              const current = index === alternativeIndex;
+              return (
+                <li key={index} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {t(`${index + 1}. alternatif`, `Option ${index + 1}`)}
+                      {current ? <span className="text-primary ml-2 text-xs font-semibold">{t("ekranda", "on screen")}</span> : null}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {t(`${summary.courses} ders · ${summary.credits} kredi`, `${summary.courses} courses · ${summary.credits} credits`)}
+                      {summary.free.length ? t(` · boş: ${summary.free.join(", ")}`, ` · free: ${summary.free.join(", ")}`) : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" disabled={current} onClick={() => { showAlternative(index); setAlternativesOpen(false); }}>{current ? t("Seçili", "Selected") : t("Göster", "Show")}</Button>
+                </li>
+              );
+            })}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAlternativesOpen(false)}>{t("Kapat", "Close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -2664,10 +2702,13 @@ export function SchedulePlanner() {
                   {alternatives.length > 1 ? (
                   <div className="flex min-w-0 max-w-full items-center gap-0.5 rounded-md border bg-background px-0.5">
                     <Button size="icon" variant="ghost" className="size-8" aria-label={t("Önceki alternatif", "Previous option")} onClick={() => showAlternative(alternativeIndex - 1)}><ChevronLeftIcon /></Button>
-                    <span className="min-w-0 truncate px-1 text-xs tabular-nums" aria-live="polite">
-                      {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
-                      {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
-                    </span>
+                    <Button size="sm" variant="ghost" className="h-8 min-w-0 px-1.5 text-xs" aria-haspopup="dialog" onClick={() => setAlternativesOpen(true)}>
+                      <span className="min-w-0 truncate tabular-nums" aria-live="polite">
+                        {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
+                        {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
+                      </span>
+                      <ChevronDownIcon className="size-3.5 shrink-0" />
+                    </Button>
                     <Button size="icon" variant="ghost" className="size-8" aria-label={t("Sonraki alternatif", "Next option")} onClick={() => showAlternative(alternativeIndex + 1)}><ChevronRightIcon /></Button>
                   </div>
                   ) : null}
