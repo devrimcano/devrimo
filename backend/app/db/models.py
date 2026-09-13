@@ -142,6 +142,11 @@ class AgentRuntimeSettings(Base):
     input_token_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_token_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Rate limits are infrastructure: NULL means "use the environment default",
+    # and the environment default is off until launch.
+    rate_limit_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rate_limit_chat_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_catalog_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

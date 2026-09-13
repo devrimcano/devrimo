@@ -376,6 +376,15 @@ class Settings(BaseSettings):
     agentos_admin_scope: str = "agentos:admin"
     agentos_cors_origins: str = "https://os.agno.com"
 
+    # --- Request rate limits ------------------------------------------------
+    # Built now, switched on later: the project is not public yet, so the
+    # limits default to off. When enabled, they count per account inside a
+    # one-minute window; 0 means "no limit for this scope". The admin panel
+    # can change all three without a deploy.
+    rate_limit_enabled: bool = False
+    rate_limit_chat_per_minute: int = 20
+    rate_limit_catalog_per_minute: int = 120
+
     @model_validator(mode="after")
     def _fixtures_are_development_only(self) -> "Settings":
         """Fixture mode outside development or test is a configuration error.

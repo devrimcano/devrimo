@@ -46,4 +46,9 @@ class RuntimeSettingsIn(BaseModel):
     learning_enabled: bool
     input_token_price: float = Field(ge=0, le=1)
     output_token_price: float = Field(ge=0, le=1)
+    # Infrastructure switches. They default to off so an admin who only edits
+    # the agent defaults never turns request limits on by accident.
+    rate_limit_enabled: bool = False
+    rate_limit_chat_per_minute: int = Field(default=20, ge=0, le=100000)
+    rate_limit_catalog_per_minute: int = Field(default=120, ge=0, le=100000)
     reason: str = Field(min_length=3, max_length=1000)

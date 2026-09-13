@@ -60,3 +60,42 @@ async def get_runtime_config(db: AsyncSession) -> AgentRuntimeConfig:
         ),
         revision=row.revision if row else 0,
     )
+
+
+@dataclass(frozen=True)
+class RateLimitConfig:
+    """The request windows the API enforces, off until the row says otherwise."""
+
+    enabled: bool
+    chat_per_minute: int
+    catalog_per_minute: int
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def default_rate_limit_config() -> RateLimitConfig:
+    settings = get_settings()
+    return RateLimitConfig(
+        enabled=settings.rate_limit_enabled,
+        chat_per_minute=settings.rate_limit_chat_per_minute,
+        catalog_per_minute=settings.rate_limit_catalog_per_minute,
+    )
+
+
+async def get_rate_limit_config(db: AsyncSession) -> RateLimitConfig:
+    settings = get_settings()
+    row = await db.get(AgentRuntimeSettings, "default")
+    return RateLimitConfig(
+        enabled=row.rate_limit_enabled if row and row.rate_limit_enabled is not None else settings.rate_limit_enabled,
+        chat_per_minute=(
+            row.rate_limit_chat_per_minute
+            if row and row.rate_limit_chat_per_minute is not None
+            else settings.rate_limit_chat_per_minute
+        ),
+        catalog_per_minute=(
+            row.rate_limit_catalog_per_minute
+            if row and row.rate_limit_catalog_per_minute is not None
+            else settings.rate_limit_catalog_per_minute
+        ),
+    )

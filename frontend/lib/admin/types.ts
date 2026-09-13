@@ -122,6 +122,9 @@ export type RuntimeSettings = {
   learning_enabled: boolean;
   input_token_price: number;
   output_token_price: number;
+  rate_limit_enabled: boolean;
+  rate_limit_chat_per_minute: number;
+  rate_limit_catalog_per_minute: number;
   revision: number;
   has_database_override: boolean;
   updated_at: string | null;

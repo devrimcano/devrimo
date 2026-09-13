@@ -84,12 +84,18 @@ async def test_runtime_settings_are_persisted_and_audited(client, monkeypatch):
         "learning_enabled": False,
         "input_token_price": 0.000003,
         "output_token_price": 0.000015,
+        "rate_limit_enabled": False,
+        "rate_limit_chat_per_minute": 5,
+        "rate_limit_catalog_per_minute": 60,
         "reason": "Validate a safer production default",
     }
     response = await client.put("/api/v1/admin/runtime-settings", headers=auth_header(user_id), json=body)
     assert response.status_code == 200
     assert response.json()["model_id"] == "openai/gpt-test"
     assert response.json()["revision"] == 2
+    assert response.json()["rate_limit_enabled"] is False
+    assert response.json()["rate_limit_chat_per_minute"] == 5
+    assert response.json()["rate_limit_catalog_per_minute"] == 60
 
     audit = await client.get("/api/v1/admin/audit", headers=auth_header(user_id))
     assert audit.status_code == 200

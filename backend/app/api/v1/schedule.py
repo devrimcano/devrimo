@@ -21,6 +21,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.rate_limit import rate_limited
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthenticatedUser
 from app.campus import curriculum, departments, prerequisites
@@ -553,7 +554,7 @@ async def _published_search_index(
 async def search_courses(
     query: str = Query(min_length=2, max_length=60),
     semester: str = Query(min_length=1, max_length=20),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Courses matching a code or a title, for the add-course box.
@@ -786,7 +787,7 @@ async def planner_inputs(
 @router.post("/sections")
 async def bulk_course_sections(
     body: BulkSectionsRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     """Section lists for several courses at once.
@@ -841,7 +842,7 @@ async def bulk_course_sections(
 @router.post("/constraints")
 async def bulk_constraints(
     body: BulkConstraintsRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ):
     """Eligibility verdicts for every section of several courses at once.
@@ -1261,7 +1262,7 @@ async def _curriculum_courses(
 @router.post("/curriculum", response_model=CurriculumPlanResponse)
 async def curriculum_plan(
     body: AiScheduleRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("catalog")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """The courses this student still has to take, offered this term.

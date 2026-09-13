@@ -26,7 +26,7 @@ def test_migration_graph_has_one_head_and_revision_ids_fit_version_table():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0039_legacy_purge"]
+    assert scripts.get_heads() == ["0040_rate_limit_settings"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 
