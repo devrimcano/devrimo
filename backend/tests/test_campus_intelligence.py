@@ -34,7 +34,7 @@ from app.planning.service import _prerequisite_met, upsert_academic_snapshot
 from tests.conftest import auth_header, new_user_id
 
 
-async def test_scoped_admin_cannot_configure_network_providers_or_write_global_catalog(client, monkeypatch):
+async def test_scoped_admin_writes_org_drafts_but_cannot_touch_network_or_embedding(client, monkeypatch):
     admin_id = new_user_id()
     headers = auth_header(admin_id)
     monkeypatch.setattr(get_settings(), "academic_catalog_ingestion_enabled", False)
@@ -46,11 +46,16 @@ async def test_scoped_admin_cannot_configure_network_providers_or_write_global_c
         await db.commit()
     response = await client.put("/api/v1/admin/planning/catalog", headers=headers, json={
         "reason": "Attempt global catalog import",
-        "offerings": [{"term": "20261", "course_code": "CENG213", "section": "1",
+        "offerings": [{"term": "20261", "course_code": "5710213", "section": "1",
                        "title": "Scoped change", "credits": 4, "schedule": []}],
         "rules": [],
     })
-    assert response.status_code == 403, response.text
+    # The endpoint no longer writes a planner-readable global catalog: an
+    # org-scoped admin gets reviewable drafts, and publication is a separate
+    # reviewed step.
+    assert response.status_code == 200, response.text
+    assert response.json()["published"] is False
+    assert response.json()["draft_ids"]
     response = await client.put("/api/v1/admin/embedding-settings", headers=headers, json={
         "provider": "local", "model": "fixture", "base_url": "http://127.0.0.1:8080/v1",
         "dimensions": 384, "batch_size": 2,
