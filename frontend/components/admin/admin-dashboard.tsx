@@ -118,7 +118,7 @@ export function AdminDashboard({ principal }: { principal: AdminPrincipal }) {
 
   return (
     <MotionConfig reducedMotion="user">
-      <main className="campus-grid flex min-h-0 flex-1 overflow-hidden bg-background">
+      <main className="flex min-h-0 flex-1 overflow-hidden bg-background">
         <aside className="hidden w-64 shrink-0 border-r border-sidebar-border bg-sidebar/95 lg:flex lg:flex-col">
           <AdminSidebar available={available} activeId={active.id} principal={principal} onSelect={selectSection} />
         </aside>

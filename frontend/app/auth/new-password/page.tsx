@@ -83,7 +83,7 @@ export default function NewPasswordPage() {
   }
 
   return (
-    <main id="main-content" tabIndex={-1} className="campus-grid flex min-h-svh items-center justify-center px-4 py-10 outline-none">
+    <main id="main-content" tabIndex={-1} className="flex min-h-svh items-center justify-center px-4 py-10 outline-none">
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-2xl tracking-[-0.03em]">

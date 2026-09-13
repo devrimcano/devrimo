@@ -25,7 +25,7 @@ export default function NotFound() {
   return (
     <main
       id="main-content"
-      className="campus-grid flex min-h-svh flex-col items-center justify-center gap-6 px-6 py-16 text-center"
+      className="flex min-h-svh flex-col items-center justify-center gap-6 px-6 py-16 text-center"
     >
       <p className="text-primary font-mono text-sm font-semibold tracking-[0.2em]">404</p>
 
