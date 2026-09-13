@@ -1,9 +1,12 @@
 """Recommendations follow the actual SAIS Curriculum semester board."""
+
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
+
 import app.api.v1.schedule as schedule
 from app.campus import curriculum
 
@@ -191,7 +194,9 @@ async def test_an_unreachable_sais_serves_the_last_curriculum_it_gave(monkeypatc
         yield None
 
     stored = {
-        "courses": [{"code": "5670201", "display_code": "EE 201", "name": "Circuit Theory", "credits": 4.0, "sections": []}],
+        "courses": [
+            {"code": "5670201", "display_code": "EE 201", "name": "Circuit Theory", "credits": 4.0, "sections": []}
+        ],
         "warnings": [],
         "prerequisite_rejections": [],
         "partial": False,
