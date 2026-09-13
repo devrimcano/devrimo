@@ -557,7 +557,7 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
         "/api/v1/admin/course-groups",
         headers=auth_header(admin_id),
         json={
-            "course_code": "CENG213",
+            "course_code": "5710213",
             "section": "1",
             "invite_url": "https://chat.whatsapp.com/test-invite",
             "eligibility": {},
@@ -570,7 +570,7 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     resolved = await client.post(
         "/api/v1/student/course-group",
         headers=auth_header(student_id),
-        json={"term": term, "course_code": "CENG213", "section": "1"},
+        json={"term": term, "course_code": "5710213", "section": "1"},
     )
     assert resolved.status_code == 200
     assert resolved.json()["invite_url"] == "https://chat.whatsapp.com/test-invite"
@@ -579,7 +579,7 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     denied = await client.post(
         "/api/v1/student/course-group",
         headers=auth_header(outsider),
-        json={"term": term, "course_code": "CENG213", "section": "1"},
+        json={"term": term, "course_code": "5710213", "section": "1"},
     )
     assert denied.status_code == 200
     assert denied.json()["status"] == "not_eligible"
