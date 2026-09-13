@@ -12,6 +12,7 @@ from uuid import uuid4
 from app.admin.directory import active_account
 from app.agents.builders import build_agent
 from app.agents.runtime import get_runtime_config
+from app.agents.scholar.prefetch import prefetch_dependencies
 from app.assistant.events import _chunk, _serialize_events, _serialize_run
 from app.assistant.queue import RunLeaseLost, append_event, claim_run, finish_run, renew_run
 from app.auth.jwt import verify_access_token
@@ -125,13 +126,17 @@ async def _execute(run, owner, abort):
                     )
                     source = _serialize_events(events, model, str(run.user_id), observation)
                 else:
+                    # Inside the trusted token context: the prefetch goes
+                    # through the same workspace gateway the tools use, and
+                    # only after the turn is durably leased.
+                    dependencies = await prefetch_dependencies(dict(run.payload.get("dependencies", {})))
                     source = _serialize_run(
                         agent,
                         run.payload["text"],
                         session_id,
                         str(run.user_id),
                         model,
-                        run.payload.get("dependencies", {}),
+                        dependencies,
                         observation,
                     )
                 async with contextlib.aclosing(source):

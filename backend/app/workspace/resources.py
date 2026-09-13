@@ -78,10 +78,9 @@ KEY_REQUIRED_KINDS = frozenset(
 )
 
 _SCOPED_DESCRIPTION = (
-    "Address one resource: choose `kind`, then give the field that kind needs. Course kinds take the "
-    'course code in `key`, written either way a student writes it - "EE 201" and 5670201 both work - or '
-    "a department code/abbreviation in `department` (CENG is 571). Omit `term` to use the student's "
-    "active term."
+    "Choose `kind`, then the field it needs. Course kinds take the code in `key` "
+    '("EE 201" or 5670201) or a department code/abbreviation in `department`. `term` defaults to '
+    "the active term."
 )
 
 
@@ -90,24 +89,22 @@ class _ScopedRef(BaseModel):
 
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": _SCOPED_DESCRIPTION})
 
-    key: str | None = Field(
-        default=None, max_length=2048, description="Course code, message id, page url or preference key."
-    )
-    department: str | None = Field(
-        default=None, max_length=255, description="Department code (571) or abbreviation (CENG)."
-    )
+    key: str | None = Field(default=None, max_length=2048, description="Course code, message id, page url or key.")
+    department: str | None = Field(default=None, max_length=255, description="Code (571) or abbreviation (CENG).")
     category: str | None = Field(default=None, max_length=255, description="Category id from student.categories.")
     program_type: str | None = Field(default=None, max_length=32)
     folder: str | None = Field(default=None, max_length=255, description="Mailbox folder, e.g. INBOX.")
     attachment: str | None = Field(default=None, max_length=255)
-    term: str | None = Field(
-        default=None, max_length=32, description="Term code like 20261; omit for the active term."
-    )
+    term: str | None = Field(default=None, max_length=32, description="Defaults to the active term.")
     section: str | None = Field(default=None, max_length=32)
+    expand: bool = Field(
+        default=False,
+        description="Set true only after the student asked for every item; never on the first read.",
+    )
 
 
 class ResourceRef(_ScopedRef):
-    kind: ResourceKind = Field(description="Which resource to address.")
+    kind: ResourceKind = Field(description="Which resource.")
 
     @model_validator(mode="after")
     def _require_the_field_the_kind_needs(self):
@@ -125,7 +122,7 @@ class ResourceRef(_ScopedRef):
 
 
 class SearchResource(_ScopedRef):
-    kind: SearchableKind = Field(description="One of the searchable kinds; every other kind is read with a key.")
+    kind: SearchableKind = Field(description="One of the searchable kinds.")
 
 
 class SearchRequest(BaseModel):

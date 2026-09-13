@@ -2,7 +2,7 @@
 
 import asyncio
 import hashlib
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,7 +17,10 @@ from app.workspace.models import WorkspaceMemoryMutation
 
 class MemoryEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    id: str = Field(min_length=1, max_length=128)
+    # Optional: a model saving a new preference has no id to give, and refusing
+    # the write over one is how "hatırla" ended with a validation error and an
+    # answer that claimed the preference was saved anyway.
+    id: str | None = Field(default=None, max_length=128)
     content: str = Field(min_length=1, max_length=500)
 
 
@@ -60,10 +63,15 @@ async def mutate_memories(
     if not idempotency_key or len(idempotency_key) > 128:
         raise HTTPException(422, "A request key of 1-128 characters is required")
     parsed = MemoryChanges.model_validate(changes) if not undo else None
+    entries: list[dict] = []
     if parsed:
-        if len({item.id for item in parsed.memories}) != len(parsed.memories):
+        entries = [
+            {"id": (item.id or "").strip() or uuid4().hex[:12], "content": item.content}
+            for item in parsed.memories
+        ]
+        if len({entry["id"] for entry in entries}) != len(entries):
             raise HTTPException(422, "Memory identifiers must be unique")
-        if any(term in item.content.lower() for item in parsed.memories for term in SENSITIVE_TERMS):
+        if any(term in entry["content"].lower() for entry in entries for term in SENSITIVE_TERMS):
             raise HTTPException(422, "Sensitive information cannot be stored as memory")
     digest = stable_digest(
         {"changes": parsed.model_dump() if parsed else None, "revision": expected_revision, "undo": undo}
@@ -87,7 +95,7 @@ async def mutate_memories(
         if undo and current is None:
             raise HTTPException(409, "No memory change to undo")
         before = current.after_content if current else await asyncio.to_thread(legacy_memories, user_id)
-        after = current.before_content if undo else [item.model_dump() for item in parsed.memories]
+        after = current.before_content if undo else entries
         db.add(
             WorkspaceMemoryMutation(
                 user_id=user_id,

@@ -20,6 +20,9 @@ import time
 from typing import Any
 from uuid import UUID, uuid4
 
+from fastapi import HTTPException
+
+from app.agents.scholar.results import EXPANDED_RESULT_CHARS, MAX_TOOL_RESULT_CHARS, bound, project_result
 from app.db.models import AgentToolAudit
 from app.db.session import SessionLocal
 from app.logging import get_logger
@@ -28,33 +31,37 @@ from app.observability.client import _scrub
 from app.observability.llm import current_session_id, current_trace_id
 
 logger = get_logger(__name__)
-MAX_TOOL_RESULT_CHARS = 16_000
+# Six thousand characters is still several times the largest answer the model
+# needs to write, and every result is re-sent on each later model step of the
+# turn, so the old 16k was carried forward at four times the necessary cost.
+# The bound itself lives in results.py, where projection and the prefetch path
+# share it.
 MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email", "send_email", "update", "undo"}
 # Span payloads are bounded separately from tool results: a 16k result is
 # fine for the model but wasteful on every span.
 MAX_SPAN_STATE_CHARS = 4_000
 
 
+def _requested_read(arguments, run_context) -> tuple[str | None, bool]:
+    """The resource kind, and whether ``expand`` may actually be honored.
+
+    The schema lets the model ask for everything, but only the student can
+    grant it: the API marks the turn ``expand_allowed`` when they asked in this
+    message or took a previous offer. A model that sets ``expand`` on its own
+    gets the normal preview and bound, which is what keeps a first "şubeleri
+    neler" from paying for sixty-one sections on every step.
+    """
+    resource = arguments.get("resource") if isinstance(arguments, dict) else None
+    if not isinstance(resource, dict):
+        return None, False
+    requested = bool(resource.get("expand"))
+    dependencies = getattr(run_context, "dependencies", None) or {}
+    return resource.get("kind"), requested and bool(dependencies.get("expand_allowed"))
+
+
 def _canonical_digest(arguments: dict[str, Any]) -> str:
     serialized = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def _bound_result(result: Any) -> Any:
-    if isinstance(result, str) and len(result) > MAX_TOOL_RESULT_CHARS:
-        return (
-            result[:MAX_TOOL_RESULT_CHARS]
-            + f"\n\n[Result truncated by Devrimo after {MAX_TOOL_RESULT_CHARS} characters. Narrow the query.]"
-        )
-    if isinstance(result, (dict, list)):
-        serialized = json.dumps(result, ensure_ascii=False, default=str)
-        if len(serialized) > MAX_TOOL_RESULT_CHARS:
-            return {
-                "truncated": True,
-                "preview": serialized[:MAX_TOOL_RESULT_CHARS],
-                "instruction": "Narrow the query before using this result.",
-            }
-    return result
 
 
 async def record_confirmation_rejection(
@@ -226,7 +233,11 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
         if inspect.isawaitable(result):
             result = await result
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
-        result = _bound_result(result)
+        kind, expand = _requested_read(arguments, run_context)
+        result = bound(
+            project_result(kind, result, expand=expand),
+            limit=EXPANDED_RESULT_CHARS if expand else MAX_TOOL_RESULT_CHARS,
+        )
         return result
     except Exception as exc:
         error = exc
@@ -255,6 +266,12 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
             tool_server=_tool_server(function_name),
             **{"$exception_fingerprint": ["agent_tool_failed", _tool_server(function_name) or function_name]},
         )
+        if getattr(exc, "exceptions", None):
+            # A task-group wrapper reaches the model as "unhandled errors in a
+            # TaskGroup (1 sub-exception)", which it cannot act on - one read
+            # was retried seven times over exactly that sentence. Raise the real
+            # message instead.
+            raise HTTPException(status_code=502, detail=_tool_error_detail(exc)) from exc
         raise
     finally:
         _capture_tool_span(

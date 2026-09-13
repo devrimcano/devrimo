@@ -57,6 +57,25 @@ def error_detail(exc: BaseException, depth: int = 0) -> str:
     return message or exc.__class__.__name__
 
 
+def is_terminal_catalog_miss(detail: object, *, name: str = "read", arguments: dict | None = None) -> bool:
+    """Whether a workspace failure is a final catalog miss for this read.
+
+    The MCP transport reports tool failures as an error result, which used to
+    become a generic 502 even when Course Info had given the definitive
+    ``not available in the published release`` answer. Only catalog reads are
+    promoted to 404; a similarly worded failure from search or another domain
+    operation must retain its ordinary gateway error semantics.
+    """
+    if name != "read":
+        return False
+    resource = (arguments or {}).get("resource") if isinstance(arguments, dict) else None
+    kind = resource.get("kind") if isinstance(resource, dict) else None
+    if not isinstance(kind, str) or not kind.startswith("catalog."):
+        return False
+    folded = str(detail or "").casefold()
+    return any(marker in folded for marker in _TERMINAL_CATALOG_MISSES)
+
+
 def workspace_error_text(result, name: str) -> str:
     """What the workspace actually said, rather than that something went wrong.
 
@@ -114,7 +133,9 @@ class WorkspaceClient:
                         await session.initialize()
                         result = await session.call_tool(name, arguments)
                         if result.isError:
-                            failure = HTTPException(502, workspace_error_text(result, name))
+                            detail = workspace_error_text(result, name)
+                            status = 404 if is_terminal_catalog_miss(detail, name=name, arguments=arguments) else 502
+                            failure = HTTPException(status, detail)
                         elif result.structuredContent is not None:
                             return result.structuredContent
                         else:
