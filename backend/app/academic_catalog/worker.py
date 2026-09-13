@@ -25,7 +25,7 @@ from app.academic_catalog.models import (
 from app.academic_catalog.source import CatalogSource
 from app.campus import service as campus_service
 from app.campus.credentials import secrets_for
-from app.campus.warmer import ISTANBUL, _wanted_courses, _within_hours
+from app.campus.warmer import ISTANBUL, _within_hours
 from app.config import get_settings
 from app.db.models import AccountDirectory, AccountStatus
 from app.db.session import SessionLocal, engine
@@ -480,7 +480,6 @@ async def schedule_due() -> int:
             CatalogTermActiveRelease, CatalogTermActiveRelease.term_id == CatalogTerm.id,
         ).where(or_(CatalogTerm.is_current.is_(True), CatalogTermActiveRelease.release_id.is_not(None))))).all()
         for term in terms:
-            demand = await _wanted_courses(term.term_code)
             if course_jobs < settings.catalog_warm_courses_per_pass:
                 courses = (await db.scalars(select(CatalogCourse).join(
                     CatalogDraft, CatalogDraft.course_id == CatalogCourse.id,
@@ -488,8 +487,9 @@ async def schedule_due() -> int:
                     CatalogCourse.organization_id == term.organization_id,
                     CatalogDraft.term_id == term.id,
                 ).distinct().order_by(CatalogCourse.course_code))).all()
-                # Missing/oldest observations eventually get a turn after high demand.
-                candidates = sorted(courses, key=lambda row: (-demand.get(row.course_code, 0), row.course_code))
+                # Alphabetical, because the demand hint died with the raw-cache
+                # warmer: missing/oldest observations still get their turn.
+                candidates = sorted(courses, key=lambda row: row.course_code)
                 for course in candidates:
                     last_job = await db.scalar(select(CatalogImportJob).where(
                         CatalogImportJob.organization_id == term.organization_id,

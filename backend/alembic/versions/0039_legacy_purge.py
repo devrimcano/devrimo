@@ -94,24 +94,45 @@ def downgrade():
         batch.add_column(sa.Column("profile", sa.String(length=32), nullable=True))
     op.create_table(
         "course_offerings",
-        sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("term", sa.String(length=32), nullable=False),
-        sa.Column("course_code", sa.String(length=32), nullable=False),
-        sa.Column("section", sa.String(length=16), server_default="1", nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("term", sa.String(32), nullable=False),
+        sa.Column("course_code", sa.String(32), nullable=False),
+        sa.Column("section", sa.String(16), server_default="1", nullable=False),
         sa.Column("title", sa.Text(), nullable=False),
         sa.Column("credits", sa.Numeric(6, 2), nullable=False),
-        sa.Column("schedule", sa.JSON(), nullable=False),
+        sa.Column("schedule", sa.JSON(), server_default=sa.text("'[]'"), nullable=False),
         sa.Column("campus", sa.Text(), nullable=True),
         sa.Column("department", sa.Text(), nullable=True),
         sa.Column("source_url", sa.Text(), nullable=True),
-        sa.Column("fetched_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("fetched_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("term", "course_code", "section", name="uq_course_offerings_term_course_section"),
     )
+    op.create_index("ix_course_offerings_term_course", "course_offerings", ["term", "course_code"])
     op.create_table(
         "course_rules",
-        sa.Column("course_code", sa.String(length=32), primary_key=True),
-        sa.Column("prerequisites", sa.JSON(), nullable=False),
-        sa.Column("exclusions", sa.JSON(), nullable=False),
+        sa.Column("course_code", sa.String(32), nullable=False),
+        sa.Column("prerequisites", sa.JSON(), server_default=sa.text("'{}'"), nullable=False),
+        sa.Column("exclusions", sa.JSON(), server_default=sa.text("'[]'"), nullable=False),
         sa.Column("catalog_url", sa.Text(), nullable=True),
-        sa.Column("revision", sa.Integer(), nullable=False),
+        sa.Column("revision", sa.Integer(), server_default="1", nullable=False),
+        sa.Column("fetched_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.PrimaryKeyConstraint("course_code"),
     )
+    # These two carried the 0023 ownership boundary until 0039 dropped them:
+    # re-apply it so a rollback does not leave an unprotected table behind.
+    bind = op.get_bind()
+    for table in ("course_offerings", "course_rules"):
+        quoted = f'public."{table}"'
+        op.execute(f"REVOKE ALL ON TABLE {quoted} FROM PUBLIC")
+        for exposed in ("anon", "authenticated", "service_role"):
+            if bind.scalar(sa.text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=:role)"), {"role": exposed}):
+                op.execute(f'REVOKE ALL ON TABLE {quoted} FROM "{exposed}"')
+        op.execute(f"ALTER TABLE {quoted} ENABLE ROW LEVEL SECURITY")
+        op.execute(f"GRANT SELECT,INSERT,UPDATE,DELETE ON {quoted} TO devrimo_api")
+        op.execute(f"CREATE POLICY devrimo_api_access ON {quoted} TO devrimo_api USING (true) WITH CHECK (true)")
+        op.execute(f"GRANT SELECT ON {quoted} TO devrimo_planning")
+        op.execute(
+            f"CREATE POLICY devrimo_planning_access ON {quoted} TO devrimo_planning USING (true) WITH CHECK (true)"
+        )
     # The purged cache rows are not restored: downgrade never re-fetches data.
