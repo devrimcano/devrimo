@@ -17,18 +17,18 @@ Environment:
                            Run the memory scenarios at all. Without it they are
                            skipped, and no memory endpoint is ever touched.
     DEVRIMO_EVAL_DISPOSABLE=1
-                           Required for the memory scenarios: the cleanup
-                           endpoint deletes every memory the account owns, so
-                           the account must be one the evaluator may empty.
+                           Allow the memory scenarios on an account that
+                           already has memories. The original memory list is
+                           restored with an optimistic revision check.
 
-The memory cleanup endpoint clears every memory the account owns and is not
-scoped to what this run wrote, so the memory scenarios run only on an account
-explicitly marked disposable - an account that started empty is not enough,
-because a memory created concurrently during the run would be deleted too. A
-failed cleanup response is an eval failure. Exit status is non-zero when a
-scenario fails, so a staging pipeline can gate on it.
+Memory scenarios are opt-in and restore the exact pre-run list through the
+workspace's revisioned update contract. A concurrent memory write makes the
+revision check fail and leaves the account untouched rather than deleting an
+account-wide memory set. Exit status is non-zero when a scenario or safe
+restoration fails, so a staging pipeline can gate on it.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -63,18 +63,133 @@ def list_memories(headers: dict) -> list[dict] | None:
         return None
     if response.status_code != 200:
         return None
-    return response.json().get("memories", [])
+    try:
+        memories = response.json().get("memories", [])
+    except (TypeError, ValueError):
+        return None
+    return memories if isinstance(memories, list) else None
+
+
+def _normalized_memories(memories) -> list[dict] | None:
+    """Return the stable memory shape, or None for an unverifiable payload."""
+    if not isinstance(memories, list):
+        return None
+    normalized = []
+    for item in memories:
+        if not isinstance(item, dict) or not item.get("id") or not item.get("content"):
+            return None
+        normalized.append({"id": str(item["id"]), "content": str(item["content"])})
+    return normalized
+
+
+def _same_memories(left: list[dict], right: list[dict]) -> bool:
+    """Compare memory lists without depending on their storage order."""
+    return sorted(left, key=lambda item: (item["id"], item["content"])) == sorted(
+        right, key=lambda item: (item["id"], item["content"])
+    )
+
+
+async def _workspace_call(headers: dict, name: str, arguments: dict) -> dict:
+    """Call one authenticated workspace tool for revisioned memory access."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    # The chat request uses an SSE-only Accept header; the stateless MCP
+    # transport negotiates its own JSON/event-stream pair, so forward only the
+    # bearer credential here.
+    workspace_headers = {"Authorization": headers["Authorization"]}
+    async with httpx.AsyncClient(headers=workspace_headers, timeout=30) as client:
+        async with streamable_http_client(f"{API}/mcp/", http_client=client) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                result = await session.call_tool(name, arguments)
+                if result.isError:
+                    detail = "; ".join(
+                        str(getattr(item, "text", "")).strip()
+                        for item in result.content
+                        if getattr(item, "text", "")
+                    )
+                    raise RuntimeError(detail or f"workspace {name} failed")
+                payload = result.structuredContent
+                if payload is None:
+                    for item in result.content:
+                        if getattr(item, "type", None) == "text":
+                            payload = json.loads(item.text)
+                            break
+                if not isinstance(payload, dict):
+                    raise RuntimeError(f"workspace {name} returned no structured result")
+                return payload
+
+
+def _memory_state_from_payload(payload: dict) -> dict | None:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    revision = data.get("revision")
+    memories = _normalized_memories(data.get("memories"))
+    if not isinstance(revision, int) or revision < 0 or memories is None:
+        return None
+    return {"revision": revision, "memories": memories}
+
+
+def memory_snapshot(headers: dict) -> dict | None:
+    """Read memories and their revision through the workspace boundary."""
+    try:
+        payload = asyncio.run(_workspace_call(headers, "read", {"resource": {"kind": "my.memory"}}))
+    except Exception:
+        return None
+    return _memory_state_from_payload(payload)
+
+
+def restore_memory_snapshot(headers: dict, baseline: dict, current: dict) -> tuple[bool, str]:
+    """Restore the baseline only if the observed revision is still current."""
+    if _same_memories(current["memories"], baseline["memories"]):
+        return True, "already at the pre-run state"
+    try:
+        payload = asyncio.run(
+            _workspace_call(
+                headers,
+                "update",
+                {
+                    "resource": {"kind": "my.memory"},
+                    "changes": {"memories": baseline["memories"]},
+                    "expected_revision": current["revision"],
+                    "idempotency_key": f"agent-eval-restore-{uuid.uuid4().hex}",
+                },
+            )
+        )
+    except Exception as exc:
+        return False, f"optimistic memory restoration failed: {exc}"
+    restored = _memory_state_from_payload(payload)
+    if restored is None:
+        return False, "optimistic memory restoration returned an invalid result"
+    verified = memory_snapshot(headers)
+    if verified is None:
+        return False, "memory restoration could not be verified"
+    if verified["revision"] != restored["revision"] or not _same_memories(
+        verified["memories"], baseline["memories"]
+    ):
+        return False, "memory restoration changed concurrently; no safe final state was verified"
+    return True, "restored the pre-run state"
+
+
+def cleanup_memory_snapshot(headers: dict, baseline: dict, expected_revision: int) -> tuple[bool, str]:
+    """Restore only the revision observed after the last eval scenario.
+
+    The final read and the update are both optimistic, but the read itself must
+    also agree with the revisions observed after each scenario. Otherwise a
+    concurrent writer could be mistaken for the eval's own update and be
+    overwritten during cleanup.
+    """
+    current = memory_snapshot(headers)
+    if current is None:
+        return False, "memory revision could not be verified"
+    if current["revision"] != expected_revision:
+        return False, "memory changed concurrently; refusing to overwrite the account's current state"
+    return restore_memory_snapshot(headers, baseline, current)
 
 
 def memory_write_allowed(existing: list[dict] | None) -> bool:
-    """Whether the memory scenarios may run and clean up after themselves.
-
-    The cleanup endpoint clears every memory the account owns, not just the one
-    this script wrote, so it runs only on an explicitly disposable account
-    whose current memories could be read. An empty account is not enough: a
-    memory created concurrently during the run would be deleted with ours.
-    """
-    return ALLOW_MEMORY_WRITE and DISPOSABLE and existing is not None
+    """Whether the opt-in memory scenarios may run with scoped restoration."""
+    return ALLOW_MEMORY_WRITE and existing is not None and (not existing or DISPOSABLE)
 
 
 def acquire_token() -> str:
@@ -113,6 +228,7 @@ def ask(headers: dict, prompt: str, session_id: str | None = None) -> dict:
     ttft = None
     text: list[str] = []
     tools: list[str] = []
+    completed_tools: list[str] = []
     errors: list[str] = []
     with httpx.stream("POST", f"{API}/api/v1/chat/completions", json=body, headers=headers, timeout=300) as response:
         if response.status_code == 409:
@@ -137,6 +253,8 @@ def ask(headers: dict, prompt: str, session_id: str | None = None) -> dict:
                 text.append(delta["content"])
             if extension.get("type") == "tool_call_started":
                 tools.append(extension.get("tool") or "")
+            if extension.get("type") == "tool_call_completed" and extension.get("success") is True:
+                completed_tools.append(extension.get("tool") or "")
             if extension.get("type") == "tool_call_error":
                 errors.append(f"{extension.get('tool')}: {str(extension.get('message'))[:120]}")
             if extension.get("type") == "error":
@@ -147,6 +265,7 @@ def ask(headers: dict, prompt: str, session_id: str | None = None) -> dict:
         "seconds": round(time.time() - started, 1),
         "ttft": ttft,
         "tools": tools,
+        "completed_tools": completed_tools,
         "errors": errors,
         "answer": answer,
         "jargon": sorted(set(match.group(0) for match in JARGON.finditer(answer))),
@@ -163,6 +282,11 @@ def _common(result: dict) -> list[str]:
     if result.get("jargon"):
         failures.append(f"internal jargon: {result['jargon']}")
     return failures
+
+
+def _completed_update_calls(result: dict) -> int:
+    """Count only update calls that emitted a completion event."""
+    return (result.get("completed_tools") or []).count("update")
 
 
 def build_scenarios(memory_session: str) -> list[dict]:
@@ -208,7 +332,7 @@ def build_scenarios(memory_session: str) -> list[dict]:
 
     def memory(result):
         failures = _common(result)
-        if "update" not in (result.get("tools") or []):
+        if "update" not in (result.get("completed_tools") or []):
             failures.append("the preference was promised but not written")
         return failures
 
@@ -279,30 +403,60 @@ def main() -> int:
     if only:
         scenarios = [scenario for scenario in scenarios if scenario["name"] in only]
 
-    existing = list_memories(headers)
-    if not memory_write_allowed(existing):
+    selected_memory = any(scenario["name"] in MEMORY_SCENARIOS for scenario in scenarios)
+    existing = None
+    baseline = None
+    memory_tracking_error = None
+    if selected_memory:
+        reason = None
         if not ALLOW_MEMORY_WRITE:
             reason = "DEVRIMO_EVAL_ALLOW_MEMORY_WRITE is not set"
-        elif not DISPOSABLE:
-            reason = "DEVRIMO_EVAL_DISPOSABLE is not set"
         else:
-            reason = "the account's memories could not be read"
-        for scenario in [item for item in scenarios if item["name"] in MEMORY_SCENARIOS]:
-            print(f"SKIP  {scenario['name']:<18} {reason}", flush=True)
-        scenarios = [scenario for scenario in scenarios if scenario["name"] not in MEMORY_SCENARIOS]
+            existing = list_memories(headers)
+            if not memory_write_allowed(existing):
+                reason = (
+                    "the account's memories could not be read"
+                    if existing is None
+                    else "the account has memories"
+                )
+            else:
+                baseline = memory_snapshot(headers)
+                if baseline is None or not _same_memories(existing, baseline["memories"]):
+                    memory_tracking_error = "the account's memory revision could not be verified"
+                    reason = memory_tracking_error
+        if reason:
+            for scenario in [item for item in scenarios if item["name"] in MEMORY_SCENARIOS]:
+                print(f"SKIP  {scenario['name']:<18} {reason}", flush=True)
+            scenarios = [scenario for scenario in scenarios if scenario["name"] not in MEMORY_SCENARIOS]
     ran_memory = any(scenario["name"] in MEMORY_SCENARIOS for scenario in scenarios)
 
-    failures = 0
+    scenario_failures = 0
+    expected_memory_revision = baseline["revision"] if baseline else None
     for scenario in scenarios:
-        try:
-            result = ask(headers, scenario["prompt"], scenario["session"])
-            problems = scenario["check"](result)
-        except Exception as exc:  # one broken scenario must not hide the rest
+        if scenario["name"] in MEMORY_SCENARIOS and memory_tracking_error:
             result = {"seconds": None, "tools": [], "answer": ""}
-            problems = [f"{type(exc).__name__}: {exc}"]
+            problems = [memory_tracking_error]
+        else:
+            try:
+                result = ask(headers, scenario["prompt"], scenario["session"])
+                problems = scenario["check"](result)
+            except Exception as exc:  # one broken scenario must not hide the rest
+                result = {"seconds": None, "tools": [], "answer": ""}
+                problems = [f"{type(exc).__name__}: {exc}"]
+        if scenario["name"] in MEMORY_SCENARIOS and baseline and not memory_tracking_error:
+            expected_memory_revision += _completed_update_calls(result)
+            observed = memory_snapshot(headers)
+            if observed is None:
+                memory_tracking_error = "memory revision could not be read after the scenario"
+            elif observed["revision"] != expected_memory_revision:
+                memory_tracking_error = (
+                    "memory changed concurrently; refusing to overwrite the account's current state"
+                )
+            if memory_tracking_error:
+                problems.append(memory_tracking_error)
         status = "PASS" if not problems else "FAIL"
         if problems:
-            failures += 1
+            scenario_failures += 1
         print(
             f"{status}  {scenario['name']:<18} {result.get('seconds')}s  "
             f"ttft={result.get('ttft')}  tools={result.get('tools')}",
@@ -313,15 +467,19 @@ def main() -> int:
         if problems and result.get("answer"):
             print(f"      answer: {result['answer'][:220]}", flush=True)
 
-    if ran_memory:
-        cleanup = httpx.delete(f"{API}/api/v1/memories", headers=headers, timeout=30)
-        if cleanup.status_code == 200:
-            print("memory cleanup: test preferences removed")
+    cleanup_failed = False
+    if ran_memory and baseline and not memory_tracking_error:
+        restored, detail = cleanup_memory_snapshot(headers, baseline, expected_memory_revision)
+        if restored:
+            print(f"memory cleanup: {detail}", flush=True)
         else:
-            failures += 1
-            print(f"FAIL  memory cleanup returned {cleanup.status_code}: {cleanup.text[:120]}")
-    print(f"\n{len(scenarios) - failures}/{len(scenarios)} scenarios passed")
-    return 1 if failures else 0
+            cleanup_failed = True
+            print(f"FAIL  memory cleanup     {detail}", flush=True)
+    elif ran_memory and memory_tracking_error:
+        cleanup_failed = True
+        print(f"FAIL  memory cleanup     {memory_tracking_error}; no destructive cleanup attempted", flush=True)
+    print(f"\n{len(scenarios) - scenario_failures}/{len(scenarios)} scenarios passed")
+    return 1 if scenario_failures or cleanup_failed else 0
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from app.agents.scholar import prefetch as prefetch_module
 from app.agents.scholar.prefetch import prefetch_dependencies
+from app.workspace.client import is_terminal_catalog_miss
 
 
 class FakeClient:
@@ -94,19 +95,17 @@ def test_a_404_is_the_answer_and_other_failures_are_skipped():
     assert "prefetched" not in out
 
 
-def test_a_terminal_miss_reported_as_502_is_still_an_answer():
-    """The real client reports every MCP error as 502, including the final miss."""
-    terminal = FakeClient(
-        errors={
-            "catalog.prerequisites": HTTPException(
-                502,
-                "read failed: Course is not available in the published release This is final for the "
-                "requested term: do not retry it.",
-            )
-        }
-    )
-    out = _run(_deps("prerequisites", term=None), terminal)
-    assert out["prefetched"][0]["error"].startswith("read failed")
+def test_a_terminal_miss_detail_is_bounded():
+    detail = "not available in the published release " + "x" * 1_000
+    client = FakeClient(errors={"catalog.prerequisites": HTTPException(404, detail)})
+    out = _run(_deps("prerequisites", term=None), client)
+    assert len(out["prefetched"][0]["error"]) == 300
+
+
+def test_terminal_catalog_miss_survives_the_workspace_boundary():
+    arguments = {"resource": {"kind": "catalog.prerequisites", "key": "EE 201"}}
+    assert is_terminal_catalog_miss("Course is not available in the published release", arguments=arguments)
+    assert not is_terminal_catalog_miss("host not found", arguments=arguments)
 
 
 def test_prefetched_results_are_projected_and_bounded():

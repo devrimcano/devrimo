@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +75,18 @@ _NOT_PRELOADED = object()
 class AiScheduleCourse(BaseModel):
     code: str = Field(min_length=3, max_length=20)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_code_string(cls, value: Any) -> Any:
+        """Normalize the legacy ``course_codes`` list item shape.
+
+        The old planner client sent a list of strings while the newer request
+        schema names each item (``{"code": "EE201"}``). Keeping the
+        normalization at the item boundary lets one field accept both wire
+        spellings without weakening the validated internal representation.
+        """
+        return {"code": value} if isinstance(value, str) else value
+
 
 class AiScheduleRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -85,6 +97,10 @@ class AiScheduleRequest(BaseModel):
     semester: str = Field(
         min_length=4, max_length=20, validation_alias=AliasChoices("semester", "term")
     )
+    # ``course_codes`` was the legacy list-of-strings spelling. It is a
+    # validation alias, not a second source of planning truth: the curriculum
+    # endpoint reads the setup-owned SAIS board and currently ignores this
+    # compatibility list after validation.
     courses: list[AiScheduleCourse] = Field(
         default_factory=list,
         max_length=20,
@@ -394,7 +410,19 @@ async def search_departments(
     # abbreviation ("CENG") or a Turkish name ("Bilgisayar") got an empty picker
     # for departments that plainly exist, so the directory answers when the
     # source misses.
-    options = department_options(data) or _directory_department_options(query)
+    source_options = department_options(data)
+    # Course Info can return a valid but partial match set. The bundled
+    # directory is the complete identity map for codes/abbreviations and may
+    # know additional Turkish-name matches, so merge it instead of consulting
+    # it only when the source happened to return zero rows.
+    options_by_code = {
+        str(option.get("code")): option
+        for option in source_options
+        if isinstance(option, dict) and option.get("code")
+    }
+    for option in _directory_department_options(query):
+        options_by_code.setdefault(str(option["code"]), option)
+    options = list(options_by_code.values())[:20]
     return {"data": data, "departments": options}
 
 
@@ -471,6 +499,22 @@ def _published_code_matches(indexed: list[tuple[str, dict]], *, named, digits: s
     if home is not None:
         matches.sort(key=lambda item: item["department"] != (home.abbreviation or home.code))
     return matches
+
+
+def _course_owner_for_search(named, home, digits: str):
+    """Choose the owning department for the legacy catalog lookup.
+
+    A seven-digit METU code carries its owner in the first three digits. That
+    prefix is authoritative even when the student is enrolled elsewhere (and
+    even when a client supplied an inconsistent department abbreviation).
+    An unknown prefix is rejected by the caller rather than guessed from the
+    student's home department. Short numeric queries still use the home
+    department because they do not contain enough information to identify an
+    owner.
+    """
+    if len(digits) == 7:
+        return departments.by_code(digits[:3])
+    return named or home
 
 
 def _short_code(full_code: str, abbreviation: str) -> str:
@@ -624,7 +668,7 @@ async def search_courses(
 
     # A code lookup: the letters name a department, or there are only digits.
     if named is not None or (digits and not letters):
-        owner = _legacy_code_owner(named, home, digits)
+        owner = _course_owner_for_search(named, home, digits)
         if owner is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -736,22 +780,6 @@ async def _search_index(semester: str) -> tuple[list[tuple[str, dict]], set[str]
     # Single-flighted, so a burst of keystrokes past the debounce builds it
     # once and the rest wait on that build rather than starting their own.
     return await _SEARCH_INDEX.run(semester, build)
-
-
-def _legacy_code_owner(named, home, digits: str):
-    """The department whose listing a code lookup must read, on the legacy path.
-
-    A seven-digit code names its own department in its first three digits. It
-    used to fall back to the student's home department, so an EE student
-    searching 5710331 asked EE's listing for a CENG course and found nothing -
-    and a student with no saved context got a 422 for a code that names its
-    department completely.
-    """
-    if named is not None:
-        return named
-    if len(digits) == 7:
-        return departments.by_code(digits[:3]) or home
-    return home
 
 
 def _match_courses(payload: Any, owner: Any, *, digits: str, title: str) -> list[dict]:
@@ -1102,9 +1130,17 @@ async def bulk_constraints(
             if raw in course_info
         ]
         if published_catalog_reads_enabled():
-            checked = [await check_course(*item) for item in checks]
+            checked = [
+                await check_course(raw, compact_course, lookup_department)
+                for raw, compact_course, lookup_department in checks
+            ]
         else:
-            checked = await asyncio.gather(*(check_course(*item) for item in checks))
+            checked = await asyncio.gather(
+                *(
+                    check_course(raw, compact_course, lookup_department)
+                    for raw, compact_course, lookup_department in checks
+                )
+            )
         results.update(checked)
     return {"courses": results}
 

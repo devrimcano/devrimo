@@ -64,7 +64,8 @@ def test_search_can_only_name_the_kinds_it_actually_searches():
 
     with pytest.raises(ValidationError):
         SearchRequest(resource={"kind": "catalog.courses"}, query="ceng 331")
-    assert SearchRequest(resource={"kind": "campus.knowledge"}, query="yönetmelik").resource.kind == "campus.knowledge"
+    knowledge = SearchRequest(resource={"kind": "campus.knowledge"}, query="yönetmelik")
+    assert knowledge.resource.kind == "campus.knowledge"
     department = SearchRequest(resource={"kind": "catalog.department"}, query="bilgisayar")
     assert department.resource.kind == "catalog.department"
 

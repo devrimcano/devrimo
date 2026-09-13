@@ -13,7 +13,14 @@ import json
 from app.agents.scholar.context import _selected
 from app.agents.scholar.hooks import _requested_read
 from app.agents.scholar.intent import context_fields, guidance
-from app.agents.scholar.results import SECTION_PREVIEW, UPDATES_PREVIEW, project, project_result
+from app.agents.scholar.results import (
+    EXPANDED_RESULT_CHARS,
+    SECTION_PREVIEW,
+    UPDATES_PREVIEW,
+    bound,
+    project,
+    project_result,
+)
 
 
 def test_projection_compacts_the_catalog_envelope_and_keeps_every_domain_field():
@@ -56,6 +63,7 @@ def test_projection_compacts_the_catalog_envelope_and_keeps_every_domain_field()
         "sections": {"fresh": False, "verified": True},
     }
     assert out["data"]["freshness"]["registration_window"] == {"start": "2026-09-14"}
+    assert "release_id" not in out["data"]["freshness"]
     assert out["data"]["prerequisite_groups"][0]["requirements"][0] == {
         "course_label": "MATH 260 - BASIC LINEAR ALGEBRA",
         "minimum_grade": "DD",
@@ -175,55 +183,107 @@ def test_totals_survive_a_truncated_result_and_meetings_stay_readable():
     keys = list(data.keys())
     assert keys.index("sections_total") < keys.index("sections")
     section = data["sections"][0]
-    assert section["meetings"] == [{"weekday": 3, "time": "08:40-10:30", "room": "M104"}]
+    assert section["meetings"] == [{"weekday": 3, "raw_label": "08:40-10:30", "room": "M104"}]
     assert len(section["restrictions"]) == 4
     assert section["restrictions_omitted"] == 1
     assert "min_cgpa" not in section["restrictions"][0]
 
 
-def test_legacy_instructor_and_schedule_are_kept():
-    """With published reads off, sections use `instructor` and `schedule`."""
-    envelope = {
-        "data": {
-            "course": "5710201",
-            "department": "571",
-            "semester": "20261",
-            "sections": [
-                {
-                    "section": "1",
-                    "instructor": "STAFF",
-                    "schedule": [{"day": "Monday", "start_minute": 580, "duration_minutes": 50, "room": "P1"}],
-                    "constraint": "Department of Computer Engineering",
-                }
-            ],
-            "data": {"instructor": "STAFF", "schedule": []},
-        }
+def test_legacy_course_info_prefers_normalized_sibling_for_people_and_schedule():
+    """The raw legacy row is retained for restrictions, not used over facts."""
+    envelope = _sections_envelope(1)
+    raw = envelope["data"]["data"]
+    raw["sections"][0] = {
+        "section_code": "1",
+        "instructors": ["Raw Instructor"],
+        "schedule": [{"day": "Monday", "time": "08:40-10:30", "room": "RAW"}],
+        "restrictions": [{"restriction_group": "1", "given_department": "CENG"}],
     }
-    out = project_result("catalog.sections", envelope)
-    section = out["data"]["sections"][0]
-    assert section["instructors"] == ["STAFF"]
-    assert section["meetings"] == [{"day": "Monday", "time": "09:40", "minutes": 50, "room": "P1"}]
-    assert section["constraint"].startswith("Department")
-    assert out["data"]["course_code"] == "5710201"
-    assert out["data"]["term"] == "20261"
+    envelope["data"]["sections"] = [
+        {
+            "section": "1",
+            "instructor": "Normalized Instructor",
+            "meetings": [
+                {"day": "Mon", "start_minute": 520, "duration_minutes": 110, "room": "NORM"}
+            ],
+            "constraint": "",
+        }
+    ]
+
+    section = project_result("catalog.sections", envelope)["data"]["sections"][0]
+    assert section["instructors"] == ["Normalized Instructor"]
+    assert section["meetings"] == [
+        {"day": "Mon", "start_minute": 520, "duration_minutes": 110, "room": "NORM"}
+    ]
+    assert section["restrictions"] == [{"restriction_group": "1", "given_department": "CENG"}]
 
 
-def test_long_notes_are_capped_and_a_giant_list_is_cut_structurally():
-    envelope = _sections_envelope(61)
+def test_published_course_info_keeps_typed_instructor_and_meeting_facts():
+    """Published detail rows use plural typed instructors and weekday labels."""
+    envelope = _sections_envelope(1)
+    envelope["data"]["data"]["sections"][0] = {
+        "section_code": "1",
+        "instructors": [{"source_name": "Prof. Published", "position": "Dr."}],
+        "meetings": [
+            {
+                "weekday": 2,
+                "start_minute": 520,
+                "end_minute": 630,
+                "raw_label": "08:40-10:30",
+                "room": "P1",
+                "status": "scheduled",
+            }
+        ],
+    }
+    # A detail response can arrive without the legacy normalized sibling.
+    envelope["data"].pop("sections")
+
+    section = project_result("catalog.sections", envelope)["data"]["sections"][0]
+    assert section["instructors"] == ["Prof. Published"]
+    assert section["meetings"] == [{"weekday": 2, "raw_label": "08:40-10:30", "room": "P1"}]
+
+
+def test_expanded_sections_overflow_with_structured_omission_not_json_prefix():
+    """Large valid rows stay complete while the list reports what did not fit."""
+    envelope = _sections_envelope(100)
     for section in envelope["data"]["data"]["sections"]:
-        section["notes"] = "N" * 1000
-    out = project_result("catalog.sections", envelope, expand=True, limit=24_000)
+        section["notes"] = "note " * 500
+        section["instructors"] = [{"source_name": "Instructor " + "x" * 500} for _ in range(20)]
+        section["meetings"] = [
+            {"weekday": 1, "raw_label": "08:40-10:30 " + "x" * 500, "room": "M" * 500}
+            for _ in range(20)
+        ]
+        section["restrictions"] = [
+            {"restriction_group": str(index), "given_department": "CENG"}
+            for index in range(10)
+        ]
+
+    out = project_result("catalog.sections", envelope, expand=True)
+    serialized = json.dumps(out, ensure_ascii=False)
     data = out["data"]
-    assert data["sections_total"] == 61
-    assert data["sections_omitted"] > 0
-    assert data["sections"][0]["notes"] == "N" * 300
-    assert len(json.dumps(out, ensure_ascii=False, default=str)) <= 24_000
-    assert "truncated" not in out  # a structured cut, not a preview string
+    assert len(serialized) <= EXPANDED_RESULT_CHARS
+    assert bound(out, limit=EXPANDED_RESULT_CHARS) == out
+    assert "truncated" not in out
+    assert data["sections_total"] == 100
+    assert data["sections_omitted"] == 100 - data["sections_returned"]
+    assert data["sections_omission_reason"] == "result_bound"
+    assert data["sections"][0]["notes_truncated"] is True
+    assert data["sections"][0]["instructors_omitted"] == 12
+    assert data["sections"][0]["meetings_omitted"] == 12
+    assert data["sections"][0]["restrictions_omitted"] == 9
+    assert data["freshness"]["components"]["sections"] == {"fresh": True, "verified": True}
 
 
 def test_sections_are_all_kept_when_the_student_asked_for_all():
     out = project_result("catalog.sections", _sections_envelope(12), expand=True)
     assert len(out["data"]["sections"]) == 12
+    assert "sections_omitted" not in out["data"]
+
+
+def test_expanded_sixty_one_section_course_fits_without_arbitrary_truncation():
+    out = project_result("catalog.sections", _sections_envelope(61), expand=True)
+    assert len(json.dumps(out, ensure_ascii=False)) <= EXPANDED_RESULT_CHARS
+    assert len(out["data"]["sections"]) == 61
     assert "sections_omitted" not in out["data"]
 
 
@@ -292,9 +352,10 @@ def _updates_envelope(count: int) -> dict:
 def test_updates_projection_keeps_what_an_answer_uses():
     out = project_result("my.updates", _updates_envelope(30))
     data = out["data"]
-    assert len(data["items"]) == UPDATES_PREVIEW
+    assert 0 < len(data["items"]) <= UPDATES_PREVIEW
     assert data["items_total"] == 30
-    assert data["items_omitted"] == 30 - UPDATES_PREVIEW
+    assert data["items_omitted"] == 30 - len(data["items"])
+    assert data["items_omission_reason"] in {"preview", "result_bound"}
     first = data["items"][0]
     assert first["title"] == "Item 0"
     assert first["type"] == "event"
@@ -309,6 +370,26 @@ def test_updates_are_all_kept_when_asked_for_all():
     out = project_result("my.updates", _updates_envelope(30), expand=True)
     assert len(out["data"]["items"]) == 30
     assert "items_omitted" not in out["data"]
+
+
+def test_oversized_updates_stay_structural_and_report_omissions():
+    envelope = _updates_envelope(100)
+    for item in envelope["data"]["items"]:
+        item["title"] = "T" * 10_000
+        item["summary"] = "S" * 100_000
+        item["source"] = "source-" + "x" * 10_000
+        item["url"] = "https://example/" + "u" * 10_000
+
+    out = project_result("my.updates", envelope, expand=True)
+    serialized = json.dumps(out, ensure_ascii=False)
+    data = out["data"]
+    assert len(serialized) <= EXPANDED_RESULT_CHARS
+    assert bound(out, limit=EXPANDED_RESULT_CHARS) == out
+    assert "truncated" not in out
+    assert data["items_total"] == 100
+    assert data["items_omitted"] == 100 - data["items_returned"]
+    assert data["items_omission_reason"] == "result_bound"
+    assert set(data["items"][0]["fields_truncated"]) == {"title", "summary", "source", "url"}
 
 
 def test_the_guidance_tells_the_model_to_offer_the_rest():

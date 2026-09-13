@@ -48,10 +48,7 @@ _RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = tuple(
         ("credits", ("kredi", "akts", "ects", "credit")),
         (
             "schedule",
-            (
-                "ders program", "programi", "planim", "planla", "takvim", "cakis",
-                "hafta", "schedule", "timetable",
-            ),
+            ("ders program", "programi", "planim", "planla", "takvim", "cakis", "hafta", "schedule", "timetable"),
         ),
         ("knowledge", ("yonetmelik", "nedir", "nasil", "neden", "kural")),
         ("greeting", ("merhaba", "selam", "hello")),
@@ -73,8 +70,8 @@ _GUIDANCE = {
         "the times are not published yet; keep restrictions to a single line. When the result carries "
         "sections_omitted, say how many sections the course has in total, show the ones you have, and ask "
         "whether the student wants all of them or one that fits a specific need (instructor, day, surname "
-        "range). `resource.expand` is honored only when the student's own message asks for everything; a "
-        "model decision alone is ignored."
+        "range). `resource.expand` is only honored when the student asked for everything in this message, "
+        "or you offered it in the previous reply and they took the offer."
     ),
     "eligibility": (
         "Answer shape for this question: the verdict first (eligible, not eligible, or unknown), then the "
@@ -93,8 +90,8 @@ _GUIDANCE = {
         "announcements and events; use student.announcements only when the student means their own SAIS "
         "board. Show at most five newest items, one line each with its date, and how many more there are. "
         "When the student names a category or topic (events are type event), filter the list by type, "
-        "title and summary and show only the matches. `resource.expand` is honored only when the "
-        "student's own message asks for everything."
+        "title and summary and show only the matches. `resource.expand` is only honored when the student "
+        "asked for everything in this message, or you offered it in the previous reply."
     ),
     "knowledge": (
         "Answer shape for this question: the answer in one short paragraph, then the source and when it was "
@@ -175,17 +172,29 @@ _FULL_CODE = re.compile(r"\b(\d{7})\b")
 # words - "2026 güz", "gelecek dönem" - cannot be mapped to a code here, and
 # reading the active term for a question about another one is worse than not
 # reading at all, so it is reported unresolved and the caller skips.
-# The code may run straight into a suffixed form - "20252de", "20261'de" - so
-# the boundary is digit-only, not a word boundary.
-_TERM_CODE = re.compile(r"(?<!\d)(20\d{3})(?!\d)")
-# "yaz" alone is the ordinary imperative ("...şubeleri de yaz"), and reading it
-# as Summer skipped the prefetch on the eval's own prerequisite prompt. Only the
-# term phrases count.
+# Term codes are commonly written with Turkish case suffixes (``20252'de`` or
+# ``20252de``). Numeric guards keep a five-digit code from being pulled out of
+# a longer identifier while allowing those attached suffixes.
+_TERM_CODE = re.compile(r"(?<!\d)20\d{3}(?!\d)")
 _TERM_WORDS = re.compile(
-    r"\b(?:guz|bahar|fall|spring|summer)\b"
-    r"|yaz (?:donemi|okulu|okul)"
-    r"|(?:gelecek|sonraki|onumuzdeki|gecen) (?:donem|yil)"
-    r"|(?:next|last|previous|coming) (?:semester|term)"
+    r"(?:"
+    # A season by itself is enough for the unresolvable guard, except for
+    # ``yaz``: in Turkish it is also the imperative of "to write" ("ön koşulu
+    # yaz").  The summer forms below require a noun/season suffix or a
+    # relative qualifier, so that imperative is not mistaken for a term.
+    r"\b(?:guz|bahar|fall|spring|summer)(?:da|de|daki|deki|in|ın|un|ün|a|e|i|ı|u|ü)?\b|"
+    r"\b(?:gelecek|gecen|onceki|sonraki|onumuzdeki|bir sonraki)\s+"
+    r"(?:donem|yariyil|yil)(?:de|da|daki|deki|ki|in|e|den|inde|indeki)?\b|"
+    r"\b(?:bu|gelecek|gecen|onceki|sonraki|onumuzdeki|bir sonraki)\s+"
+    r"(?:summer|yaz)\b|"
+    r"\b(?:yaz)(?:da|de|daki|deki)\b|"
+    r"\b(?:yaz)\s+(?:donem|yariyil|okulu|semester|term)"
+    r"(?:de|da|daki|deki|ki|in|e|den|inde|indeki)?\b|"
+    r"\b(?:next|last|previous|following|coming)\s+"
+    r"(?:term|semester|academic\s+year)\b|"
+    r"\b(?:gelecek|gecen|onceki|sonraki|onumuzdeki)\s+donem"
+    r"(?:de|da|daki|deki|ki|in|e|den|inde|indeki)?\b"
+    r")"
 )
 _YEAR = re.compile(r"\b20\d{2}\b")
 
@@ -197,45 +206,107 @@ _SECTION_BEFORE = re.compile(r"(?<![a-z0-9])(\d{1,3})\s*[.:#/-]\s*(?:sube|sectio
 _SECTION_WORD = re.compile(r"\b(?:sube|section)")
 
 
-# "hepsini göster", "tamamını çıkar", "tümünü listele", "show all". These are
-# the words a student uses to ask for the whole list; the broker checks the
-# student's own message, so a model that decides to fetch everything itself is
-# not granted the expanded read.
+# "hepsini göster", "tamamını çıkar", "tümünü listele", "show all". Both the
+# student's request and the assistant's offer use these, which is what lets the
+# broker tell "they asked for everything" from "the model decided to fetch
+# everything on its own".
 _EVERYTHING = re.compile(
     r"\b(hepsi|hepsini|tamami|tamamini|tumu|tumunu|butun|butununu|"
     r"all of them|all of it|everything|show all|the rest)"
 )
 
-
-def wants_everything(message: str | None) -> bool:
-    """Whether a message asks for every item of a list."""
-    if not message:
-        return False
-    return bool(_EVERYTHING.search(_fold(message)))
-
-
-# "hepsini gösterme", "sadece Cuma", "not all", "no, only". A refusal in the
-# same message overrides the ask.
-_REFUSALS = re.compile(
-    r"\b(gosterme|gostermeyin|istemiyorum|hayir|yalniz|sadece|"
-    r"not all|do not show|don't show|no thanks|no, only)"
+_NEGATED_EVERYTHING = re.compile(
+    r"(?:"
+    r"\b(?:hepsi|hepsini|tamami|tamamini|tumu|tumunu|butun|butununu|"
+    r"all(?:\s+of\s+(?:them|it))?|everything|the\s+rest)\b"
+    r"(?:[^.!?\n]{0,32})?\b(?:istemiyorum|istemeyin|gosterm(?:e|eyin|eyelim)|"
+    r"cikarma|listeleme|gerek\s+yok|no|not|don't|dont|do\s+not)\b|"
+    r"\b(?:hayir|hayır|no|not|don't|dont|do\s+not)\b"
+    r"(?:[^.!?\n]{0,32})?\b(?:hepsi|hepsini|tamami|tamamini|tumu|tumunu|butun|butununu|"
+    r"all(?:\s+of\s+(?:them|it))?|everything|the\s+rest)\b"
+    r")",
+    re.IGNORECASE,
+)
+_CONDITIONAL_OFFER = re.compile(
+    r"(?:\b(?:istersen|dilersen|ister\s+misin|if\s+you\s+want|would\s+you\s+like|"
+    r"i\s+can|can\s+show|i\s+could|show\s+you)\b|"
+    r"\b(?:gosterebilirim|gostereyim|listeleyebilirim|listeleyeyim|"
+    r"cikarabilirim|cikarayim)\b)",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE = re.compile(
+    r"^(?:"
+    r"(?:evet|tamam|olur|peki|lutfen|yes|okay|ok|sure|please|go\s+ahead|do\s+it|devam(?:\s+et)?)"
+    r"(?:[\s,;:!?-]+(?:goster|listele|cikar|devam\s+et|lutfen|please|go\s+ahead|do\s+it))?|"
+    r"(?:goster|listele|cikar|devam\s+et)"
+    r")[\s.!?]*$",
+    re.IGNORECASE,
+)
+_LIMITED_REQUEST = re.compile(
+    r"\b(?:sadece|yalnizca|yalnızca|ilk|son|birkaç|birkac|some|only|just|"
+    r"one|few|top\s+\d+)\b",
+    re.IGNORECASE,
 )
 
 
-def refuses_everything(message: str | None) -> bool:
+def wants_everything(message: str | None) -> bool:
+    """Whether a message asks for (or offers) every item of a list."""
     if not message:
         return False
-    return bool(_REFUSALS.search(_fold(message)))
+    folded = _fold(message)
+    return bool(_EVERYTHING.search(folded)) and not bool(_NEGATED_EVERYTHING.search(folded))
 
 
-def grants_expand(message: str | None) -> bool:
-    """Whether this message, and only this message, asks for every item.
+def _explicit_everything_request(message: str | None) -> bool:
+    """Whether the latest user message positively asks for the full list.
 
-    A previous offer is not consent: "I can show all of them" followed by
-    "No, only Friday" must not authorize the full read. The current message has
-    to ask, and it must not refuse.
+    ``wants_everything`` is intentionally broad because it is also useful when
+    recognizing the wording of an assistant offer. This stricter predicate is
+    the API authorization boundary: conditional offers, negations and bounded
+    requests do not grant ``resource.expand``.
     """
-    return wants_everything(message) and not refuses_everything(message)
+    if not message:
+        return False
+    folded = _fold(message)
+    if _NEGATED_EVERYTHING.search(folded) or _LIMITED_REQUEST.search(folded):
+        return False
+    if _CONDITIONAL_OFFER.search(folded):
+        return False
+    return bool(_EVERYTHING.search(folded))
+
+
+def _offers_everything(message: str | None) -> bool:
+    """Whether an assistant message explicitly offers the complete list."""
+    if not message:
+        return False
+    folded = _fold(message)
+    return bool(_EVERYTHING.search(folded) and _CONDITIONAL_OFFER.search(folded)) and not bool(
+        _NEGATED_EVERYTHING.search(folded)
+    )
+
+
+def _accepts_everything_offer(message: str | None) -> bool:
+    """Whether a user affirmatively accepts a previously stated offer."""
+    if not message:
+        return False
+    folded = _fold(message).strip()
+    if _NEGATED_EVERYTHING.search(folded) or _LIMITED_REQUEST.search(folded):
+        return False
+    # An explicit full-list request is stronger than a short acceptance token.
+    return _explicit_everything_request(folded) or bool(_AFFIRMATIVE.fullmatch(folded))
+
+
+def expand_allowed_for_turn(latest_user: str | None, previous_assistant: str | None = None) -> bool:
+    """Return the user-granted expansion capability for one chat turn.
+
+    The assistant can describe or offer a full list, but its text is never
+    itself consent. A new turn needs either an affirmative full-list request or
+    a positive latest-user acceptance of an explicit prior offer. In particular,
+    a negated latest message always wins over text quoted from the assistant.
+    """
+    if _explicit_everything_request(latest_user):
+        return True
+    return _offers_everything(previous_assistant) and _accepts_everything_offer(latest_user)
 
 
 def requested_scope(message: str | None) -> dict:

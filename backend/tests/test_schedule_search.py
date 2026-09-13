@@ -9,11 +9,15 @@ either. The title path worked, which is what made it look like the catalog was
 missing the course.
 """
 
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 from app.api.v1.schedule import (
     AiScheduleRequest,
     _course_code_matches,
+    _course_owner_for_search,
     _index_rows,
-    _legacy_code_owner,
     _match_courses,
     _published_code_matches,
     _search_fold,
@@ -71,35 +75,71 @@ def test_both_search_paths_answer_every_code_spelling():
     driven through the same matcher and the same index rows here.
     """
     owner, indexed = _indexed(("5710331", "COMPUTER ORGANIZATION"))
-    legacy_payload = {"courses": [{"course_code": "5710331", "name": "COMPUTER ORGANIZATION"}]}
     for digits in ("331", "5710331", "571"):
         published = _published_code_matches(indexed, named=owner, digits=digits, home=owner)
-        legacy = _match_courses(legacy_payload, owner, digits=digits, title="")
+        legacy = _match_courses(
+            {"courses": [{"course_code": "5710331", "name": "COMPUTER ORGANIZATION"}]},
+            owner,
+            digits=digits,
+            title="",
+        )
         assert [course["code"] for course in published] == ["CENG331"], digits
         assert [course["code"] for course in legacy] == ["CENG331"], digits
     assert _published_code_matches(indexed, named=None, digits="332", home=None) == []
     assert _match_courses({"courses": [{"course_code": "5710331", "name": "X"}]}, owner, digits="332", title="") == []
 
 
-def test_a_seven_digit_code_names_its_own_department():
-    """The legacy listing is fetched for the code's department, not the student's.
-
-    An EE student searching 5710331 used to read EE's listing for a CENG course
-    and find nothing; a student with no saved context got a 422.
-    """
+def test_legacy_full_code_search_uses_the_code_owner_not_the_home_department():
     ceng = departments.resolve("CENG")
-    ee = departments.resolve("EE")
-    assert _legacy_code_owner(None, ee, "5710331") is ceng
-    assert _legacy_code_owner(None, None, "5710331") is ceng
-    assert _legacy_code_owner(None, ee, "331") is ee
-    assert _legacy_code_owner(None, None, "331") is None
-    assert _legacy_code_owner(ceng, ee, "331") is ceng
+    math = departments.resolve("MATH")
+    assert _course_owner_for_search(None, ceng, "2360119").code == math.code
+    assert _course_owner_for_search(None, ceng, "119").code == ceng.code
 
 
-def test_the_curriculum_request_accepts_the_alternate_spellings():
-    parsed = AiScheduleRequest.model_validate({"term": "20261", "course_codes": [{"code": "EE201"}]})
-    assert parsed.semester == "20261"
-    assert [course.code for course in parsed.courses] == ["EE201"]
+async def test_legacy_full_code_search_fetches_the_owning_department(monkeypatch):
+    import app.api.v1.schedule as schedule
+
+    calls = []
+
+    @asynccontextmanager
+    async def catalog_session(_db, _user_id):
+        yield object()
+
+    async def call_course_info(_db, _user_id, tool, values, *, session=None):
+        calls.append((tool, values, session))
+        return {"courses": [{"course_code": "2360119", "name": "Calculus I"}]}
+
+    monkeypatch.setattr(schedule, "published_catalog_reads_enabled", lambda: False)
+    monkeypatch.setattr(schedule, "catalog_session", catalog_session)
+    monkeypatch.setattr(schedule, "call_course_info", call_course_info)
+    db = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(department="CENG", program_code=None)))
+    user = SimpleNamespace(id="user-1")
+
+    result = await schedule.search_courses(query="2360119", semester="20261", user=user, db=db)
+
+    assert calls[0][1] == {"department": "236", "semester": "20261"}
+    assert result["courses"][0]["code"] == "MATH119"
+
+
+async def test_department_search_merges_partial_source_and_directory_matches(monkeypatch):
+    import app.api.v1.schedule as schedule
+
+    monkeypatch.setattr(
+        schedule,
+        "call_course_info",
+        AsyncMock(return_value={"departments": [{"code": "430", "name": "Computer Education"}]}),
+    )
+    user = SimpleNamespace(id="user-1")
+
+    result = await schedule.search_departments(query="Bilgisayar", user=user, db=object())
+
+    assert {option["code"] for option in result["departments"]} >= {"430", "571"}
+
+
+def test_ai_schedule_request_accepts_term_and_course_codes_compatibility_aliases():
+    request = AiScheduleRequest.model_validate({"term": "20261", "course_codes": ["MATH260"]})
+    assert request.semester == "20261"
+    assert [course.code for course in request.courses] == ["MATH260"]
 
 
 def test_a_query_without_digits_does_not_filter_by_code():

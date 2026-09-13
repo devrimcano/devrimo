@@ -41,6 +41,17 @@ def _tool_started(name: str = "search"):
     return _Event("ToolCallStarted", tool=_Event("x", tool_name=name))
 
 
+def _tool_completed(name: str, result=None):
+    return _Event("ToolCallCompleted", tool=_Event("x", tool_name=name, result=result))
+
+
+def _tool_completed_with_error(name: str, result=None):
+    return _Event(
+        "ToolCallCompleted",
+        tool=_Event("x", tool_name=name, result=result, tool_call_error=True),
+    )
+
+
 async def _collect(events):
     async def stream():
         for event in events:
@@ -113,14 +124,9 @@ async def test_repeated_announcements_do_not_stack_in_front_of_the_answer():
 
 
 async def test_a_turn_that_calls_no_tool_is_never_held_back():
-    """There is nothing to announce, so there is nothing to strip.
-
-    Holding such a reply would only cost it the streaming that
-    test_stream_is_actually_chunked exists to protect - which is exactly how
-    the first version of this change was caught.
-    """
-    chunks = await _collect([_content("2 "), _content("eder.")])
-    assert _answer(chunks) == "2 eder."
+    """Safe completed sentences still stream before the final sentence."""
+    chunks = await _collect([_content("2 eder. "), _content("Ders programı hazır.")])
+    assert _answer(chunks) == "2 eder. Ders programı hazır."
     assert _reasoning(chunks) == []
     frames = [c for c in chunks if _answer([c])]
     assert len(frames) == 2, "a toolless reply was buffered instead of streamed"
@@ -156,9 +162,91 @@ async def test_a_long_answer_starts_streaming_before_it_is_finished():
     tail = "!" * 50
     chunks = await _collect([
         _tool_started(),
-        _content("a" * (_PREAMBLE_CHARACTERS + 1)),
+        _content("a" * (_PREAMBLE_CHARACTERS + 1) + "."),
         _content(tail),
     ])
     deltas = [c for c in chunks if _answer([c])]
     assert len(deltas) >= 2, "the answer was buffered instead of streamed"
     assert _answer(chunks).endswith(tail)
+
+
+async def test_an_unsupported_turkish_claim_replaces_the_whole_sentence():
+    chunks = await _collect([_content("Tercihini "), _content("kaydettim.")])
+    assert _answer(chunks) == "Değişiklik doğrulanamadı."
+
+
+async def test_a_claim_split_at_any_boundary_never_reaches_the_student():
+    claim = "kaydettim."
+    for split in range(1, len(claim)):
+        chunks = await _collect([_content(claim[:split]), _content(claim[split:])])
+        answer = _answer(chunks)
+        assert "kaydettim" not in answer
+        assert answer == "Değişiklik doğrulanamadı."
+
+    third_person = "Tercihini kaydetti."
+    for split in range(1, len(third_person)):
+        chunks = await _collect([_content(third_person[:split]), _content(third_person[split:])])
+        assert _answer(chunks) == "Değişiklik doğrulanamadı."
+
+    delivered = "Email delivered."
+    for split in range(1, len(delivered)):
+        chunks = await _collect([_content(delivered[:split]), _content(delivered[split:])])
+        assert _answer(chunks) == "I could not verify email delivery."
+
+    subject_adverb = "Plan successfully updated."
+    for split in range(1, len(subject_adverb)):
+        chunks = await _collect([_content(subject_adverb[:split]), _content(subject_adverb[split:])])
+        assert _answer(chunks) == "I could not verify the change."
+
+async def test_an_incomplete_claim_prefix_is_preserved_as_ordinary_text():
+    assert _answer(await _collect([_content("kay")])) == "kay"
+
+
+async def test_mutation_claims_are_operation_and_result_specific():
+    update_does_not_prove_email = await _collect(
+        [_tool_completed("update", "{}"), _content("I sent the email.")]
+    )
+    assert _answer(update_does_not_prove_email) == "I could not verify email delivery."
+
+    failed_update_does_not_prove_save = await _collect(
+        [_tool_completed_with_error("update", "{}"), _content("Kaydettim.")]
+    )
+    assert _answer(failed_update_does_not_prove_save) == "Değişiklik doğrulanamadı."
+
+    approval_is_not_delivery = await _collect(
+        [_tool_completed("send_email", '{"status":"approval_required"}'), _content("I sent the email.")]
+    )
+    assert _answer(approval_is_not_delivery) == "I could not verify email delivery."
+
+    sent = await _collect(
+        [_tool_completed("send_email", '{"status":"sent","message_id":"m-1"}'), _content("I sent the email.")]
+    )
+    assert _answer(sent) == "I sent the email."
+
+    mixed = await _collect(
+        [_tool_completed("update", {"success": True}), _content("I saved it and sent the email.")]
+    )
+    assert _answer(mixed) == "I saved it and I could not verify email delivery."
+
+
+async def test_a_claim_waits_for_its_later_successful_completion():
+    chunks = await _collect(
+        [_content("I sent the email."), _tool_completed("send_email", '{"status":"sent"}')]
+    )
+    assert _answer(chunks) == "I sent the email."
+
+
+async def test_tool_completion_exposes_only_a_success_boolean():
+    chunks = await _collect(
+        [_tool_completed("update", "private result"), _tool_completed_with_error("undo", "private error")]
+    )
+    completions = [
+        chunk["devrimo"]
+        for chunk in chunks
+        if (chunk.get("devrimo") or {}).get("type") == "tool_call_completed"
+    ]
+    assert completions == [
+        {"type": "tool_call_completed", "tool": "update", "server": None, "success": True},
+        {"type": "tool_call_completed", "tool": "undo", "server": None, "success": False},
+    ]
+    assert all("private" not in str(item) for item in completions)

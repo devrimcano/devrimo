@@ -19,7 +19,6 @@ meant to speed up.
 """
 
 from app.agents.scholar.results import bound, project_result
-from app.workspace.client import is_terminal_catalog_miss
 
 # The read each intent almost always needs, and only when the message names
 # exactly one course: a prefetch that guesses wrong costs more than the model
@@ -87,6 +86,7 @@ async def prefetch_dependencies(dependencies: dict, *, client=None) -> dict:
 
     from fastapi import HTTPException
 
+    from app.workspace.client import is_terminal_catalog_miss
     from app.workspace.resources import ResourceRef
 
     entries: list[dict] = []
@@ -100,14 +100,23 @@ async def prefetch_dependencies(dependencies: dict, *, client=None) -> dict:
         try:
             result = await client.read(reference)
         except HTTPException as exc:
-            # A miss is the answer: "not available in the published release" is
+            # A 404 is the answer: "not available in the published release" is
             # final, and handing it over up front ends the search before a tool
-            # call spends a model step discovering it. The real client reports
-            # every MCP error result as 502, so the terminal miss is recognized
-            # from the message rather than the status.
-            detail = str(getattr(exc, "detail", "") or "")
-            if exc.status_code == 404 or is_terminal_catalog_miss(detail):
-                entries.append({"kind": kind, "key": plan["course"], "error": detail[:300]})
+            # call spends a model step discovering it.
+            if exc.status_code == 404 or is_terminal_catalog_miss(
+                exc.detail,
+                name="read",
+                arguments={"resource": reference.model_dump()},
+            ):
+                entries.append(
+                    {
+                        "kind": kind,
+                        "key": plan["course"],
+                        "term": plan["term"],
+                        "section": plan["section"] if kind == "catalog.eligibility" else None,
+                        "error": str(exc.detail)[:300],
+                    }
+                )
             continue
         except Exception:
             continue

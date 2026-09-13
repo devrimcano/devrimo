@@ -10,9 +10,8 @@ from app.agents.scholar.intent import (
     classify,
     context_fields,
     current_focus,
-    grants_expand,
+    expand_allowed_for_turn,
     guidance,
-    refuses_everything,
     requested_scope,
     wants_everything,
 )
@@ -86,6 +85,21 @@ def test_a_term_named_in_words_is_reported_unresolved():
     assert requested_scope("gelecek dönem EE 201 açılır mı")["term_unresolved"] is True
 
 
+def test_relative_and_attached_term_forms_are_conservative():
+    # The active term is the safe default for an explicitly current-term
+    # request; only relative forms that point away from it block prefetch.
+    assert requested_scope("bu dönemde EE 201 kaç kredi")["term_unresolved"] is False
+    assert requested_scope("this semester EE 201 kaç kredi")["term_unresolved"] is False
+    assert requested_scope("geçen dönemki EE 201 ön koşulu")["term_unresolved"] is True
+    assert requested_scope("coming semester EE 201 prerequisites")["term_unresolved"] is True
+    assert requested_scope("20252de EE 201 ön koşulu")["term"] == "20252"
+    assert requested_scope("20252'de EE 201 ön koşulu")["term"] == "20252"
+
+
+def test_yaz_as_an_imperative_is_not_a_term_hint():
+    assert requested_scope("EE 201 ön koşulunu yaz")["term_unresolved"] is False
+
+
 def test_a_course_number_is_not_read_as_a_section():
     scope = requested_scope("EE 201 şubesi uygun mu")
     assert scope["section"] is None
@@ -101,23 +115,21 @@ def test_wants_everything_reads_both_keyboards():
     assert wants_everything(None) is False
 
 
-def test_a_refusal_overrides_the_ask_and_only_the_current_message_grants():
-    assert refuses_everything("Hepsini gösterme, sadece Cuma.")
-    assert refuses_everything("No, only Friday.")
-    assert not grants_expand("Hepsini gösterme.")
-    assert not grants_expand("Hayır, sadece Cuma.")
-    assert grants_expand("Hepsini göster.")
-    assert grants_expand("Tümünü listeler misin?")
-    assert not grants_expand(None)
-
-
-def test_relative_and_attached_term_wordings_are_seen():
-    assert requested_scope("next semester EE 201 prerequisites?")["term_unresolved"] is True
-    assert requested_scope("20252de EE 201 ön koşulu nedir?")["term"] == "20252"
-    assert requested_scope("20261'de EE 201 ön koşulu nedir?")["term"] == "20261"
-    # "yaz" is the ordinary imperative here, not Summer.
-    assert requested_scope("EE201 dersinin ön koşulu nedir? Açılan şubeleri de yaz.")["term_unresolved"] is False
-    assert requested_scope("yaz döneminde EE 201 açılır mı?")["term_unresolved"] is True
+def test_expansion_requires_affirmative_latest_user_consent():
+    offer = "İstersen kalan şubelerin hepsini gösterebilirim."
+    assert expand_allowed_for_turn("Evet, göster.", offer)
+    assert expand_allowed_for_turn("Yes, please.", "I can show all of them.")
+    assert expand_allowed_for_turn("Okay, go ahead.", "I can show all of them.")
+    assert expand_allowed_for_turn("Tamam, hepsini göster.", offer)
+    assert not expand_allowed_for_turn("Hayır, hepsini istemiyorum.", offer)
+    assert not expand_allowed_for_turn("Sadece ilk iki şubeyi göster.", offer)
+    assert not expand_allowed_for_turn("I'm not sure.", offer)
+    assert not expand_allowed_for_turn("No, only Friday.", offer)
+    # Mentioning the list in an assistant answer is not an offer and cannot
+    # grant capability to a short, otherwise ambiguous acknowledgement.
+    assert not expand_allowed_for_turn("Tamam.", "Şu an hepsini gösteremem.")
+    assert expand_allowed_for_turn("Hepsini göster.", "Şu an hepsini gösteremem.")
+    assert expand_allowed_for_turn("show all", "Here is the preview.")
 
 
 def test_an_events_question_is_an_announcements_question():

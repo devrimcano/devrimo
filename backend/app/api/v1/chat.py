@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import manager
 from app.agents.scholar.context import build_run_dependencies
-from app.agents.scholar.intent import grants_expand
+from app.agents.scholar.intent import expand_allowed_for_turn
 from app.agents.store import get_agno_db
 from app.assistant.models import AssistantRun
 from app.assistant.queue import enqueue_run, get_owned_run, request_cancel, stream_events
@@ -62,7 +62,10 @@ async def chat_completions(
     user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    text = next((m.content for m in reversed(body.messages) if m.role == "user"), None)
+    latest_user_index = next(
+        (index for index in range(len(body.messages) - 1, -1, -1) if body.messages[index].role == "user"), None
+    )
+    text = body.messages[latest_user_index].content if latest_user_index is not None else None
     if not text:
         _reject("empty_message", user.id, kind="chat_turn")
         raise HTTPException(400, "No user message to respond to")
@@ -74,14 +77,17 @@ async def chat_completions(
     agent = await manager.get_or_create_agent(db, user.id)
     await manager.ensure_running(db, agent)
     session = await _get_or_create_chat_session(db, user.id, agent.id, session_id)
-    # "Hepsini göster" is honored only when the student's own message asks for
-    # it and does not refuse it. A previous offer is not consent, and a model
-    # that decides to fetch everything on its own pays for it on every step.
+    # Expansion is a capability granted by the latest user message. Assistant
+    # text can establish that an offer was made, but never grants consent by
+    # merely containing words such as "hepsini"; a negated user reply wins.
+    previous_reply = None
+    if latest_user_index and body.messages[latest_user_index - 1].role == "assistant":
+        previous_reply = body.messages[latest_user_index - 1].content
     dependencies = await build_run_dependencies(
         db,
         user.id,
         message=text,
-        expand_allowed=grants_expand(text),
+        expand_allowed=expand_allowed_for_turn(text, previous_reply),
     )
     try:
         run = await enqueue_run(

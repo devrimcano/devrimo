@@ -1,11 +1,17 @@
 """Single Agno-to-application SSE mapper shared by durable execution."""
 
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
-from app.agents.scholar.audit import jargon, unsupported_claims
+from app.agents.scholar.audit import (
+    completed_tool_names,
+    jargon,
+    remove_unsupported_claims,
+    unsupported_claims,
+)
 from app.logging import get_logger
 from app.observability import capture
 from app.observability.turns import TurnObservation
@@ -13,8 +19,8 @@ from app.observability.turns import TurnObservation
 logger = get_logger(__name__)
 
 
-def _audit_answer(answer: str, completed_tools: list[str], user_id: str) -> None:
-    """Make the prompt-only guarantees countable. The answer is never altered.
+def _audit_answer(answer: str, completed_tools: list[dict], user_id: str) -> None:
+    """Make the prompt-only guarantees countable after stream enforcement.
 
     The success verb and the jargon are the only things reported; the answer
     text stays out of the event, because it is the student's.
@@ -28,7 +34,7 @@ def _audit_answer(answer: str, completed_tools: list[str], user_id: str) -> None
         user_id=user_id,
         unsupported_claims=claims,
         jargon=internal,
-        tools=completed_tools,
+        tools=completed_tool_names(completed_tools),
     )
     capture("agent_answer_audit", distinct_id=user_id, unsupported_claims=claims, jargon=internal)
 
@@ -129,19 +135,22 @@ async def _serialize_events(
     # False until this segment has been committed as the answer. Once committed
     # the rest of the segment streams through live, as it always did.
     streaming = False
-    # Nothing is held back until this run has actually called a tool. A turn
-    # that answers without tools has no announcements to strip - there is
-    # nothing for the model to announce - and holding its reply back would only
-    # cost it the streaming that test_stream_is_actually_chunked exists to
-    # protect. It is also why the first announcement of a turn survives: it is
-    # written before any tool call, and at that point this cannot yet tell an
-    # announcement from a reply. One lead-in sentence is not the reported
-    # defect; four of them stacked in front of the answer is.
+    # Once a tool has been called, short complete sentences are held as
+    # possible preambles until the next tool boundary. A toolless turn emits
+    # each completed sentence immediately; its final incomplete sentence is
+    # flushed at end-of-run.
     used_a_tool = False
     # The answer as it was actually sent, and the mutations that actually
     # completed, for the end-of-turn audit.
     answer_parts: list[str] = []
-    completed_tools: list[str] = []
+    completed_tools: list[dict] = []
+    # Keep the current sentence until its boundary is known. This lets an
+    # unsupported claim replace the whole sentence before any prefix (such as
+    # ``"I "`` or ``"Tercihini "``) reaches the student. A complete sentence
+    # with a claim is held until its matching operation proves it; subsequent
+    # text stays behind it so output order remains correct.
+    pending_text = ""
+    pending_blocked = False
 
     def _hold(content: str):
         """Buffer a fragment, and hand back whatever is safe to send now."""
@@ -157,7 +166,11 @@ async def _serialize_events(
 
     def _discard_preamble() -> str | None:
         """Drop the held announcement, returning it for the reasoning panel."""
-        nonlocal streaming
+        nonlocal pending_blocked, pending_text, streaming
+        if pending_text:
+            held.append(remove_unsupported_claims(pending_text, completed_tools))
+            pending_text = ""
+            pending_blocked = False
         if streaming or not held:
             held.clear()
             streaming = False
@@ -166,6 +179,78 @@ async def _serialize_events(
         held.clear()
         return preamble.strip() or None
 
+    def _safe_sentences(content: str) -> list[str]:
+        """Return complete sentences safe to emit, retaining blocked text."""
+        nonlocal pending_blocked, pending_text
+        combined = pending_text + content
+        pending_text = ""
+        if not combined:
+            return []
+        parts = re.split(r"(?<=[.!?\n])", combined)
+        trailing = ""
+        if parts and not re.search(r"[.!?\n]$", parts[-1]):
+            trailing = parts.pop()
+        output: list[str] = []
+        kept: list[str] = []
+        blocked = pending_blocked
+        for part in parts:
+            if not part:
+                continue
+            if blocked or unsupported_claims(part, completed_tools):
+                blocked = True
+                kept.append(part)
+            else:
+                output.append(part)
+        if trailing:
+            if blocked:
+                kept.append(trailing)
+            else:
+                pending_text = trailing
+        pending_text = "".join(kept) + pending_text
+        pending_blocked = blocked
+        return output
+
+    def _release_pending() -> list[str]:
+        """Release leading blocked sentences after a successful completion."""
+        nonlocal pending_blocked, pending_text
+        if not pending_text or not pending_blocked:
+            return []
+        combined = pending_text
+        pending_text = ""
+        parts = re.split(r"(?<=[.!?\n])", combined)
+        trailing = ""
+        if parts and not re.search(r"[.!?\n]$", parts[-1]):
+            trailing = parts.pop()
+        output: list[str] = []
+        kept: list[str] = []
+        blocked = False
+        for part in parts:
+            if not part:
+                continue
+            if blocked or unsupported_claims(part, completed_tools):
+                blocked = True
+                kept.append(part)
+            else:
+                output.append(part)
+        if trailing:
+            if blocked:
+                kept.append(trailing)
+            else:
+                pending_text = trailing
+        pending_text = "".join(kept) + pending_text
+        pending_blocked = blocked
+        return output
+
+    def _flush_pending() -> str:
+        """Flush the final sentence, neutralizing any unsupported claim."""
+        nonlocal pending_blocked, pending_text
+        if not pending_text:
+            return ""
+        pending = pending_text
+        pending_text = ""
+        pending_blocked = False
+        return remove_unsupported_claims(pending, completed_tools)
+
     try:
         async for event in events:
             name = getattr(event, "event", None)
@@ -173,10 +258,11 @@ async def _serialize_events(
             if name == RunEvent.run_content.value:
                 content = getattr(event, "content", None)
                 if isinstance(content, str) and content:
-                    sendable = _hold(content)
-                    if sendable:
-                        answer_parts.append(sendable)
-                        yield _chunk(model, delta={"role": "assistant", "content": sendable})
+                    for sentence in _safe_sentences(content):
+                        sendable = _hold(sentence)
+                        if sendable:
+                            answer_parts.append(sendable)
+                            yield _chunk(model, delta={"role": "assistant", "content": sendable})
 
             elif name == RunEvent.tool_call_started.value:
                 # Whatever the model said just before reaching for a tool was
@@ -192,10 +278,31 @@ async def _serialize_events(
 
             elif name == RunEvent.tool_call_completed.value:
                 tool = _tool_name(event)
+                execution = getattr(event, "tool", None)
+                result = getattr(execution, "result", None) if execution is not None else None
+                if result is None:
+                    result = getattr(event, "content", None)
                 if tool:
-                    completed_tools.append(tool)
+                    completed_tools.append(
+                        {
+                            "tool": tool,
+                            "result": result,
+                            "tool_call_error": bool(getattr(execution, "tool_call_error", False)),
+                        }
+                    )
+                for sentence in _release_pending():
+                    sendable = _hold(sentence)
+                    if sendable:
+                        answer_parts.append(sendable)
+                        yield _chunk(model, delta={"role": "assistant", "content": sendable})
                 yield _chunk(
-                    model, extension={"type": "tool_call_completed", "tool": tool, "server": _tool_server(tool)}
+                    model,
+                    extension={
+                        "type": "tool_call_completed",
+                        "tool": tool,
+                        "server": _tool_server(tool),
+                        "success": not bool(getattr(execution, "tool_call_error", False)),
+                    },
                 )
 
             elif name == RunEvent.tool_call_error.value:
@@ -252,6 +359,12 @@ async def _serialize_events(
         # A short answer never crossed the threshold, so it is still held. No
         # tool call followed it, which is what makes it the answer rather than
         # an announcement.
+        released = _flush_pending()
+        if released:
+            sendable = _hold(released)
+            if sendable:
+                answer_parts.append(sendable)
+                yield _chunk(model, delta={"role": "assistant", "content": sendable})
         if held and not streaming:
             answer_parts.append("".join(held))
             yield _chunk(model, delta={"role": "assistant", "content": "".join(held)})
