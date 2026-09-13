@@ -640,37 +640,6 @@ class ScheduleDataCache(Base):
     )
 
 
-class CourseOffering(Base):
-    __tablename__ = "course_offerings"
-    __table_args__ = (
-        UniqueConstraint("term", "course_code", "section", name="uq_course_offerings_term_course_section"),
-        Index("ix_course_offerings_term_course", "term", "course_code"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    term: Mapped[str] = mapped_column(String(32), nullable=False)
-    course_code: Mapped[str] = mapped_column(String(32), nullable=False)
-    section: Mapped[str] = mapped_column(String(16), default="1", nullable=False)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    credits: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
-    schedule: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
-    campus: Mapped[str | None] = mapped_column(Text, nullable=True)
-    department: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-
-class CourseRule(Base):
-    __tablename__ = "course_rules"
-
-    course_code: Mapped[str] = mapped_column(String(32), primary_key=True)
-    prerequisites: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    exclusions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    catalog_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-
 class PlanningPolicy(Base):
     __tablename__ = "planning_policies"
     __table_args__ = (

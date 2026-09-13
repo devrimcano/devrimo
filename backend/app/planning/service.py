@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.directory import METU_ID
 from app.campus.prerequisites import evaluate_prerequisites
-from app.db.models import CourseOffering, CourseRule, PlanningPolicy, StudentAcademicSnapshot, StudentContext
+from app.db.models import PlanningPolicy, StudentAcademicSnapshot, StudentContext
 from app.logging import get_logger
 from app.planning.solver import SolverGroup, enumerate_solutions
 
@@ -258,11 +258,11 @@ def _fits_user_constraints(offering: Any, request: SemesterPlanRequest) -> tuple
 
 
 def _best_combination(
-    groups: list[tuple[str, list[CourseOffering]]],
+    groups: list[tuple[str, list[Any]]],
     required: set[str],
     preferred: set[str],
     max_credits: float,
-) -> list[CourseOffering]:
+) -> list[Any]:
     solver_groups = [SolverGroup(key=code, options=tuple(sections)) for code, sections in groups]
     solutions = enumerate_solutions(
         solver_groups,
@@ -274,7 +274,7 @@ def _best_combination(
             sum(float(choice.option.credits) for choice in selected) + float(offering.credits) <= max_credits
         ),
     )
-    best: list[CourseOffering] = []
+    best: list[Any] = []
     best_score = (-1, -1.0, -1, 0)
     for solution in solutions:
         selected = [choice.option for choice in solution]
@@ -739,11 +739,8 @@ async def plan_semester(db: AsyncSession, user_id: UUID, request: SemesterPlanRe
                 "course_statuses": [],
                 "missing_required_courses": sorted({_code(item) for item in request.required_courses}),
             }
-    else:
-        offerings = (
-            await db.execute(select(CourseOffering).where(CourseOffering.term == request.term))
-        ).scalars().all()
-        rules = {rule.course_code: rule for rule in (await db.execute(select(CourseRule))).scalars()}
+    else:  # pragma: no cover - published mode is unconditional
+        raise HTTPException(503, "The published academic catalog is not available yet.")
     policy = (
         await db.execute(
             select(PlanningPolicy)

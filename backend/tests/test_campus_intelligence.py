@@ -16,8 +16,6 @@ from app.db.models import (
     CampusKnowledgeRecord,
     CampusSource,
     CampusSourceRevision,
-    CourseOffering,
-    CourseRule,
     KnowledgeEmbeddingSettings,
     Organization,
     StudentAcademicSnapshot,
@@ -59,7 +57,6 @@ async def test_scoped_admin_cannot_configure_network_providers_or_write_global_c
     })
     assert response.status_code == 403, response.text
     async with SessionLocal() as db:
-        assert await db.scalar(select(CourseOffering)) is None
         assert await db.scalar(select(KnowledgeEmbeddingSettings)) is None
 
 
@@ -583,8 +580,6 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
 
 async def test_private_records_are_not_embedding_candidates():
     assert "embedding" not in StudentAcademicSnapshot.__table__.columns
-    assert "embedding" not in CourseOffering.__table__.columns
-    assert "embedding" not in CourseRule.__table__.columns
     assert "embedding" not in CampusKnowledgeRecord.__table__.columns
     assert "embedding_384" not in CampusKnowledgeRecord.__table__.columns
     assert "embedding_384" in KnowledgeIndexVector.__table__.columns
