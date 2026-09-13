@@ -204,6 +204,11 @@ async def test_a_claim_split_at_any_boundary_never_reaches_the_student():
         chunks = await _collect([_content(subject_adverb[:split]), _content(subject_adverb[split:])])
         assert _answer(chunks) == "I could not verify the change."
 
+    passive_adverb = "The plan is now updated."
+    for split in range(1, len(passive_adverb)):
+        chunks = await _collect([_content(passive_adverb[:split]), _content(passive_adverb[split:])])
+        assert _answer(chunks) == "I could not verify the change."
+
 async def test_an_incomplete_claim_prefix_is_preserved_as_ordinary_text():
     assert _answer(await _collect([_content("kay")])) == "kay"
 

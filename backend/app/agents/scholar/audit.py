@@ -94,7 +94,7 @@ _CLAIM_PHRASES = frozenset(
 # arrives in a later model delta. Turkish finite claim verbs are detected from
 # their own partial word; the nouns below cover the common object-first form
 # ("Tercihini kaydettim") before that verb starts arriving.
-_ASSERTION_SUBJECTS = (
+_ENGLISH_ASSERTION_SUBJECTS = (
     "i",
     "we",
     "email",
@@ -113,6 +113,8 @@ _ASSERTION_SUBJECTS = (
     "the plan",
     "the schedule",
     "the timetable",
+)
+_TURKISH_ASSERTION_SUBJECTS = (
     "tercih",
     "tercihin",
     "tercihini",
@@ -128,29 +130,20 @@ _ASSERTION_SUBJECTS = (
     "mail",
     "mesaj",
 )
+_ASSERTION_ADVERBS = ("now", "just", "already", "successfully")
+_ASSERTION_AUXILIARIES = ("have", "has", "have been", "has been", "was", "were", "is", "are")
 _ASSERTION_PREFIXES = frozenset(
-    prefix
-    for subject in _ASSERTION_SUBJECTS
-    for prefix in (
-        subject,
-        f"{subject} have",
-        f"{subject} has",
-        f"{subject} have been",
-        f"{subject} has been",
-        f"{subject} was",
-        f"{subject} were",
-        f"{subject} is",
-        f"{subject} are",
-        f"{subject} just",
-        f"{subject} already",
-        f"{subject} successfully",
-        f"{subject} was just",
-        f"{subject} was already",
-        f"{subject} was successfully",
-        f"{subject} has just",
-        f"{subject} has already",
-        f"{subject} has successfully",
-        f"{subject} has been successfully",
+    _TURKISH_ASSERTION_SUBJECTS
+    + _ENGLISH_ASSERTION_SUBJECTS
+    + tuple(
+        f"{subject} {suffix}"
+        for subject in _ENGLISH_ASSERTION_SUBJECTS
+        for suffix in (
+            "'ve",
+            *_ASSERTION_ADVERBS,
+            *_ASSERTION_AUXILIARIES,
+            *(f"{auxiliary} {adverb}" for auxiliary in _ASSERTION_AUXILIARIES for adverb in _ASSERTION_ADVERBS),
+        )
     )
 )
 _NEGATED_ASSERTION = re.compile(
