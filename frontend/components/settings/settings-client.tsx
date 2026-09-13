@@ -99,10 +99,10 @@ export function SettingsClient() {
 
       <nav
         aria-label={pick({ tr: "Ayar bölümleri", en: "Settings sections" })}
-        className="sticky top-16 z-20 -mx-4 mt-3 flex gap-2 overflow-x-auto border-y bg-background/95 px-4 py-2.5 shadow-sm [scrollbar-width:none] backdrop-blur [&::-webkit-scrollbar]:hidden lg:hidden"
+        className="sticky top-16 z-20 -mx-4 mt-3 flex flex-wrap gap-2 border-y bg-background/95 px-4 py-2.5 shadow-sm backdrop-blur lg:hidden"
       >
         {navigation.map(({ href, icon: Icon, label }) => (
-          <a key={href} href={href} className="flex min-h-10 shrink-0 items-center gap-2 rounded-full border bg-card px-3 text-xs font-medium shadow-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+          <a key={href} href={href} className="flex min-h-11 shrink-0 items-center gap-2 rounded-full border bg-card px-3 text-xs font-medium shadow-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
             <Icon className="size-3.5 text-primary" />
             {label}
           </a>
