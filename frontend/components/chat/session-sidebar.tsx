@@ -22,6 +22,7 @@ import { prefetchSessionMessages } from "@/hooks/useChat";
 export function SessionSidebar({
   sessions,
   activeId,
+  openingId,
   onNewChat,
   onSelect,
   onDelete,
@@ -36,6 +37,7 @@ export function SessionSidebar({
 }: {
   sessions: ChatSession[];
   activeId?: string;
+  openingId?: string | null;
   onNewChat: () => void;
   onSelect: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
@@ -97,15 +99,20 @@ export function SessionSidebar({
           ) : (
             sessions.map((session) => {
               const active = activeId === session.id;
+              const opening = openingId === session.id;
+              // A selected-but-still-loading conversation is highlighted like
+              // the active one: the click has to register before the fetch
+              // finishes, or the row looks dead for half a second.
+              const highlighted = active || opening;
               return (
                 <div
                   key={session.id}
                   className={cn(
                     "group relative isolate flex min-h-12 items-center overflow-hidden rounded-xl transition-colors duration-300",
-                    active ? "text-sidebar-foreground" : "text-muted-foreground hover:bg-card/45 hover:text-sidebar-foreground",
+                    highlighted ? "text-sidebar-foreground" : "text-muted-foreground hover:bg-card/45 hover:text-sidebar-foreground",
                   )}
                 >
-                  {active ? (
+                  {highlighted ? (
                     <motion.div
                       layoutId={`active-chat-surface-${instanceId}`}
                       className="absolute inset-0 -z-10 rounded-xl border border-card/70 bg-card/80 shadow-[0_1px_0_rgb(255_255_255/85%)_inset,0_8px_24px_rgb(65_45_36/9%)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.065] dark:shadow-[0_1px_0_rgb(255_255_255/8%)_inset,0_10px_28px_rgb(0_0_0/24%)]"
@@ -130,11 +137,13 @@ export function SessionSidebar({
                     onPointerDown={() => prefetchSessionMessages(session.id)}
                     onFocus={() => prefetchSessionMessages(session.id)}
                     aria-current={active ? "page" : undefined}
+                    aria-busy={opening || undefined}
                   >
-                    <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg transition-colors duration-300", active ? "bg-primary/10 text-primary" : "bg-sidebar-accent/55 text-muted-foreground group-hover:text-foreground")}>
-                      <MessageSquareIcon className="size-3.5" />
+                    <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg transition-colors duration-300", highlighted ? "bg-primary/10 text-primary" : "bg-sidebar-accent/55 text-muted-foreground group-hover:text-foreground")}>
+                      {opening ? <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <MessageSquareIcon className="size-3.5" />}
                     </span>
-                    <span className={cn("min-w-0 flex-1 truncate", active && "font-medium tracking-[-0.01em]")}>{session.title?.trim() || pick({ tr: "İsimsiz sohbet", en: "Untitled chat" })}</span>
+                    <span className={cn("min-w-0 flex-1 truncate", highlighted && "font-medium tracking-[-0.01em]")}>{session.title?.trim() || pick({ tr: "İsimsiz sohbet", en: "Untitled chat" })}</span>
+                    {opening ? <span className="sr-only">{pick({ tr: "Açılıyor", en: "Opening" })}</span> : null}
                   </button>
                   <Button
                     variant="ghost"

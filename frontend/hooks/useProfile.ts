@@ -20,7 +20,20 @@ export function useProfile() {
   const update = useMutation({
     mutationFn: (input: ProfileInput) =>
       jsonFetch<Profile>("/api/profile", { method: "PATCH", body: input }),
+    // Optimistic: a preference switch is not a transaction, and waiting for a
+    // round trip made the control read as unresponsive. A failure puts the
+    // previous row back.
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: ["profile"] });
+      const previous = queryClient.getQueryData<Profile>(["profile"]);
+      if (previous) queryClient.setQueryData<Profile>(["profile"], { ...previous, ...input } as Profile);
+      return { previous };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.previous) queryClient.setQueryData(["profile"], context.previous);
+    },
     onSuccess: (profile) => queryClient.setQueryData(["profile"], profile),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["profile"] }),
   });
 
   return {

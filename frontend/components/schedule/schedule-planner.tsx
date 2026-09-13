@@ -30,6 +30,7 @@ import { usePlanning, type PlanEntry, type PlanEnvelope, type PlanState } from "
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
 import { formatMetuCourseCode } from "@/lib/metu-course-code";
+import { upcomingTerm } from "@/lib/term";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
@@ -156,18 +157,6 @@ const CONSTRAINT_CHUNK = 6;
 // Defined in globals.css as tokens, so a course keeps its colour in both
 // themes and the set stays a set rather than eight opinions.
 const COLORS = ["course-1", "course-2", "course-3", "course-4", "course-5", "course-6", "course-7", "course-8"];
-// METU term codes are a four-digit year plus a part number, where the year is
-// the one the academic year starts in: 20261 is 2026-2027 Fall, and 20253 is
-// the summer school that runs during calendar 2026. There is exactly one term
-// a student can be registering for at any point in the year, so this is
-// derived and displayed rather than offered as a choice.
-function upcomingTerm(now: Date = new Date()) {
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
-  if (month >= 8) return `${year}1`;
-  if (month <= 5) return `${year - 1}2`;
-  return `${year - 1}3`;
-}
 
 function termLabel(code: string, t: (tr: string, en: string) => string) {
   const year = Number(code.slice(0, 4));
@@ -2182,7 +2171,7 @@ export function SchedulePlanner() {
               const summary = favoriteSummary(saved);
               const current = index === favoriteIndex;
               return (
-                <li key={index} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
+                <li key={scheduleKey(saved)} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium">
                       {t(`${index + 1}. program`, `Schedule ${index + 1}`)}

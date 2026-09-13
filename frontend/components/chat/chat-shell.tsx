@@ -556,7 +556,10 @@ export function ChatShell() {
   }
   const pendingDeleteSession = sessions.find((session) => session.id === pendingDeleteId);
 
+  const [openingSessionId, setOpeningSessionId] = useState<string | null>(null);
+
   async function selectSession(sessionId: string) {
+    setOpeningSessionId(sessionId);
     try {
       const history = await loadSessionMessages(sessionId);
       setSeedMessages(toUiMessages(sessionId, history));
@@ -567,6 +570,8 @@ export function ChatShell() {
     } catch (error) {
       captureError(error, { source: "chat_load_session" });
       toast.error(userFacingError(error, pick));
+    } finally {
+      setOpeningSessionId(null);
     }
   }
 
@@ -659,6 +664,7 @@ export function ChatShell() {
               error={sessionsError}
               onRetry={refetch}
               activeId={selectedSessionId}
+              openingId={openingSessionId}
               onNewChat={() => guardThreadSwitch(startNewChat)}
               onSelect={(sessionId) => guardThreadSwitch(() => void selectSession(sessionId))}
               onDelete={requestDelete}
@@ -703,6 +709,7 @@ export function ChatShell() {
             error={sessionsError}
             onRetry={refetch}
             activeId={selectedSessionId}
+              openingId={openingSessionId}
             onNewChat={() => { guardThreadSwitch(startNewChat); setMobileHistoryOpen(false); }}
             onSelect={(sessionId) => { guardThreadSwitch(() => void selectSession(sessionId)); setMobileHistoryOpen(false); }}
             onDelete={(sessionId) => {
