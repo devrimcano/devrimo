@@ -42,6 +42,28 @@ MUTATING_TOOL_NAMES = {"webmail_send_email", "webmail_reply_email", "send_email"
 MAX_SPAN_STATE_CHARS = 4_000
 
 
+# read/search take one nested `resource` object, and models occasionally emit
+# read(kind=..., key=...) with the fields flattened instead - agno rejects
+# that before the tool body runs, so each mistake costs a full turn. Folding
+# the fields here keeps the schema small and the calls working.
+_RESOURCE_FIELDS = frozenset(
+    {"kind", "key", "department", "category", "program_type", "folder", "attachment", "term", "section", "expand"}
+)
+
+
+def _coerce_flat_arguments(function_name: str, arguments) -> dict:
+    if function_name not in {"read", "search"} or not isinstance(arguments, dict):
+        return arguments
+    if "resource" in arguments:
+        return arguments
+    resource = {key: value for key, value in arguments.items() if key in _RESOURCE_FIELDS and value is not None}
+    if not resource:
+        return arguments
+    flattened = {key: value for key, value in arguments.items() if key not in _RESOURCE_FIELDS}
+    flattened["resource"] = resource
+    return flattened
+
+
 def _requested_read(arguments, run_context) -> tuple[str | None, bool]:
     """The resource kind, and whether ``expand`` may actually be honored.
 
@@ -229,6 +251,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
     error = None
     result = None
     try:
+        arguments = _coerce_flat_arguments(function_name, arguments)
         result = function(**arguments)
         if inspect.isawaitable(result):
             result = await result

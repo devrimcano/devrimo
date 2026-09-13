@@ -89,6 +89,18 @@ def build_domain_reads(user_id: UUID) -> dict:
             ]
             selected = exact[0] if len(exact) == 1 else options[0] if len(options) == 1 else None
             if selected is None:
+                # The source misses abbreviations and short queries ("CENG",
+                # "Bilgisayar"); the directory resolves both. Fall back before
+                # reporting not_found so a department question is not a dead end.
+                fallback = department_directory.resolve(value)
+                if fallback is not None:
+                    return {
+                        "code": fallback.code,
+                        "abbreviation": fallback.abbreviation,
+                        "name_en": fallback.name_en,
+                        "name_tr": fallback.name_tr,
+                        "status": "verified",
+                    }
                 return {
                     "status": "ambiguous" if options else "not_found",
                     "query": value,
