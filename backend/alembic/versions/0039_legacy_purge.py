@@ -14,9 +14,8 @@ exist. The reader tolerance stays in place until the next release, so nothing
 that reads these payloads breaks.
 """
 
-import re
-
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0039_legacy_purge"
@@ -67,7 +66,10 @@ def _convert_payloads(bind, table):
         if not isinstance(payload, dict):
             continue
         converted = _canonical(payload)
-        bind.execute(sa.text(f"UPDATE {table} SET payload = :payload WHERE id = :id"), {"payload": converted, "id": row_id})
+        bind.execute(
+            sa.text(f"UPDATE {table} SET payload = :payload WHERE id = :id"),
+            {"payload": converted, "id": row_id},
+        )
 
 
 def upgrade():

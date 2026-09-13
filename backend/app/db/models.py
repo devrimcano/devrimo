@@ -801,5 +801,5 @@ class StudentTimetableRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
-from app.assistant.models import AssistantRun, AssistantRunEvent  # noqa: E402,F401
 from app.academic_catalog import models as academic_catalog_models  # noqa: E402,F401
+from app.assistant.models import AssistantRun, AssistantRunEvent  # noqa: E402,F401

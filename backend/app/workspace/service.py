@@ -42,7 +42,10 @@ def _looks_like_course_code(value: str) -> bool:
     import re
 
     compact = str(value or "").strip()
-    return bool(re.fullmatch(r"\d{7}", compact) or re.fullmatch(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,6}\s?-?\s?\d{3,4}", compact))
+    return bool(
+        re.fullmatch(r"\d{7}", compact)
+        or re.fullmatch(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,6}\s?-?\s?\d{3,4}", compact)
+    )
 
 
 def current_term():
