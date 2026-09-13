@@ -17,7 +17,7 @@ carried a conversation id between them.
 
 import inspect
 
-from app.agents import builders, legacy, models
+from app.agents import builders, models
 from app.agents.scholar import build as scholar_build
 
 
@@ -55,7 +55,6 @@ def test_every_builder_between_the_run_and_the_client_carries_the_session():
     for function in (
         models.build_model,
         builders.build_agent,
-        legacy.build_legacy_agent,
         scholar_build.build_scholar_agent,
     ):
         parameters = inspect.signature(function).parameters

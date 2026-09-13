@@ -133,9 +133,7 @@ class AgentRuntimeSettings(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
     model_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    profile: Mapped[str | None] = mapped_column(String(32), nullable=True)
     max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    legacy_history_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scholar_history_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tool_call_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     learning_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

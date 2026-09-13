@@ -87,9 +87,9 @@ def _setup() -> Any:
                     # The worker and the broker are different services. Labelling
                     # both "devrimo-broker" made a worker outage unfindable.
                     SERVICE_NAME: service_name(),
-                    SERVICE_VERSION: release() or settings.agent_profile,
+                    SERVICE_VERSION: release() or "scholar",
                     "deployment.environment": environment(),
-                    "devrimo.agent_profile": settings.agent_profile,
+                    "devrimo.agent_profile": "scholar",
                     "devrimo.agent_runtime": settings.agent_runtime,
                 }
             )

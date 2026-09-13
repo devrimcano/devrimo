@@ -160,7 +160,7 @@ class ObservabilityMiddleware:
             tags={
                 "path": path,
                 "method": method,
-                "agent_profile": settings.agent_profile,
+                "agent_profile": "scholar",
                 "agent_runtime": settings.agent_runtime,
             },
             log_fields={"path": path, "method": method},

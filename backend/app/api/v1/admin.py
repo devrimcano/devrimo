@@ -943,9 +943,7 @@ async def put_runtime_settings(
         row = AgentRuntimeSettings(id="default", revision=1)
         db.add(row)
     row.model_id = body.model_id.strip()
-    row.profile = body.profile
     row.max_tokens = body.max_tokens
-    row.legacy_history_runs = body.legacy_history_runs
     row.scholar_history_runs = body.scholar_history_runs
     row.tool_call_limit = body.tool_call_limit
     row.learning_enabled = body.learning_enabled

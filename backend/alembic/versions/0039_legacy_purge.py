@@ -79,11 +79,13 @@ def upgrade():
     op.drop_table("course_rules")
     with op.batch_alter_table("agent_runtime_settings") as batch:
         batch.drop_column("legacy_history_runs")
+        batch.drop_column("profile")
 
 
 def downgrade():
     with op.batch_alter_table("agent_runtime_settings") as batch:
         batch.add_column(sa.Column("legacy_history_runs", sa.Integer(), nullable=True))
+        batch.add_column(sa.Column("profile", sa.String(length=32), nullable=True))
     op.create_table(
         "course_offerings",
         sa.Column("id", sa.Uuid(), primary_key=True),

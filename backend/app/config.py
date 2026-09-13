@@ -173,9 +173,6 @@ class Settings(BaseSettings):
     # a scripted agent so the whole API can be exercised in tests and local dev
     # without a model provider or the four campus servers installed.
     agent_runtime: str = "agno"  # "agno" | "fake"
-    # Scholar is the production-hardened profile. Legacy remains available as
-    # an explicit rollback target while a deployment completes its eval gates.
-    agent_profile: str = "scholar"  # "scholar" | "legacy"
 
     agent_model: str = "muse-spark-1.2-contributor"
     agent_openai_base_url: str = "https://opencode.ai/zen/go/v1"
@@ -183,7 +180,6 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 32768
 
     # How many prior runs of a session are replayed into the model's context.
-    agent_history_runs: int = 10
     scholar_history_runs: int = 3
     # Prefetch the one cached catalog read a focused question usually needs, so
     # the turn does not spend a model step asking for it. Off without a deploy

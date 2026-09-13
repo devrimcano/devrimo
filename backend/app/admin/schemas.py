@@ -40,9 +40,7 @@ class MembershipIn(BaseModel):
 
 class RuntimeSettingsIn(BaseModel):
     model_id: str = Field(min_length=2, max_length=255)
-    profile: Literal["scholar", "legacy"]
     max_tokens: int = Field(ge=256, le=131072)
-    legacy_history_runs: int = Field(ge=0, le=50)
     scholar_history_runs: int = Field(ge=0, le=50)
     tool_call_limit: int = Field(ge=1, le=50)
     learning_enabled: bool

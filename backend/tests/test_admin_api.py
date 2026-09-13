@@ -78,9 +78,7 @@ async def test_runtime_settings_are_persisted_and_audited(client, monkeypatch):
     monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(user_id))
     body = {
         "model_id": "openai/gpt-test",
-        "profile": "scholar",
         "max_tokens": 4096,
-        "legacy_history_runs": 8,
         "scholar_history_runs": 4,
         "tool_call_limit": 7,
         "learning_enabled": False,
@@ -169,9 +167,7 @@ async def test_campus_admin_cannot_change_runtime_defaults(client):
         headers=auth_header(user_id),
         json={
             "model_id": "forbidden",
-            "profile": "scholar",
             "max_tokens": 4096,
-            "legacy_history_runs": 2,
             "scholar_history_runs": 2,
             "tool_call_limit": 2,
             "learning_enabled": False,

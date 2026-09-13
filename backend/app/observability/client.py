@@ -233,7 +233,7 @@ def get_posthog() -> Posthog | None:
             # runs and which commit it is running.
             super_properties={
                 **service_properties(),
-                "agent_profile": settings.agent_profile,
+                "agent_profile": "scholar",
                 "agent_runtime": settings.agent_runtime,
                 "agent_model": settings.agent_model,
             },
