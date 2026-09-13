@@ -3284,6 +3284,21 @@ export interface components {
             input_token_price: number;
             /** Output Token Price */
             output_token_price: number;
+            /**
+             * Rate Limit Enabled
+             * @default false
+             */
+            rate_limit_enabled?: boolean;
+            /**
+             * Rate Limit Chat Per Minute
+             * @default 20
+             */
+            rate_limit_chat_per_minute?: number;
+            /**
+             * Rate Limit Catalog Per Minute
+             * @default 120
+             */
+            rate_limit_catalog_per_minute?: number;
             /** Reason */
             reason: string;
         };
