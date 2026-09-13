@@ -116,9 +116,7 @@ export type SystemHealth = {
 
 export type RuntimeSettings = {
   model_id: string;
-  profile: "scholar" | "legacy";
   max_tokens: number;
-  legacy_history_runs: number;
   scholar_history_runs: number;
   tool_call_limit: number;
   learning_enabled: boolean;

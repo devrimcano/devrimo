@@ -288,38 +288,6 @@ def _conflict_response(exc: PlanConflictError) -> JSONResponse:
     )
 
 
-@router.put("/timetable")
-async def save_timetable(
-    body: TimetableIn,
-    user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Compatibility projection writer for one release of old browsers.
-
-    New clients use PATCH with a typed ``PlanChanges`` request.  This route
-    still accepts the old courses/blocks projection and routes it through the
-    same revisioned owner service, so it cannot create a second write path.
-    """
-    current = await read_canonical_timetable(db, user.id, body.term)
-    payload = {
-        "term": body.term,
-        "courses": [course.model_dump() for course in body.courses],
-        "busy_blocks": [block.model_dump() for block in body.busy_blocks],
-    }
-    try:
-        envelope = await update_canonical_timetable(
-            db,
-            user.id,
-            body.term,
-            PlanChanges(operation="replace_projection", projection=payload),
-            current.revision,
-            f"legacy-put:{uuid4()}",
-        )
-    except PlanConflictError as exc:  # pragma: no cover - current was just read
-        return _conflict_response(exc)
-    return {"saved": True, "courses": len(body.courses), **_canonical_response(envelope)}
-
-
 @router.get("/timetable/canonical")
 async def read_canonical_timetable_route(
     term: str = Query(min_length=3, max_length=32),
@@ -1432,17 +1400,3 @@ async def curriculum_plan(
         )
     return response
 
-
-@router.post("/ai-plan", response_model=CurriculumPlanResponse)
-async def ai_schedule_plan(
-    body: AiScheduleRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """The previous name for :func:`curriculum_plan`.
-
-    Kept for one release. A browser holding a cached bundle still calls this
-    route by name, and deleting it in the same deploy that adds the new one
-    breaks every tab that was already open.
-    """
-    return await curriculum_plan(body, user, db)

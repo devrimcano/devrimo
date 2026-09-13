@@ -60,23 +60,25 @@ def _canonical(value):
     return value
 
 
-def _convert_payloads(bind, table):
-    rows = bind.execute(sa.text(f"SELECT id, payload FROM {table}")).fetchall()
-    for row_id, payload in rows:
+def _convert_payloads(bind, table, key_columns):
+    columns = ", ".join(key_columns)
+    rows = bind.execute(sa.text(f"SELECT {columns}, payload FROM {table}")).fetchall()
+    where = " AND ".join(f"{column} = :{column}" for column in key_columns)
+    for row in rows:
+        payload = row[-1]
         if not isinstance(payload, dict):
             continue
-        converted = _canonical(payload)
         bind.execute(
-            sa.text(f"UPDATE {table} SET payload = :payload WHERE id = :id"),
-            {"payload": converted, "id": row_id},
+            sa.text(f"UPDATE {table} SET payload = :payload WHERE {where}"),
+            {"payload": _canonical(payload), **dict(zip(key_columns, row[:-1], strict=False))},
         )
 
 
 def upgrade():
     op.execute("DELETE FROM schedule_data_cache WHERE namespace IN ('course-catalog', 'catalog-warm-wanted')")
     bind = op.get_bind()
-    _convert_payloads(bind, "timetable_revisions")
-    _convert_payloads(bind, "student_timetables")
+    _convert_payloads(bind, "timetable_revisions", ["id"])
+    _convert_payloads(bind, "student_timetables", ["user_id", "term"])
     op.drop_table("course_offerings")
     op.drop_table("course_rules")
     with op.batch_alter_table("agent_runtime_settings") as batch:

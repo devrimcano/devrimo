@@ -333,35 +333,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schedule/timetable": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Read Timetable
-         * @description Read the canonical plan with the legacy projection at the top level.
-         */
-        get: operations["read_timetable_api_v1_schedule_timetable_get"];
-        /**
-         * Save Timetable
-         * @description Compatibility projection writer for one release of old browsers.
-         *
-         *     New clients use PATCH with a typed ``PlanChanges`` request.  This route
-         *     still accepts the old courses/blocks projection and routes it through the
-         *     same revisioned owner service, so it cannot create a second write path.
-         */
-        put: operations["save_timetable_api_v1_schedule_timetable_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /** Update Timetable */
-        patch: operations["update_timetable_api_v1_schedule_timetable_patch"];
-        trace?: never;
-    };
     "/api/v1/schedule/timetable/canonical": {
         parameters: {
             query?: never;
@@ -380,6 +351,27 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedule/timetable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Timetable
+         * @description Read the canonical plan with the legacy projection at the top level.
+         */
+        get: operations["read_timetable_api_v1_schedule_timetable_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Timetable */
+        patch: operations["update_timetable_api_v1_schedule_timetable_patch"];
         trace?: never;
     };
     "/api/v1/schedule/timetable/undo": {
@@ -629,30 +621,6 @@ export interface paths {
          *     would be dozens of campus pages nobody asked for.
          */
         post: operations["curriculum_plan_api_v1_schedule_curriculum_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/schedule/ai-plan": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Ai Schedule Plan
-         * @description The previous name for :func:`curriculum_plan`.
-         *
-         *     Kept for one release. A browser holding a cached bundle still calls this
-         *     route by name, and deleting it in the same deploy that adds the new one
-         *     breaks every tab that was already open.
-         */
-        post: operations["ai_schedule_plan_api_v1_schedule_ai_plan_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3304,15 +3272,8 @@ export interface components {
         RuntimeSettingsIn: {
             /** Model Id */
             model_id: string;
-            /**
-             * Profile
-             * @enum {string}
-             */
-            profile: "scholar" | "legacy";
             /** Max Tokens */
             max_tokens: number;
-            /** Legacy History Runs */
-            legacy_history_runs: number;
             /** Scholar History Runs */
             scholar_history_runs: number;
             /** Tool Call Limit */
@@ -3416,72 +3377,6 @@ export interface components {
         StartImport: {
             /** Limit */
             limit?: number | null;
-        };
-        /** TimetableBlock */
-        TimetableBlock: {
-            /**
-             * Name
-             * @default
-             */
-            name?: string;
-            /** Meetings */
-            meetings?: components["schemas"]["TimetableMeeting"][];
-        };
-        /** TimetableCourse */
-        TimetableCourse: {
-            /** Code */
-            code: string;
-            /**
-             * Name
-             * @default
-             */
-            name?: string;
-            /**
-             * Section
-             * @default
-             */
-            section?: string;
-            /**
-             * Credits
-             * @default 0
-             */
-            credits?: number;
-            /**
-             * Instructor
-             * @default
-             */
-            instructor?: string;
-            /** Meetings */
-            meetings?: components["schemas"]["TimetableMeeting"][];
-        };
-        /** TimetableIn */
-        TimetableIn: {
-            /** Term */
-            term: string;
-            /** Courses */
-            courses?: components["schemas"]["TimetableCourse"][];
-            /** Busy Blocks */
-            busy_blocks?: components["schemas"]["TimetableBlock"][];
-        };
-        /** TimetableMeeting */
-        TimetableMeeting: {
-            /**
-             * Day
-             * @enum {string}
-             */
-            day: "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
-            /** Start */
-            start: number;
-            /**
-             * Duration
-             * @default 1
-             */
-            duration?: number;
-            /**
-             * Room
-             * @default
-             */
-            room?: string;
         };
         /** TimetableUndoIn */
         TimetableUndoIn: {
@@ -4126,10 +4021,10 @@ export interface operations {
             };
         };
     };
-    read_timetable_api_v1_schedule_timetable_get: {
+    read_canonical_timetable_route_api_v1_schedule_timetable_canonical_get: {
         parameters: {
-            query?: {
-                term?: string | null;
+            query: {
+                term: string;
             };
             header?: never;
             path?: never;
@@ -4159,18 +4054,16 @@ export interface operations {
             };
         };
     };
-    save_timetable_api_v1_schedule_timetable_put: {
+    read_timetable_api_v1_schedule_timetable_get: {
         parameters: {
-            query?: never;
+            query?: {
+                term?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TimetableIn"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4208,39 +4101,6 @@ export interface operations {
                 "application/json": components["schemas"]["TimetableUpdateIn"];
             };
         };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    read_canonical_timetable_route_api_v1_schedule_timetable_canonical_get: {
-        parameters: {
-            query: {
-                term: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -4566,39 +4426,6 @@ export interface operations {
         };
     };
     curriculum_plan_api_v1_schedule_curriculum_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AiScheduleRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CurriculumPlanResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    ai_schedule_plan_api_v1_schedule_ai_plan_post: {
         parameters: {
             query?: never;
             header?: never;
