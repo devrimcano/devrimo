@@ -106,21 +106,26 @@ class WorkspaceService:
             result = await self.upstream(ref, query=request.query, limit=request.limit)
             if ref.kind == "catalog.departments":
                 # The source misses abbreviation/name queries; the directory
-                # resolves both. Merge instead of returning an empty picker.
-                existing = {str(item.get("code")) for item in result.get("data", {}).get("departments", [])}
-            merged = list(result.get("data", {}).get("departments", []))
-            wanted = _search_fold(request.query or "")
-            for department in department_directory.all_departments():
-                if department.code in existing:
-                    continue
-                if wanted and not (
-                    wanted in _search_fold(department.abbreviation)
-                    or wanted in _search_fold(department.name_en)
-                    or wanted in _search_fold(department.name_tr)
-                ):
-                    continue
-                merged.append({"code": department.code, "name": department.name_en or department.name_tr})
-                result = {**result, "data": {**result.get("data", {}), "departments": merged}}
+                # resolves both. Merge instead of returning an empty picker,
+                # keeping the source's order first and the page bounded.
+                wanted = _search_fold(request.query or "")
+                merged = list(result.get("data", {}).get("departments", []))
+                existing = {str(item.get("code")) for item in merged}
+                if wanted:
+                    for department in department_directory.all_departments():
+                        if department.code in existing:
+                            continue
+                        if not (
+                            wanted in _search_fold(department.abbreviation)
+                            or wanted in _search_fold(department.name_en)
+                            or wanted in _search_fold(department.name_tr)
+                        ):
+                            continue
+                        merged.append(
+                            {"code": department.code, "name": department.name_en or department.name_tr}
+                        )
+                limit = max(1, min(int(request.limit or 10), 50))
+                result = {**result, "data": {**result.get("data", {}), "departments": merged[:limit]}}
             return result
         if ref.kind == "catalog.department":
             return envelope(ref, await self.domain("lookup_department", value=request.query))

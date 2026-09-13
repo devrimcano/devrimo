@@ -14,6 +14,8 @@ exist. The reader tolerance stays in place until the next release, so nothing
 that reads these payloads breaks.
 """
 
+import json
+
 import sqlalchemy as sa
 
 from alembic import op
@@ -40,7 +42,6 @@ _ALIASES = {
     "startMinute": "start_minute",
     "durationMinutes": "duration_minutes",
 }
-_HOUR_KEYS = ("start", "duration")
 
 
 def _canonical(value):
@@ -52,8 +53,9 @@ def _canonical(value):
                 else:
                     value.pop(camel, None)
         if "start_minute" in value:
-            for key in _HOUR_KEYS:
-                value.pop(key, None)
+            value.pop("start", None)
+        if "duration_minutes" in value:
+            value.pop("duration", None)
         return {key: _canonical(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_canonical(item) for item in value]
@@ -69,8 +71,8 @@ def _convert_payloads(bind, table, key_columns):
         if not isinstance(payload, dict):
             continue
         bind.execute(
-            sa.text(f"UPDATE {table} SET payload = :payload WHERE {where}"),
-            {"payload": _canonical(payload), **dict(zip(key_columns, row[:-1], strict=False))},
+            sa.text(f"UPDATE {table} SET payload = CAST(:payload AS json) WHERE {where}"),
+            {"payload": json.dumps(_canonical(payload)), **dict(zip(key_columns, row[:-1], strict=False))},
         )
 
 

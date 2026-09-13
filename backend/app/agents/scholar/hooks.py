@@ -52,14 +52,14 @@ _RESOURCE_FIELDS = frozenset(
 
 
 def _coerce_flat_arguments(function_name: str, arguments) -> dict:
-    if function_name not in {"read", "search"} or not isinstance(arguments, dict):
+    if function_name not in {"read", "search", "update", "undo"} or not isinstance(arguments, dict):
         return arguments
-    if "resource" in arguments:
+    if isinstance(arguments.get("resource"), dict):
         return arguments
     resource = {key: value for key, value in arguments.items() if key in _RESOURCE_FIELDS and value is not None}
-    if not resource:
-        return arguments
     flattened = {key: value for key, value in arguments.items() if key not in _RESOURCE_FIELDS}
+    if not resource:
+        return flattened if "resource" in arguments else arguments
     flattened["resource"] = resource
     return flattened
 

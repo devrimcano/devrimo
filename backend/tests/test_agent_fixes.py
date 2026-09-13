@@ -19,6 +19,26 @@ def test_flat_read_arguments_are_folded_into_resource():
     assert folded == {"resource": {"kind": "catalog.departments"}, "query": "CENG"}
 
 
+def test_flat_mutation_arguments_are_folded_too():
+    """update and undo take the same resource object and were flattened as well."""
+    folded = _coerce_flat_arguments(
+        "update",
+        {"kind": "planning.timetable", "changes": {"operation": "set_options"}, "expected_revision": 1,
+         "idempotency_key": "k"},
+    )
+    assert folded["resource"] == {"kind": "planning.timetable"}
+    assert folded["expected_revision"] == 1
+    assert _coerce_flat_arguments("undo", {"kind": "planning.timetable", "expected_revision": 0}) == {
+        "resource": {"kind": "planning.timetable"}, "expected_revision": 0,
+    }
+
+
+def test_a_null_resource_does_not_block_the_fold():
+    assert _coerce_flat_arguments("read", {"resource": None, "kind": "my.updates"}) == {
+        "resource": {"kind": "my.updates"}
+    }
+
+
 def test_correct_arguments_are_left_alone():
     expected = {"resource": {"kind": "my.updates"}}
     assert _coerce_flat_arguments("read", expected) == expected
