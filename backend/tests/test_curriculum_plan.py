@@ -156,7 +156,6 @@ async def test_partial_curriculum_is_returned_but_not_cached_or_warmed(monkeypat
         "sections": [],
     }
     write_cached = AsyncMock()
-    record_wanted_courses = AsyncMock()
     monkeypatch.setattr(schedule, "_resolve_department", AsyncMock(return_value="567"))
     monkeypatch.setattr(schedule, "_cached_plan", AsyncMock(return_value=None))
     monkeypatch.setattr(schedule, "_curriculum_courses", AsyncMock(return_value=(
@@ -164,7 +163,6 @@ async def test_partial_curriculum_is_returned_but_not_cached_or_warmed(monkeypat
     )))
     monkeypatch.setattr(schedule, "catalog_session", catalog_session)
     monkeypatch.setattr(schedule, "write_cached", write_cached)
-    monkeypatch.setattr(schedule, "record_wanted_courses", record_wanted_courses)
 
     response = await schedule.curriculum_plan(
         schedule.AiScheduleRequest(semester="20261"),
@@ -175,7 +173,6 @@ async def test_partial_curriculum_is_returned_but_not_cached_or_warmed(monkeypat
     assert response["courses"] == [course]
     assert response["partial"] is True
     write_cached.assert_not_awaited()
-    record_wanted_courses.assert_not_awaited()
 
 
 async def test_an_unreachable_sais_serves_the_last_curriculum_it_gave(monkeypatch):
@@ -251,7 +248,6 @@ async def test_a_complete_curriculum_is_written_to_both_cache_keys(monkeypatch):
     monkeypatch.setattr(schedule, "_curriculum_courses", AsyncMock(return_value=([course], [], [], True)))
     monkeypatch.setattr(schedule, "catalog_session", catalog_session)
     monkeypatch.setattr(schedule, "write_cached", write_cached)
-    monkeypatch.setattr(schedule, "record_wanted_courses", AsyncMock())
 
     response = await schedule.curriculum_plan(
         schedule.AiScheduleRequest(semester="20261"),
