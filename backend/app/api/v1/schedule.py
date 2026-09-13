@@ -14,7 +14,6 @@ import re
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
