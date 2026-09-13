@@ -729,6 +729,7 @@ export function SchedulePlanner() {
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
@@ -1191,6 +1192,28 @@ export function SchedulePlanner() {
     setAlternatives([]);
     setAlternativeIndex(0);
     toast.success(t("Ders havuzu temizlendi.", "Course pool cleared."));
+  }
+
+  /**
+   * Remove a class (its whole section) or a one-off block, with a way back.
+   *
+   * Both the grid and the mobile day list delete on a single tap and the
+   * autosave persists it 350ms later, so without an undo a misread tap was
+   * final. The snapshot restores exactly what was on screen before it.
+   */
+  function removeEntryWithUndo(entry: Entry) {
+    const snapshot = entries;
+    const isCourse = entry.kind === "course";
+    setEntries((current) => current.filter((item) =>
+      isCourse
+        ? !(item.kind === "course" && item.code === entry.code && item.section === entry.section)
+        : item.id !== entry.id));
+    toast.success(
+      isCourse
+        ? t(`${entry.code} programdan kaldırıldı.`, `${entry.code} removed from the schedule.`)
+        : t("Serbest blok kaldırıldı.", "The free block was removed."),
+      { action: { label: t("Geri al", "Undo"), onClick: () => setEntries(snapshot) } },
+    );
   }
 
   /**
@@ -1884,8 +1907,26 @@ export function SchedulePlanner() {
       return;
     }
     const next = [...favorites, entries].slice(-10);
+    const previousFavorites = favorites;
+    const previousIndex = favoriteIndex;
+    const evicted = favorites.length >= 10;
     setFavorites(next);
     setFavoriteIndex(next.length - 1);
+    if (evicted) {
+      toast.success(
+        t("Program favorilere eklendi; en eski favori çıkarıldı.", "Schedule saved; the oldest favorite was dropped."),
+        {
+          action: {
+            label: t("Geri al", "Undo"),
+            onClick: () => {
+              setFavorites(previousFavorites);
+              setFavoriteIndex(previousIndex);
+            },
+          },
+        },
+      );
+      return;
+    }
     toast.success(t("Program favorilere eklendi.", "Schedule added to favorites."));
   }
 
@@ -1928,7 +1969,15 @@ export function SchedulePlanner() {
 
   async function copySummary() {
     const summary = DAYS.map((day) => `${dayLabel(day)}: ${entries.filter((e) => e.day === day).sort((a, b) => itemStartMinute(a) - itemStartMinute(b)).map((e) => `${formatItemTime(e)} ${e.code}-${e.section} (${e.kind === "course" ? (e.room?.trim() || "TBA") : (e.room?.trim() || "—")})`).join(", ") || "—"}`).join("\n");
-    await navigator.clipboard.writeText(summary); toast.success(t("Program özeti kopyalandı.", "Schedule summary copied."));
+    try {
+      await navigator.clipboard.writeText(summary);
+      toast.success(t("Program özeti kopyalandı.", "Schedule summary copied."));
+    } catch {
+      // Clipboard access is permission-gated and can also be denied silently;
+      // the old code awaited it unguarded, so a denial looked like nothing
+      // happened at all.
+      toast.error(t("Özet kopyalanamadı. Tarayıcı panoya izin vermemiş olabilir.", "Could not copy the summary. The browser may have blocked clipboard access."));
+    }
   }
 
   function exportCsv() {
@@ -2156,6 +2205,21 @@ export function SchedulePlanner() {
         </DialogContent>
       </Dialog>
 
+      <AlertDialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Programı temizle", "Clear the schedule")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("Dersler, alternatifler ve favori seçimi ekrandan kalkar; bu değişiklik otomatik kaydedilir.", "Courses, alternatives and the favorite selection leave the screen, and this is saved automatically.")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("Vazgeç", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={clearSchedule}>{t("Temizle", "Clear")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -2238,7 +2302,7 @@ export function SchedulePlanner() {
             <PlannerIntro variant="inline" />
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={clearSchedule}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
+            <Button variant="outline" size="sm" onClick={() => setClearConfirmOpen(true)}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
             <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><Undo2Icon />{t("Geri al", "Undo")}</Button>
           </div>
         </div>
@@ -2654,10 +2718,7 @@ export function SchedulePlanner() {
                       <button
                         key={entry.id}
                         type="button"
-                        onClick={() => setEntries((current) => current.filter((item) =>
-                          entry.kind === "block"
-                            ? item.id !== entry.id
-                            : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
+                        onClick={() => removeEntryWithUndo(entry)}
                         className={cn("course-block flex w-full items-start gap-3 rounded-xl border p-3 text-left", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "ring-2 ring-destructive")}
                         aria-label={t(`${entry.code} dersini programdan kaldır`, `Remove ${entry.code} from the schedule`)}
                       >
@@ -2718,10 +2779,7 @@ export function SchedulePlanner() {
                               // registration that cannot exist. Blocks are the
                               // exception — those are the student's own
                               // one-off entries.
-                              onClick={() => setEntries((current) => current.filter((item) =>
-                                entry.kind === "block"
-                                  ? item.id !== entry.id
-                                  : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
+                              onClick={() => removeEntryWithUndo(entry)}
                               title={`${entry.code} · ${entry.name}${entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""} · ${entry.room?.trim() || "TBA"}${entry.instructor ? ` · ${entry.instructor}` : ""}
 ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("Dersi tüm saatleriyle kaldırmak için tıkla", "Click to remove the course and all its hours")}`}
                               style={{

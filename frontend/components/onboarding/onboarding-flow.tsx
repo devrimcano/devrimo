@@ -211,7 +211,16 @@ export function OnboardingFlow({ onDone }: { onDone?: () => void }) {
   }
 
   async function skipSetup() {
-    await update.mutateAsync({ onboarding_completed: true, onboarding_step: "ready" });
+    // Called straight from a "Skip for now" button: if the save fails the
+    // button must say so instead of looking dead, and no student should be
+    // dropped into the app with an unsaved bypass of onboarding.
+    try {
+      await update.mutateAsync({ onboarding_completed: true, onboarding_step: "ready" });
+    } catch (error) {
+      captureError(error, { source: "onboarding_skip" });
+      setFormError(error instanceof Error ? error.message : "Could not skip setup.");
+      return;
+    }
     captureProductEvent("onboarding_finished", { path: "skipped" });
     onDone?.();
   }

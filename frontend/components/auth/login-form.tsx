@@ -27,6 +27,10 @@ export function LoginForm() {
   );
   const [info, setInfo] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Set when sign-up ends on the confirmation-email step: the student must be
+  // able to ask for that email again without re-entering anything.
+  const [confirmEmail, setConfirmEmail] = useState<string | null>(null);
+  const [resending, setResending] = useState(false);
   // Typed on a phone, one-handed, from memory. Being able to look at what you
   // typed is the difference between a second attempt and giving up.
   const [passwordVisible, setPasswordVisible] = useState(false);
@@ -124,6 +128,7 @@ export function LoginForm() {
         return;
       }
       captureProductEvent("auth_result", { mode: authMode, result: "success", reason: "confirmation_email_sent" });
+      setConfirmEmail(email);
       setInfo(pick({ tr: "Hesabını etkinleştirmek için e-posta adresine gönderdiğimiz bağlantıyı aç.", en: "Open the link we sent to your email to activate your account." }));
     } catch (caught) {
       captureProductEvent("auth_result", {
@@ -135,6 +140,28 @@ export function LoginForm() {
       setError(authErrorMessage(caught));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function resendConfirmation() {
+    if (!confirmEmail || resending) return;
+    setResending(true);
+    setError(null);
+    try {
+      const origin = getSiteUrl() || window.location.origin;
+      const supabase = createClient();
+      const { error: resendError } = await supabase.auth.resend({
+        type: "signup",
+        email: confirmEmail,
+        options: { emailRedirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}` },
+      });
+      if (resendError) throw resendError;
+      setInfo(pick({ tr: "Onay e-postasını yeniden gönderdik.", en: "We sent the confirmation email again." }));
+    } catch (caught) {
+      captureError(caught, { source: "auth_resend_confirmation" });
+      setError(authErrorMessage(caught));
+    } finally {
+      setResending(false);
     }
   }
 
@@ -187,6 +214,7 @@ export function LoginForm() {
                     setMode("reset");
                     setError(null);
                     setInfo(null);
+                    setConfirmEmail(null);
                   }}
                 >
                   {pick({ tr: "Şifreni mi unuttun?", en: "Forgot your password?" })}
@@ -234,6 +262,15 @@ export function LoginForm() {
           )}
           {error ? <p id={errorId} role="alert" className="break-words rounded-xl border border-destructive/35 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">{error}</p> : null}
           {info ? <p id={infoId} role="status" aria-live="polite" className="break-words rounded-xl bg-accent px-3 py-2.5 text-sm leading-5 text-accent-foreground">{info}</p> : null}
+          {confirmEmail ? (
+            <div className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5">
+              <p className="min-w-0 break-words text-xs leading-5 text-muted-foreground">{confirmEmail}</p>
+              <Button type="button" variant="outline" size="sm" disabled={resending} onClick={() => void resendConfirmation()}>
+                {resending ? <Loader2Icon className="animate-spin" /> : null}
+                {pick({ tr: "Onay e-postasını yeniden gönder", en: "Resend confirmation email" })}
+              </Button>
+            </div>
+          ) : null}
           <Button type="submit" disabled={pending} className="h-11 w-full shadow-sm">
             {pending ? <Loader2Icon className="animate-spin" /> : null}
             {mode === "login"
@@ -256,6 +293,7 @@ export function LoginForm() {
               setMode(mode === "login" ? "signup" : "login");
               setError(null);
               setInfo(null);
+              setConfirmEmail(null);
             }}
           >
             {mode === "login" ? pick({ tr: "Kayıt ol", en: "Create account" }) : pick({ tr: "Giriş yap", en: "Sign in" })}
