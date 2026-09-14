@@ -20,7 +20,7 @@ from app.admin.directory import METU_ID, ensure_metu, synchronize_directory
 from app.admin.schemas import AgentActionIn, DeleteUserIn, InviteIn, MembershipIn, ReasonIn, RuntimeSettingsIn
 from app.admin.supabase import SupabaseAdmin, parse_auth_time
 from app.agents import manager
-from app.agents.runtime import get_runtime_config
+from app.agents.runtime import get_rate_limit_config, get_runtime_config
 from app.agents.store import get_agno_db
 from app.assistant.models import AssistantRun
 from app.campus.catalog import CAMPUS_TOOLS
@@ -922,9 +922,11 @@ async def runtime_settings(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     config = await get_runtime_config(db)
+    limits = await get_rate_limit_config(db)
     row = await db.get(AgentRuntimeSettings, "default")
     return {
         **config.as_dict(),
+        **limits.as_dict(),
         "has_database_override": bool(row and row.model_id),
         "updated_at": _iso(row.updated_at) if row else None,
         "editable": AdminPermission.runtime_write in principal.permissions,
@@ -937,24 +939,29 @@ async def put_runtime_settings(
     principal: AdminPrincipal = Depends(require(AdminPermission.runtime_write)),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    before = (await get_runtime_config(db)).as_dict()
+    before = {**(await get_runtime_config(db)).as_dict(), **(await get_rate_limit_config(db)).as_dict()}
     row = await db.get(AgentRuntimeSettings, "default")
     if row is None:
         row = AgentRuntimeSettings(id="default", revision=1)
         db.add(row)
     row.model_id = body.model_id.strip()
-    row.profile = body.profile
     row.max_tokens = body.max_tokens
-    row.legacy_history_runs = body.legacy_history_runs
     row.scholar_history_runs = body.scholar_history_runs
     row.tool_call_limit = body.tool_call_limit
     row.learning_enabled = body.learning_enabled
     row.input_token_price = body.input_token_price
     row.output_token_price = body.output_token_price
+    supplied = body.model_fields_set
+    if "rate_limit_enabled" in supplied:
+        row.rate_limit_enabled = body.rate_limit_enabled
+    if "rate_limit_chat_per_minute" in supplied:
+        row.rate_limit_chat_per_minute = body.rate_limit_chat_per_minute
+    if "rate_limit_catalog_per_minute" in supplied:
+        row.rate_limit_catalog_per_minute = body.rate_limit_catalog_per_minute
     row.revision = (row.revision or 0) + 1
     row.updated_by = principal.user.id
     await db.commit()
-    after = (await get_runtime_config(db)).as_dict()
+    after = {**(await get_runtime_config(db)).as_dict(), **(await get_rate_limit_config(db)).as_dict()}
     await record_event(
         db,
         actor_user_id=principal.user.id,

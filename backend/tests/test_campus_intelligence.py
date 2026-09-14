@@ -16,8 +16,6 @@ from app.db.models import (
     CampusKnowledgeRecord,
     CampusSource,
     CampusSourceRevision,
-    CourseOffering,
-    CourseRule,
     KnowledgeEmbeddingSettings,
     Organization,
     StudentAcademicSnapshot,
@@ -36,10 +34,9 @@ from app.planning.service import _prerequisite_met, upsert_academic_snapshot
 from tests.conftest import auth_header, new_user_id
 
 
-async def test_scoped_admin_cannot_configure_network_providers_or_write_global_catalog(client, monkeypatch):
+async def test_scoped_admin_writes_org_drafts_but_cannot_touch_network_or_embedding(client, monkeypatch):
     admin_id = new_user_id()
     headers = auth_header(admin_id)
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", False)
     monkeypatch.setattr(get_settings(), "academic_catalog_ingestion_enabled", False)
     await client.get("/api/v1/profile", headers=headers)
     async with SessionLocal() as db:
@@ -49,18 +46,22 @@ async def test_scoped_admin_cannot_configure_network_providers_or_write_global_c
         await db.commit()
     response = await client.put("/api/v1/admin/planning/catalog", headers=headers, json={
         "reason": "Attempt global catalog import",
-        "offerings": [{"term": "20261", "course_code": "CENG213", "section": "1",
+        "offerings": [{"term": "20261", "course_code": "5710213", "section": "1",
                        "title": "Scoped change", "credits": 4, "schedule": []}],
         "rules": [],
     })
-    assert response.status_code == 403, response.text
+    # The endpoint no longer writes a planner-readable global catalog: an
+    # org-scoped admin gets reviewable drafts, and publication is a separate
+    # reviewed step.
+    assert response.status_code == 200, response.text
+    assert response.json()["published"] is False
+    assert response.json()["draft_ids"]
     response = await client.put("/api/v1/admin/embedding-settings", headers=headers, json={
         "provider": "local", "model": "fixture", "base_url": "http://127.0.0.1:8080/v1",
         "dimensions": 384, "batch_size": 2,
     })
     assert response.status_code == 403, response.text
     async with SessionLocal() as db:
-        assert await db.scalar(select(CourseOffering)) is None
         assert await db.scalar(select(KnowledgeEmbeddingSettings)) is None
 
 
@@ -491,50 +492,52 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     student_id = new_user_id()
     monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(admin_id))
     await client.get("/api/v1/profile", headers=auth_header(admin_id))
-    term = "2026-2027-fall"
-    catalog = await client.put(
-        "/api/v1/admin/planning/catalog",
-        headers=auth_header(admin_id),
-        json={
-            "reason": "Load verified test catalog data",
-            "offerings": [
-                {
-                    "term": term,
-                    "course_code": "CENG213",
-                    "section": "1",
-                    "title": "Data Structures",
-                    "credits": 4,
-                    "schedule": [{"day": "monday", "start": "09:00", "end": "10:50"}],
-                    "source_url": "https://oibs2.metu.edu.tr/",
-                },
-                {
-                    "term": term,
-                    "course_code": "CENG223",
-                    "section": "1",
-                    "title": "Discrete Structures",
-                    "credits": 3,
-                    "schedule": [{"day": "tuesday", "start": "09:00", "end": "10:50"}],
-                    "source_url": "https://oibs2.metu.edu.tr/",
-                },
-            ],
-            "rules": [
-                {
-                    "course_code": "CENG213",
-                    "prerequisites": {"course": "CENG111", "min_grade": "DD"},
-                    "catalog_url": "https://catalog.metu.edu.tr/course.php?course_code=5710213",
-                },
-                {"course_code": "CENG223", "prerequisites": {}},
-            ],
-        },
+    term = "20261"
+    from app.academic_catalog import service as catalog_service
+    from app.academic_catalog.models import CatalogDraft
+    from app.admin.directory import METU_ID
+
+    now = datetime.now(UTC)
+    fixtures = (
+        ("5710213", "Data Structures", "4", "Monday",
+         [{"prerequisite_course_code": "5710111", "name": "Introduction to C Programming",
+           "min_grade": "DD", "set_no": "1"}]),
+        ("5710223", "Discrete Structures", "3", "Tuesday", []),
     )
-    assert catalog.status_code == 200, catalog.text
+    async with SessionLocal() as db:
+        for code, title, credits, day, prerequisites in fixtures:
+            values = {"semester": term, "department": "571", "course": code}
+            observations = (
+                ("list_program_courses", {"semester": term, "department": "571"},
+                 [{"course_code": code, "name": title, "credit": credits, "type": "Open"}]),
+                ("get_course_info", values,
+                 {"department": "571", "semester": term, "course_code": code, "course_name": title,
+                  "credit_info": f"{credits}.00({credits}.00,0.00,0.00)",
+                  "sections": [{"section": "1", "instructors": ["STAFF"], "critical_info": "",
+                                "schedule": [{"day": day, "time": "09:00 - 09:50", "room": "B1"}]}]}),
+                ("get_section_constraints", {**values, "section": "1"},
+                 {**values, "course_code": code, "section": "1", "constraints": []}),
+                ("get_course_prerequisites", values, prerequisites),
+                ("get_course_replacements", values, []),
+            )
+            for tool, arguments, payload in observations:
+                result = await catalog_service.ingest_observation(
+                    db, METU_ID, tool, arguments, payload, now, source_fetched_at=now
+                )
+                assert result["status"] in {"success", "empty"}, result
+        drafts = (await db.execute(select(CatalogDraft).where(CatalogDraft.state == "draft"))).scalars().all()
+        await catalog_service.publish_drafts(
+            db, METU_ID, term, [draft.id for draft in drafts], expected_release_id=None,
+            idempotency_key=str(uuid4()), reason="Load verified test catalog data", created_by=admin_id,
+        )
+        await db.commit()
     async with SessionLocal() as db:
         await upsert_academic_snapshot(
             db,
             student_id,
             term,
-            completed_courses=[{"course_code": "CENG111", "grade": "BB"}],
-            enrolled_courses=[{"course_code": "CENG213", "section": "1"}],
+            completed_courses=[{"course_code": "5710111", "grade": "BB"}],
+            enrolled_courses=[{"course_code": "5710213", "section": "1"}],
             current_credits=60,
             current_grade_points=180,
         )
@@ -542,19 +545,19 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     plan = await client.post(
         "/api/v1/student/plan",
         headers=auth_header(student_id),
-        json={"term": term, "required_courses": ["CENG213"], "max_credits": 7},
+        json={"term": term, "required_courses": ["5710213"], "max_credits": 7},
     )
     assert plan.status_code == 200, plan.text
     payload = plan.json()
     assert payload["maximum_semester_gpa"] == 4.0
     assert payload["projected_cumulative_gpa"] > payload["current_cumulative_gpa"]
-    assert {item["course_code"] for item in payload["courses"]} == {"CENG213", "CENG223"}
+    assert {item["course_code"] for item in payload["courses"]} == {"5710213", "5710223"}
 
     group = await client.post(
         "/api/v1/admin/course-groups",
         headers=auth_header(admin_id),
         json={
-            "course_code": "CENG213",
+            "course_code": "5710213",
             "section": "1",
             "invite_url": "https://chat.whatsapp.com/test-invite",
             "eligibility": {},
@@ -567,7 +570,7 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     resolved = await client.post(
         "/api/v1/student/course-group",
         headers=auth_header(student_id),
-        json={"term": term, "course_code": "CENG213", "section": "1"},
+        json={"term": term, "course_code": "5710213", "section": "1"},
     )
     assert resolved.status_code == 200
     assert resolved.json()["invite_url"] == "https://chat.whatsapp.com/test-invite"
@@ -576,7 +579,7 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
     denied = await client.post(
         "/api/v1/student/course-group",
         headers=auth_header(outsider),
-        json={"term": term, "course_code": "CENG213", "section": "1"},
+        json={"term": term, "course_code": "5710213", "section": "1"},
     )
     assert denied.status_code == 200
     assert denied.json()["status"] == "not_eligible"
@@ -584,8 +587,6 @@ async def test_planner_owns_inputs_and_protected_group_checks_enrollment(client,
 
 async def test_private_records_are_not_embedding_candidates():
     assert "embedding" not in StudentAcademicSnapshot.__table__.columns
-    assert "embedding" not in CourseOffering.__table__.columns
-    assert "embedding" not in CourseRule.__table__.columns
     assert "embedding" not in CampusKnowledgeRecord.__table__.columns
     assert "embedding_384" not in CampusKnowledgeRecord.__table__.columns
     assert "embedding_384" in KnowledgeIndexVector.__table__.columns

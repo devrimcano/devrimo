@@ -78,20 +78,39 @@ async def test_runtime_settings_are_persisted_and_audited(client, monkeypatch):
     monkeypatch.setattr(get_settings(), "admin_bootstrap_user_ids", str(user_id))
     body = {
         "model_id": "openai/gpt-test",
-        "profile": "scholar",
         "max_tokens": 4096,
-        "legacy_history_runs": 8,
         "scholar_history_runs": 4,
         "tool_call_limit": 7,
         "learning_enabled": False,
         "input_token_price": 0.000003,
         "output_token_price": 0.000015,
+        "rate_limit_enabled": True,
+        "rate_limit_chat_per_minute": 5,
+        "rate_limit_catalog_per_minute": 60,
         "reason": "Validate a safer production default",
     }
     response = await client.put("/api/v1/admin/runtime-settings", headers=auth_header(user_id), json=body)
     assert response.status_code == 200
     assert response.json()["model_id"] == "openai/gpt-test"
     assert response.json()["revision"] == 2
+    assert response.json()["rate_limit_enabled"] is True
+    assert response.json()["rate_limit_chat_per_minute"] == 5
+    assert response.json()["rate_limit_catalog_per_minute"] == 60
+
+    # A client loaded before these fields existed can still update the agent
+    # defaults without silently disabling the infrastructure control.
+    legacy_body = {
+        key: value
+        for key, value in body.items()
+        if key not in {"rate_limit_enabled", "rate_limit_chat_per_minute", "rate_limit_catalog_per_minute"}
+    }
+    legacy_body["model_id"] = "openai/gpt-test-2"
+    legacy_body["reason"] = "Update the model from an older admin client"
+    response = await client.put("/api/v1/admin/runtime-settings", headers=auth_header(user_id), json=legacy_body)
+    assert response.status_code == 200
+    assert response.json()["rate_limit_enabled"] is True
+    assert response.json()["rate_limit_chat_per_minute"] == 5
+    assert response.json()["rate_limit_catalog_per_minute"] == 60
 
     audit = await client.get("/api/v1/admin/audit", headers=auth_header(user_id))
     assert audit.status_code == 200
@@ -169,9 +188,7 @@ async def test_campus_admin_cannot_change_runtime_defaults(client):
         headers=auth_header(user_id),
         json={
             "model_id": "forbidden",
-            "profile": "scholar",
             "max_tokens": 4096,
-            "legacy_history_runs": 2,
             "scholar_history_runs": 2,
             "tool_call_limit": 2,
             "learning_enabled": False,

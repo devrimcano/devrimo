@@ -1,7 +1,7 @@
 """Real source-shaped imports must be usable by both shared catalog consumers."""
 
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -9,7 +9,6 @@ from sqlalchemy import select
 from app.academic_catalog import service as catalog
 from app.academic_catalog.models import CatalogDraft, CatalogReleaseItem, CatalogTermActiveRelease
 from app.admin.directory import METU_ID
-from app.config import get_settings
 from app.db.models import StudentAcademicSnapshot
 from app.db.session import SessionLocal
 from app.planning import service as planning
@@ -32,7 +31,11 @@ async def import_and_publish(db, user):
             "sections": [{"section": "1", "instructors": ["STAFF"], "critical_info": "",
                           "schedule": [{"day": "Monday", "time": "09:00 - 09:50", "room": "B1"}]}],
         }),
-        ("get_section_constraints", {**values, "section": "1"}, {**values, "course_code": COURSE, "section": "1", "constraints": []}),
+        (
+            "get_section_constraints",
+            {**values, "section": "1"},
+            {**values, "course_code": COURSE, "section": "1", "constraints": []},
+        ),
         ("get_course_prerequisites", values, []),
         ("get_course_replacements", values, []),
     ]
@@ -47,14 +50,23 @@ async def import_and_publish(db, user):
 
 
 async def test_import_publish_schedule_read_and_automatic_plan_share_release(client, monkeypatch):
-    monkeypatch.setattr(get_settings(), "academic_catalog_reads_enabled", True)
     user = new_user_id()
     headers = auth_header(user)
     await client.get("/api/v1/profile", headers=headers)
     async with SessionLocal() as db:
         release = await import_and_publish(db, user)
-        db.add(StudentAcademicSnapshot(user_id=user, term=TERM, completed_courses=[], enrolled_courses=[],
-                                       current_credits=30, current_grade_points=90, fetched_at=datetime.now(UTC), source="sais"))
+        db.add(
+            StudentAcademicSnapshot(
+                user_id=user,
+                term=TERM,
+                completed_courses=[],
+                enrolled_courses=[],
+                current_credits=30,
+                current_grade_points=90,
+                fetched_at=datetime.now(UTC),
+                source="sais",
+            )
+        )
         await db.commit()
     response = await client.get(f"/api/v1/schedule/courses/{COURSE}?department=240&semester={TERM}", headers=headers)
     assert response.status_code == 200, response.text
@@ -77,7 +89,10 @@ async def test_import_publish_schedule_read_and_automatic_plan_share_release(cli
     assert result["courses"][0]["course_code"] == COURSE
     assert result["selected_credits"] == 3
     assert result["provenance"]["catalog_release_id"] == release["release_id"]
-    assert result["provenance"]["catalog_course_revision_ids"][COURSE] == course["data"]["_catalog"]["course_revision_id"]
+    assert (
+        result["provenance"]["catalog_course_revision_ids"][COURSE]
+        == course["data"]["_catalog"]["course_revision_id"]
+    )
 
 
 async def test_partial_publication_carries_courses_and_rollback_rebases_next_import(client):

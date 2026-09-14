@@ -87,49 +87,26 @@ async def test_a_failed_tool_raises_instead_of_answering_with_its_error():
     assert "semester form was not found" in raised.value.detail
 
 
-async def test_a_failure_is_never_written_to_the_shared_cache(monkeypatch):
-    """Thirty days of an empty department listing started here."""
-    writes: list[str] = []
+async def test_a_failure_is_never_retained_in_the_personal_cache(monkeypatch):
+    """A failed personal read must be retried instead of becoming an answer."""
     monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
-    monkeypatch.setattr(course_info, "read_cached", AsyncMock(return_value=None))
-
-    async def write_cached(key_hash, value, **kwargs):
-        writes.append(key_hash)
-
-    async def invoke(db, user_id, tool_suffix, values, session=None):
-        raise HTTPException(502, "SAIS is unreachable")
-
-    monkeypatch.setattr(course_info, "write_cached", write_cached)
+    invoke = AsyncMock(
+        side_effect=[
+            HTTPException(502, "SAIS is unreachable"),
+            {"semesters": [{"code": "20261"}]},
+        ]
+    )
     monkeypatch.setattr(course_info, "_invoke", invoke)
 
     with pytest.raises(HTTPException):
         await course_info.call_course_info(
-            None, USER, "list_program_courses", {"department": "236", "semester": "20261"}
+            None, USER, "get_student_curriculum", {"department": "236", "semester": "20261"}
         )
-    assert writes == []
-
-
-async def test_a_poisoned_row_heals_on_the_next_read(monkeypatch):
-    """Rows written before this check existed must not be served for weeks."""
-    fresh = [{"course_code": "5670201", "name": "Circuit Theory"}]
-    writes: list = []
-    monkeypatch.setattr(course_info, "require_catalog_access", AsyncMock())
-    monkeypatch.setattr(course_info, "read_cached", AsyncMock(return_value=MCP_ERROR))
-
-    async def write_cached(key_hash, value, **kwargs):
-        writes.append(value)
-
-    async def invoke(db, user_id, tool_suffix, values, session=None):
-        return fresh
-
-    monkeypatch.setattr(course_info, "write_cached", write_cached)
-    monkeypatch.setattr(course_info, "_invoke", invoke)
-
-    answered = await course_info.call_course_info(
-        None, USER, "list_program_courses", {"department": "236", "semester": "20261"}
+    answer = await course_info.call_course_info(
+        None, USER, "get_student_curriculum", {"department": "236", "semester": "20261"}
     )
-    assert answered == fresh
-    assert writes == [fresh]
+    assert answer == {"semesters": [{"code": "20261"}]}
+    assert invoke.await_count == 2
 
 
 def test_an_unreadable_board_reports_what_was_received_instead():

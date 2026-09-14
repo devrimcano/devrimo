@@ -460,14 +460,6 @@ if [ ! -f "$catalog_cutover_marker" ]; then
   touch "$catalog_cutover_marker"
 fi
 
-# Student planning and assistant course reads must use the reviewed catalog.
-# Keep both processes on the same mode: enabling only the API makes the
-# schedule page use releases while assistant calls continue on the legacy path.
-sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
-  /etc/devrimo/api.env ACADEMIC_CATALOG_READS_ENABLED true
-sudo python3 "$stage_dir/scripts/set_runtime_env.py" \
-  /etc/devrimo/assistant.env ACADEMIC_CATALOG_READS_ENABLED true
-
 # The knowledge worker imports the same application modules as the API, so it
 # keeps serving the previous release from memory until it is restarted too.
 # Every long-running unit that loads this source tree belongs in this list.

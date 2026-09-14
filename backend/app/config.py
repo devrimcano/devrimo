@@ -173,9 +173,6 @@ class Settings(BaseSettings):
     # a scripted agent so the whole API can be exercised in tests and local dev
     # without a model provider or the four campus servers installed.
     agent_runtime: str = "agno"  # "agno" | "fake"
-    # Scholar is the production-hardened profile. Legacy remains available as
-    # an explicit rollback target while a deployment completes its eval gates.
-    agent_profile: str = "scholar"  # "scholar" | "legacy"
 
     agent_model: str = "muse-spark-1.2-contributor"
     agent_openai_base_url: str = "https://opencode.ai/zen/go/v1"
@@ -183,7 +180,6 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 32768
 
     # How many prior runs of a session are replayed into the model's context.
-    agent_history_runs: int = 10
     scholar_history_runs: int = 3
     # Prefetch the one cached catalog read a focused question usually needs, so
     # the turn does not spend a model step asking for it. Off without a deploy
@@ -267,9 +263,7 @@ class Settings(BaseSettings):
     # change, not a rebuild.
     course_info_nav_elision: bool = True
 
-    # Enable published-only reads after administrators publish the initial catalog.
     # Ingestion can be enabled first so migration never exposes an unreviewed draft.
-    academic_catalog_reads_enabled: bool = False
     academic_catalog_ingestion_enabled: bool = False
     academic_catalog_registration_start: str = ""
     academic_catalog_registration_end: str = ""
@@ -381,6 +375,15 @@ class Settings(BaseSettings):
     agentos_jwt_audience: str = "devrimo"
     agentos_admin_scope: str = "agentos:admin"
     agentos_cors_origins: str = "https://os.agno.com"
+
+    # --- Request rate limits ------------------------------------------------
+    # Built now, switched on later: the project is not public yet, so the
+    # limits default to off. When enabled, they count per account inside a
+    # one-minute window; 0 means "no limit for this scope". The admin panel
+    # can change all three without a deploy.
+    rate_limit_enabled: bool = False
+    rate_limit_chat_per_minute: int = 20
+    rate_limit_catalog_per_minute: int = 120
 
     @model_validator(mode="after")
     def _fixtures_are_development_only(self) -> "Settings":

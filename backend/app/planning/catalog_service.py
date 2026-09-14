@@ -83,19 +83,12 @@ async def load_student_profile(
 
 
 def published_catalog_reads_enabled() -> bool:
-    """Whether shared course facts must come from the reviewed catalog.
+    """Shared course facts always come from the reviewed catalog.
 
-    This tiny helper is intentionally local to the consumer adapter so callers
-    can keep the rollout gate lazy and tests can patch it without importing the
-    settings singleton during module collection.
+    The raw Course Info read path was removed with the flag that gated it;
+    this helper remains as the one name the callers already use.
     """
-
-    try:
-        from app.config import get_settings
-
-        return bool(getattr(get_settings(), "academic_catalog_reads_enabled", False))
-    except Exception:
-        return False
+    return True
 
 
 async def read_shared_course_info(

@@ -97,7 +97,6 @@ def int_payload(key: str, *, default: int, distinct_id: str | None = None) -> in
 # --- The flags this service reads. Names are the analytics contract. --------
 
 FLAG_CAMPUS_TOOLS = "campus-tools-enabled"
-FLAG_AGENT_PROFILE = "agent-profile"
 FLAG_AGENT_MODEL = "agent-model"
 FLAG_TOOL_CALL_LIMIT = "scholar-tool-call-limit"
 FLAG_HISTORY_RUNS = "scholar-history-runs"

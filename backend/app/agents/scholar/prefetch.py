@@ -33,12 +33,9 @@ _PREFETCH_BY_INTENT = {
 
 def _available() -> bool:
     from app.config import get_settings
-    from app.planning.catalog_service import published_catalog_reads_enabled
 
     settings = get_settings()
     if not getattr(settings, "scholar_prefetch_enabled", True):
-        return False
-    if not published_catalog_reads_enabled():
         return False
     return settings.database_runtime_role == "assistant" and bool(settings.workspace_gateway_url)
 

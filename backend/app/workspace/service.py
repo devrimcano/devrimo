@@ -27,6 +27,26 @@ _COURSE_KEY_KINDS = frozenset(
     }
 )
 
+_FOLD = str.maketrans(
+    {"ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ğ": "g", "Ğ": "g",
+     "ü": "u", "Ü": "u", "ö": "o", "Ö": "o", "ç": "c", "Ç": "c"}
+)
+
+
+def _search_fold(text: str) -> str:
+    return str(text).translate(_FOLD).casefold()
+
+
+def _looks_like_course_code(value: str) -> bool:
+    """Whether a key names one course rather than a department."""
+    import re
+
+    compact = str(value or "").strip()
+    return bool(
+        re.fullmatch(r"\d{7}", compact)
+        or re.fullmatch(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,6}\s?-?\s?\d{3,4}", compact)
+    )
+
 
 def current_term():
     from app.planning.service import current_term as resolve
@@ -35,12 +55,7 @@ def current_term():
 
 
 def _catalog_source() -> str:
-    try:
-        from app.planning.catalog_service import published_catalog_reads_enabled
-
-        return "academic_catalog" if published_catalog_reads_enabled() else "course_info"
-    except Exception:
-        return "course_info"
+    return "academic_catalog"
 
 
 def envelope(ref: ResourceRef, data, *, source: str = "devrimo", freshness: str = "cached") -> dict:
@@ -88,7 +103,30 @@ class WorkspaceService:
             )
             return envelope(ref, data, source="campus_index")
         if ref.kind in {"mail.messages", "catalog.departments"}:
-            return await self.upstream(ref, query=request.query, limit=request.limit)
+            result = await self.upstream(ref, query=request.query, limit=request.limit)
+            if ref.kind == "catalog.departments":
+                # The source misses abbreviation/name queries; the directory
+                # resolves both. Merge instead of returning an empty picker,
+                # keeping the source's order first and the page bounded.
+                wanted = _search_fold(request.query or "")
+                merged = list(result.get("data", {}).get("departments", []))
+                existing = {str(item.get("code")) for item in merged}
+                if wanted:
+                    for department in department_directory.all_departments():
+                        if department.code in existing:
+                            continue
+                        if not (
+                            wanted in _search_fold(department.abbreviation)
+                            or wanted in _search_fold(department.name_en)
+                            or wanted in _search_fold(department.name_tr)
+                        ):
+                            continue
+                        merged.append(
+                            {"code": department.code, "name": department.name_en or department.name_tr}
+                        )
+                limit = max(1, min(int(request.limit or 10), 50))
+                result = {**result, "data": {**result.get("data", {}), "departments": merged[:limit]}}
+            return result
         if ref.kind == "catalog.department":
             return envelope(ref, await self.domain("lookup_department", value=request.query))
         if request.query:
@@ -171,6 +209,12 @@ class WorkspaceService:
                 return envelope(ref, await read_timetable(db, self.user_id, ref.term or current_term()))
         if ref.kind not in UPSTREAM:
             raise HTTPException(422, "Resource does not support read")
+        if ref.kind == "catalog.courses" and ref.key and _looks_like_course_code(ref.key):
+            raise HTTPException(
+                422,
+                "catalog.courses lists one department's courses; for a single course read catalog.sections "
+                'with the course code in "key" ({"kind": "catalog.sections", "key": "CENG 331"}).',
+            )
         return await self.upstream(ref)
 
     @staticmethod

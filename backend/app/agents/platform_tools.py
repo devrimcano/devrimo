@@ -49,7 +49,9 @@ def build_platform_tools(user_id: UUID) -> list:
         """Read one resource by kind.
 
         Course kinds take the code in `key` ("EE 201" or 5670201) or a department in `department`; `term`
-        defaults to the active term. Find a course by name via catalog.department, then catalog.courses.
+        defaults to the active term. Find a course by name via catalog.department, then catalog.courses;
+        for one course's own facts (sections, prerequisites, credits) read the course kind directly with
+        the course code - catalog.courses only lists a department.
         student.registered_schedule is SAIS; planning.timetable is the editable week. Set `expand` true
         only when the student asked for every item after a partial list.
         """

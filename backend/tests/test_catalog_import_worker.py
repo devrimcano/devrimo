@@ -541,7 +541,7 @@ async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monke
         await db.flush()
         courses = []
         drafts = []
-        for term, code in zip(terms, ("2402201", "2402202")):
+        for term, code in zip(terms, ("2402201", "2402202"), strict=True):
             course = CatalogCourse(organization_id=METU_ID, course_code=code, department="240")
             courses.append(course)
             db.add(course)
@@ -553,7 +553,6 @@ async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monke
     settings = catalog_worker.get_settings()
     monkeypatch.setattr(settings, "catalog_warm_courses_per_pass", 1)
     monkeypatch.setattr(settings, "catalog_warm_discoveries_per_pass", 1)
-    monkeypatch.setattr(catalog_worker, "_wanted_courses", lambda term: _empty_demand(term))
     scheduled = []
 
     async def enqueue(*args, **kwargs):
@@ -564,10 +563,6 @@ async def test_schedule_due_caps_courses_globally_but_allows_one_discovery(monke
     assert await catalog_worker.schedule_due() == 2
     assert sum(not discovery for discovery in scheduled) == 1
     assert sum(bool(discovery) for discovery in scheduled) == 1
-
-
-async def _empty_demand(_term):
-    return {}
 
 
 async def test_a_department_that_cannot_be_listed_does_not_end_the_import(monkeypatch):

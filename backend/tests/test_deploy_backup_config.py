@@ -66,9 +66,8 @@ def test_frontend_retention_keeps_active_and_one_complete_rollback():
     assert SCRIPT_TEXT.count("prune_frontend_releases") >= 3
 
 
-def test_production_keeps_catalog_readers_on_the_published_cache():
-    assert "/etc/devrimo/api.env ACADEMIC_CATALOG_READS_ENABLED true" in SCRIPT_TEXT
-    assert "/etc/devrimo/assistant.env ACADEMIC_CATALOG_READS_ENABLED true" in SCRIPT_TEXT
+def test_deploy_no_longer_writes_the_legacy_catalog_flag():
+    assert "ACADEMIC_CATALOG_READS_ENABLED" not in SCRIPT_TEXT
 
 
 def test_catalog_cutover_stops_the_only_competing_catalog_writer():

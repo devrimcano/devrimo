@@ -40,12 +40,16 @@ class MembershipIn(BaseModel):
 
 class RuntimeSettingsIn(BaseModel):
     model_id: str = Field(min_length=2, max_length=255)
-    profile: Literal["scholar", "legacy"]
     max_tokens: int = Field(ge=256, le=131072)
-    legacy_history_runs: int = Field(ge=0, le=50)
     scholar_history_runs: int = Field(ge=0, le=50)
     tool_call_limit: int = Field(ge=1, le=50)
     learning_enabled: bool
     input_token_price: float = Field(ge=0, le=1)
     output_token_price: float = Field(ge=0, le=1)
+    # These defaults keep the fields optional for older admin clients. The PUT
+    # handler uses ``model_fields_set`` so an omitted field preserves the
+    # current database/environment value instead of writing this default.
+    rate_limit_enabled: bool = False
+    rate_limit_chat_per_minute: int = Field(default=20, ge=0, le=100000)
+    rate_limit_catalog_per_minute: int = Field(default=120, ge=0, le=100000)
     reason: str = Field(min_length=3, max_length=1000)

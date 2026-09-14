@@ -133,7 +133,7 @@ def build_server_specs(
                 cwd=state_dir_for(state_root, user_id, tool),
                 include_tools=(
                     tuple(name for name in tool.include_tools if name.startswith("get_student_"))
-                    if tool.id == "course_info" and get_settings().academic_catalog_reads_enabled
+                    if tool.id == "course_info"
                     else tool.include_tools
                 ),
                 requires_confirmation_tools=tool.requires_confirmation_tools,

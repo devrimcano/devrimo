@@ -14,6 +14,7 @@ from app.agents import manager
 from app.agents.scholar.context import build_run_dependencies
 from app.agents.scholar.intent import expand_allowed_for_turn
 from app.agents.store import get_agno_db
+from app.api.rate_limit import rate_limited
 from app.assistant.models import AssistantRun
 from app.assistant.queue import enqueue_run, get_owned_run, request_cancel, stream_events
 from app.auth.dependencies import get_current_user
@@ -59,7 +60,7 @@ async def _get_or_create_chat_session(db, user_id, agent_id, session_id):
 async def chat_completions(
     body: ChatCompletionsRequestIn,
     request: Request,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("chat")),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     latest_user_index = next(
@@ -114,7 +115,7 @@ async def chat_completions(
 async def confirm_tool_call(
     body: ChatConfirmationIn,
     request: Request,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limited("chat")),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     session = await db.scalar(

@@ -16,7 +16,6 @@ from app.planning.catalog_service import (
     course_grade,
     expand_course_code,
     load_student_profile,
-    published_catalog_reads_enabled,
     section_verdict,
 )
 from app.planning.groups import get_course_group as resolve_course_group
@@ -76,40 +75,42 @@ def build_domain_reads(user_id: UUID) -> dict:
 
     async def lookup_department(value: str) -> dict:
         """Resolve a METU department code, abbreviation, name or course code to one department."""
-        if published_catalog_reads_enabled():
-            async with SessionLocal() as db:
-                payload = await call_course_info(db, user_id, "search_departments", {"query": value})
-            options = department_options(payload)
-            wanted = str(value or "").strip().casefold()
-            exact = [
-                option
-                for option in options
-                if str(option.get("code") or "").casefold() == wanted
-                or str(option.get("name") or "").strip().casefold() == wanted
-            ]
-            selected = exact[0] if len(exact) == 1 else options[0] if len(options) == 1 else None
-            if selected is None:
+        async with SessionLocal() as db:
+            payload = await call_course_info(db, user_id, "search_departments", {"query": value})
+        options = department_options(payload)
+        wanted = str(value or "").strip().casefold()
+        exact = [
+            option
+            for option in options
+            if str(option.get("code") or "").casefold() == wanted
+            or str(option.get("name") or "").strip().casefold() == wanted
+        ]
+        selected = exact[0] if len(exact) == 1 else options[0] if len(options) == 1 else None
+        if selected is None:
+            # The source misses abbreviations and short queries ("CENG",
+            # "Bilgisayar"); the directory resolves both. Fall back before
+            # reporting not_found so a department question is not a dead end.
+            fallback = department_directory.resolve(value)
+            if fallback is not None:
                 return {
-                    "status": "ambiguous" if options else "not_found",
-                    "query": value,
-                    "options": options,
+                    "code": fallback.code,
+                    "abbreviation": fallback.abbreviation,
+                    "name_en": fallback.name_en,
+                    "name_tr": fallback.name_tr,
+                    "status": "verified",
                 }
-            found = department_directory.by_code(str(selected.get("code") or ""))
             return {
-                "code": str(selected.get("code") or ""),
-                "abbreviation": found.abbreviation if found else str(selected.get("abbreviation") or ""),
-                "name_en": found.name_en if found else str(selected.get("name") or ""),
-                "name_tr": found.name_tr if found else str(selected.get("name") or ""),
-                "status": "verified",
+                "status": "ambiguous" if options else "not_found",
+                "query": value,
+                "options": options,
             }
-        found = department_directory.resolve(value)
-        if found is None:
-            return {"status": "not_found", "query": value}
+        found = department_directory.by_code(str(selected.get("code") or ""))
         return {
-            "code": found.code,
-            "abbreviation": found.abbreviation,
-            "name_en": found.name_en,
-            "name_tr": found.name_tr,
+            "code": str(selected.get("code") or ""),
+            "abbreviation": found.abbreviation if found else str(selected.get("abbreviation") or ""),
+            "name_en": found.name_en if found else str(selected.get("name") or ""),
+            "name_tr": found.name_tr if found else str(selected.get("name") or ""),
+            "status": "verified",
         }
 
     async def get_course_sections(course_code: str, semester: str) -> dict:
