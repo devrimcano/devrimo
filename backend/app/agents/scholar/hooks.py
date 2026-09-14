@@ -245,16 +245,64 @@ def _loggable_arguments(function_name: str, arguments) -> dict | None:
     return shown or None
 
 
+# When the same call fails three times in one turn, the model has stopped
+# learning from the error text and is looping: one production turn issued
+# twenty-one identical searches, another retried the same missing course eight
+# times. The breaker answers the fourth attempt with a stop instruction
+# instead of executing it. Keyed by run, tool and an argument digest - never
+# values, which are the student's own - and only for the read-shaped tools,
+# where a retry cannot change the outcome.
+REPEAT_FAILURE_LIMIT = 3
+_REPEAT_TOOLS = {"read", "search"}
+_repeat_failures: dict[str, int] = {}
+
+
+def _repeat_key(function_name: str, arguments, run_context) -> str | None:
+    if function_name not in _REPEAT_TOOLS:
+        return None
+    run = getattr(run_context, "run_id", None) or current_trace_id() or current_session_id() or "-"
+    digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return f"{run}:{function_name}:{digest}"
+
+
+def _repeat_breaker(key: str | None) -> dict | None:
+    if key is None or _repeat_failures.get(key, 0) < REPEAT_FAILURE_LIMIT:
+        return None
+    return {
+        "error": "repeated_failing_call",
+        "message": (
+            f"This exact call has failed {REPEAT_FAILURE_LIMIT} times in this turn. Do not call it again: "
+            "answer with what you already have, or change the kind, the key, or the term."
+        ),
+    }
+
+
+def _note_repeat_failure(key: str | None) -> None:
+    if key is None:
+        return
+    if len(_repeat_failures) > 1_000:
+        _repeat_failures.clear()
+    _repeat_failures[key] = _repeat_failures.get(key, 0) + 1
+
+
 async def production_tool_hook(function_name, function, arguments, run_context=None):
     """Execute one tool, cap text output, audit external mutations, and observe it."""
     started = time.monotonic()
     error = None
     result = None
+    breaker_key = None
     try:
         arguments = _coerce_flat_arguments(function_name, arguments)
+        breaker_key = _repeat_key(function_name, arguments, run_context)
+        stop = _repeat_breaker(breaker_key)
+        if stop is not None:
+            logger.warning("agent_tool_repeat_blocked", tool=function_name)
+            error = RuntimeError("repeated_failing_call")
+            return stop
         result = function(**arguments)
         if inspect.isawaitable(result):
             result = await result
+        _repeat_failures.pop(breaker_key, None)
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
         kind, expand = _requested_read(arguments, run_context)
         result = bound(
@@ -264,6 +312,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
         return result
     except Exception as exc:
         error = exc
+        _note_repeat_failure(breaker_key)
         logger.warning(
             "agent_tool_failed",
             tool=function_name,
