@@ -34,6 +34,11 @@ BASE_INSTRUCTIONS = [
         "codes and names exactly as written."
     ),
     (
+        "A long tool result is evidence, not the answer. Summarize it in a compact table or a few lines, "
+        "at most about ten rows, and say in one short sentence that more rows exist if they do. Never "
+        "reproduce an entire expanded list item by item, however the request was phrased."
+    ),
+    (
         "\"My schedule\", \"my week\", \"my courses this term\", and every conflict, gap, credit or free-day "
         "question about them mean planned_timetable in application_context: the week the student is building in "
         "the planner. Answer from it directly — it is already in front of you and needs no tool call. When it is "
