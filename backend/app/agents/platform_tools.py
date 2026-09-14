@@ -3,7 +3,6 @@
 from uuid import UUID
 
 from agno.tools.decorator import tool
-from fastapi import HTTPException
 
 from app.planning.service import SemesterPlanRequest
 from app.workspace.resources import (
@@ -13,28 +12,9 @@ from app.workspace.resources import (
     SearchableKind,
     SearchRequest,
     SearchResource,
+    scoped_ref,
 )
 from app.workspace.service import WorkspaceService
-
-
-def _scoped_ref(model, tool_name: str, resource, kind, **fields):
-    """Accept both the nested resource object and flat fields.
-
-    The model emits both shapes, sometimes in the same conversation, and the
-    nested-only schema turned every flat call into an Agno validation error
-    before any of our code could see it - so the coercion that was supposed to
-    absorb them never ran. Both shapes are legal from here on; the flat one is
-    the shape the model reaches for most.
-    """
-    if resource is not None:
-        return model.model_validate(resource)
-    if kind is None:
-        raise HTTPException(
-            422,
-            f'{tool_name} needs a "kind" and the field that kind needs, e.g. '
-            '{"kind": "catalog.sections", "key": "CENG 331"}.',
-        )
-    return model(kind=kind, **{name: value for name, value in fields.items() if value is not None or name == "expand"})
 
 
 def build_platform_tools(user_id: UUID) -> list:
@@ -68,7 +48,7 @@ def build_platform_tools(user_id: UUID) -> list:
 
         Pass `kind` directly (plus `query`) or the same fields inside a `resource` object; both work.
         """
-        ref = _scoped_ref(SearchResource, "search", resource, kind, department=department, category=category, term=term)
+        ref = scoped_ref(SearchResource, "search", resource, kind, department=department, category=category, term=term)
         return await workspace.search(
             SearchRequest(
                 resource=ref,
@@ -102,7 +82,7 @@ def build_platform_tools(user_id: UUID) -> list:
         only when the student asked for every item after a partial list.
         Pass the fields flat ({"kind": ..., "key": ...}) or inside a `resource` object; both work.
         """
-        ref = _scoped_ref(
+        ref = scoped_ref(
             ResourceRef,
             "read",
             resource,
@@ -147,7 +127,7 @@ def build_platform_tools(user_id: UUID) -> list:
             its revision; the server replaces it atomically, so a partial list deletes the rest. `id` is
             optional for new entries.
         """
-        ref = _scoped_ref(ResourceRef, "update", resource, kind, key=key, department=department, term=term)
+        ref = scoped_ref(ResourceRef, "update", resource, kind, key=key, department=department, term=term)
         return await workspace.update(
             ref,
             changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
@@ -166,7 +146,7 @@ def build_platform_tools(user_id: UUID) -> list:
         term: str | None = None,
     ) -> dict:
         """Undo the latest saved timetable revision, preserving history and rejecting stale edits."""
-        ref = _scoped_ref(ResourceRef, "undo", resource, kind, key=key, department=department, term=term)
+        ref = scoped_ref(ResourceRef, "undo", resource, kind, key=key, department=department, term=term)
         return await workspace.undo(ref, expected_revision, idempotency_key)
 
     @tool(name="send_email", requires_confirmation=True)
