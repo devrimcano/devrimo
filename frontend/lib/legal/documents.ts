@@ -211,6 +211,12 @@ export function consentTarget(document: LegalDocument): { id: string; version: s
   return { id: document.id, version: document.version };
 }
 
+/** What a sign-up records about the texts it showed. See below. */
+export type LegalAcceptanceStamp = {
+  accepted_at: string;
+  documents: Array<{ id: string; version: string; status: LegalDocument["status"] }>;
+};
+
 /**
  * What a sign-up records about the texts it showed.
  *
@@ -221,10 +227,7 @@ export function consentTarget(document: LegalDocument): { id: string; version: s
  * proof of consent. The shape does not change when a document is published —
  * only the status does.
  */
-export function legalAcceptanceStamp(at: Date = new Date()): {
-  accepted_at: string;
-  documents: Array<{ id: string; version: string; status: LegalDocument["status"] }>;
-} {
+export function legalAcceptanceStamp(at = new Date()): LegalAcceptanceStamp {
   return {
     accepted_at: at.toISOString(),
     documents: LEGAL_DOCUMENTS.map((document) => ({

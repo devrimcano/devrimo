@@ -16,12 +16,13 @@ const runnable = source
   .replace(/\(document: LegalDocument\)/g, "(document)")
   .replace(/\(slug: string\)/g, "(slug)")
   .replace(/: LegalDocument \| undefined/g, "")
+  .replace(/: LegalAcceptanceStamp/g, "")
   .replace(/: number/g, "")
   .replace(/\(total, section\)/g, "(total, section)");
 const registry = new Function(
-  `${runnable}; return { LEGAL_DOCUMENTS, PLACEHOLDER, findDocument, placeholderCount, consentTarget };`,
+  `${runnable}; return { LEGAL_DOCUMENTS, PLACEHOLDER, findDocument, placeholderCount, consentTarget, legalAcceptanceStamp };`,
 )();
-const { LEGAL_DOCUMENTS, findDocument, placeholderCount, consentTarget } = registry;
+const { LEGAL_DOCUMENTS, findDocument, placeholderCount, consentTarget, legalAcceptanceStamp } = registry;
 
 test("every document is reachable by its own slug", () => {
   for (const document of LEGAL_DOCUMENTS) {
@@ -73,4 +74,20 @@ test("a published document has no unwritten spans left in it", () => {
       `${document.id} is published while still carrying a [[placeholder]]`,
     );
   }
+});
+
+test("a sign-up stamp carries every document's id, version and honest status", () => {
+  const stamp = legalAcceptanceStamp(new Date("2026-09-14T10:00:00Z"));
+  assert.equal(stamp.accepted_at, "2026-09-14T10:00:00.000Z");
+  assert.equal(stamp.documents.length, LEGAL_DOCUMENTS.length);
+  for (const entry of stamp.documents) {
+    const document = LEGAL_DOCUMENTS.find((d) => d.id === entry.id);
+    assert.ok(document, `${entry.id} is not in the registry`);
+    assert.equal(entry.version, document.version);
+    assert.equal(entry.status, document.status);
+  }
+  assert.ok(
+    stamp.documents.some((entry) => entry.status === "draft"),
+    "while the texts are drafts the stamp must say so",
+  );
 });
