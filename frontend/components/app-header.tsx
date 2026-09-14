@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { BellRingIcon, CalendarDaysIcon, HomeIcon, MenuIcon, SettingsIcon, UserRoundIcon } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { SignOutButton } from "@/components/auth/sign-out-button";
@@ -21,6 +22,15 @@ import { cn } from "@/lib/utils";
 
 export function AppHeader({ email }: { email?: string | null }) {
   const { pick } = useLocale();
+  const pathname = usePathname();
+  // "/" has to match exactly, or every page would read as the home page.
+  const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`));
+  const navItems = [
+    { href: "/", icon: HomeIcon, label: pick({ tr: "Ana sayfa", en: "Home" }) },
+    { href: "/updates", icon: BellRingIcon, label: pick({ tr: "Güncellemeler", en: "Updates" }) },
+    { href: "/schedule", icon: CalendarDaysIcon, label: pick({ tr: "Program", en: "Schedule" }) },
+    { href: "/settings", icon: SettingsIcon, label: pick({ tr: "Ayarlar", en: "Settings" }) },
+  ];
   return (
     <header className="motion-header relative z-30 flex h-16 shrink-0 items-center justify-between gap-3 border-b bg-card/82 px-3 backdrop-blur-xl after:absolute after:inset-x-0 after:bottom-[-1px] after:h-px after:bg-gradient-to-r after:from-transparent after:via-primary/30 after:to-transparent sm:px-4">
       <Link href="/" className="group flex min-w-0 items-center gap-2 font-semibold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -32,10 +42,16 @@ export function AppHeader({ email }: { email?: string | null }) {
         <ThemeSwitcher />
         <LocaleSwitcher />
         {email ? <span className="max-w-52 truncate px-1 text-sm text-muted-foreground">{email}</span> : null}
-        <Link href="/" className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}><HomeIcon />{pick({ tr: "Ana sayfa", en: "Home" })}</Link>
-        <Link href="/updates" className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}><BellRingIcon />{pick({ tr: "Güncellemeler", en: "Updates" })}</Link>
-        <Link href="/schedule" className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}><CalendarDaysIcon />{pick({ tr: "Program", en: "Schedule" })}</Link>
-        <Link href="/settings" className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}><SettingsIcon />{pick({ tr: "Ayarlar", en: "Settings" })}</Link>
+        {navItems.map(({ href, icon: Icon, label }) => (
+          <Link
+            key={href}
+            href={href}
+            aria-current={isActive(href) ? "page" : undefined}
+            className={cn(buttonVariants({ variant: "ghost", size: "sm" }), isActive(href) && "bg-muted text-foreground")}
+          >
+            <Icon />{label}
+          </Link>
+        ))}
         <SignOutButton />
       </div>
 
@@ -57,10 +73,16 @@ export function AppHeader({ email }: { email?: string | null }) {
               </DropdownMenuGroup>
             ) : null}
             <DropdownMenuSeparator />
-            <DropdownMenuItem render={<Link href="/" />} className="min-h-10 px-2"><HomeIcon />{pick({ tr: "Ana sayfa", en: "Home" })}</DropdownMenuItem>
-            <DropdownMenuItem render={<Link href="/updates" />} className="min-h-10 px-2"><BellRingIcon />{pick({ tr: "Güncellemeler", en: "Updates" })}</DropdownMenuItem>
-            <DropdownMenuItem render={<Link href="/schedule" />} className="min-h-10 px-2"><CalendarDaysIcon />{pick({ tr: "Program", en: "Schedule" })}</DropdownMenuItem>
-            <DropdownMenuItem render={<Link href="/settings" />} className="min-h-10 px-2"><SettingsIcon />{pick({ tr: "Ayarlar", en: "Settings" })}</DropdownMenuItem>
+            {navItems.map(({ href, icon: Icon, label }) => (
+              <DropdownMenuItem
+                key={href}
+                render={<Link href={href} />}
+                aria-current={isActive(href) ? "page" : undefined}
+                className={cn("min-h-11 px-2", isActive(href) && "bg-muted text-foreground")}
+              >
+                <Icon />{label}
+              </DropdownMenuItem>
+            ))}
             <DropdownMenuSeparator />
             <div className="space-y-2 p-2">
               <p className="text-xs font-medium text-muted-foreground">{pick({ tr: "Görünüm", en: "Appearance" })}</p>

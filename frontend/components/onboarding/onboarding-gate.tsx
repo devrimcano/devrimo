@@ -18,6 +18,15 @@ export function OnboardingGate({ children }: { children: ReactNode }) {
   const { profile, isLoading, error, refetch } = useProfile();
   const [dismissed, setDismissed] = useState(false);
 
+  function finishOnboarding() {
+    setDismissed(true);
+    void refetch();
+    // The wizard unmounts and the app appears underneath; without moving
+    // focus, keyboard and screen-reader users are left at the top of the
+    // document with no announcement that the page changed.
+    requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+  }
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center" role="status">
@@ -30,10 +39,7 @@ export function OnboardingGate({ children }: { children: ReactNode }) {
   if (!error && profile && !profile.onboarding_completed && !dismissed) {
     return (
       <OnboardingFlow
-        onDone={() => {
-          setDismissed(true);
-          void refetch();
-        }}
+        onDone={finishOnboarding}
       />
     );
   }

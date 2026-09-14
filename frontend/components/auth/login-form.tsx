@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLocale } from "@/components/locale-provider";
+import { legalAcceptanceStamp } from "@/lib/legal/documents";
 import { captureError, captureProductEvent, identifyStudent } from "@/components/posthog-analytics";
 
 export function LoginForm() {
@@ -27,6 +28,13 @@ export function LoginForm() {
   );
   const [info, setInfo] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Set when sign-up ends on the confirmation-email step: the student must be
+  // able to ask for that email again without re-entering anything.
+  const [confirmEmail, setConfirmEmail] = useState<string | null>(null);
+  const [resending, setResending] = useState(false);
+  // Sign-up only. The texts behind the links are still drafts, but the gate
+  // and the record have to exist before the words land, not after.
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   // Typed on a phone, one-handed, from memory. Being able to look at what you
   // typed is the difference between a second attempt and giving up.
   const [passwordVisible, setPasswordVisible] = useState(false);
@@ -85,6 +93,11 @@ export function LoginForm() {
       return;
     }
 
+    if (mode === "signup" && !acceptedTerms) {
+      setError(pick({ tr: "Devam etmek için kullanım koşullarını ve aydınlatma metnini kabul et.", en: "Accept the terms of use and the privacy notice to continue." }));
+      return;
+    }
+
     const authMode = mode === "login" ? "sign-in" : "sign-up";
     // The denominator. Without an attempt event a student who cannot sign in
     // is indistinguishable from one who never tried.
@@ -114,6 +127,10 @@ export function LoginForm() {
         password,
         options: {
           emailRedirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}`,
+          // Travels with the Supabase user, so the acceptance survives the
+          // confirmation-email round trip. Draft documents are recorded as
+          // drafts; publishing one later changes the status in this stamp.
+          data: { legal_acceptance: legalAcceptanceStamp() },
         },
       });
       if (signUpError) throw signUpError;
@@ -124,6 +141,7 @@ export function LoginForm() {
         return;
       }
       captureProductEvent("auth_result", { mode: authMode, result: "success", reason: "confirmation_email_sent" });
+      setConfirmEmail(email);
       setInfo(pick({ tr: "Hesabını etkinleştirmek için e-posta adresine gönderdiğimiz bağlantıyı aç.", en: "Open the link we sent to your email to activate your account." }));
     } catch (caught) {
       captureProductEvent("auth_result", {
@@ -135,6 +153,28 @@ export function LoginForm() {
       setError(authErrorMessage(caught));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function resendConfirmation() {
+    if (!confirmEmail || resending) return;
+    setResending(true);
+    setError(null);
+    try {
+      const origin = getSiteUrl() || window.location.origin;
+      const supabase = createClient();
+      const { error: resendError } = await supabase.auth.resend({
+        type: "signup",
+        email: confirmEmail,
+        options: { emailRedirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}` },
+      });
+      if (resendError) throw resendError;
+      setInfo(pick({ tr: "Onay e-postasını yeniden gönderdik.", en: "We sent the confirmation email again." }));
+    } catch (caught) {
+      captureError(caught, { source: "auth_resend_confirmation" });
+      setError(authErrorMessage(caught));
+    } finally {
+      setResending(false);
     }
   }
 
@@ -187,6 +227,7 @@ export function LoginForm() {
                     setMode("reset");
                     setError(null);
                     setInfo(null);
+                    setConfirmEmail(null);
                   }}
                 >
                   {pick({ tr: "Şifreni mi unuttun?", en: "Forgot your password?" })}
@@ -234,7 +275,33 @@ export function LoginForm() {
           )}
           {error ? <p id={errorId} role="alert" className="break-words rounded-xl border border-destructive/35 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">{error}</p> : null}
           {info ? <p id={infoId} role="status" aria-live="polite" className="break-words rounded-xl bg-accent px-3 py-2.5 text-sm leading-5 text-accent-foreground">{info}</p> : null}
-          <Button type="submit" disabled={pending} className="h-11 w-full shadow-sm">
+          {confirmEmail ? (
+            <div className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5">
+              <p className="min-w-0 break-words text-xs leading-5 text-muted-foreground">{confirmEmail}</p>
+              <Button type="button" variant="outline" size="sm" disabled={resending} onClick={() => void resendConfirmation()}>
+                {resending ? <Loader2Icon className="animate-spin" /> : null}
+                {pick({ tr: "Onay e-postasını yeniden gönder", en: "Resend confirmation email" })}
+              </Button>
+            </div>
+          ) : null}
+          {mode === "signup" ? (
+            <label className="flex items-start gap-3 rounded-xl border bg-muted/25 p-3 text-sm leading-5">
+              <input
+                type="checkbox"
+                checked={acceptedTerms}
+                onChange={(event) => setAcceptedTerms(event.target.checked)}
+                required
+                className="mt-0.5 size-4 shrink-0 accent-primary"
+              />
+              <span className="min-w-0">
+                {pick({ tr: "Kullanım Koşulları'nı ve Aydınlatma Metni'ni okudum, kabul ediyorum.", en: "I have read and accept the Terms of Use and the Privacy Notice." })}{" "}
+                <a href="/belgeler/kullanim-kosullari" target="_blank" rel="noreferrer" className="font-medium underline underline-offset-4">{pick({ tr: "Koşullar", en: "Terms" })}</a>
+                {" · "}
+                <a href="/belgeler/aydinlatma" target="_blank" rel="noreferrer" className="font-medium underline underline-offset-4">{pick({ tr: "Aydınlatma", en: "Notice" })}</a>
+              </span>
+            </label>
+          ) : null}
+          <Button type="submit" disabled={pending || (mode === "signup" && !acceptedTerms)} className="h-11 w-full shadow-sm">
             {pending ? <Loader2Icon className="animate-spin" /> : null}
             {mode === "login"
               ? pick({ tr: "Giriş yap", en: "Sign in" })
@@ -256,6 +323,7 @@ export function LoginForm() {
               setMode(mode === "login" ? "signup" : "login");
               setError(null);
               setInfo(null);
+              setConfirmEmail(null);
             }}
           >
             {mode === "login" ? pick({ tr: "Kayıt ol", en: "Create account" }) : pick({ tr: "Giriş yap", en: "Sign in" })}

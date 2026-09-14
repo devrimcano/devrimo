@@ -13,7 +13,7 @@ export default function LoginPage() {
   const { pick } = useLocale();
 
   return (
-    <main id="main-content" tabIndex={-1} className="campus-grid relative min-h-svh overflow-x-hidden px-3 py-3 outline-none sm:px-8 sm:py-8">
+    <main id="main-content" tabIndex={-1} className="relative min-h-svh overflow-x-hidden px-3 py-3 outline-none sm:px-8 sm:py-8">
       <div className="pointer-events-none absolute -right-28 -top-28 size-96 rounded-full bg-primary/10 blur-3xl" />
       {/* Measured live at 375px: this cluster overlapped the wordmark's subtitle
           by 88x13 CSS px, and a tap on the middle of that subtitle hit the pill.

@@ -30,6 +30,7 @@ import { usePlanning, type PlanEntry, type PlanEnvelope, type PlanState } from "
 import { PlannerAssistant } from "@/components/schedule/planner-assistant";
 import { PlannerIntro } from "@/components/schedule/planner-intro";
 import { formatMetuCourseCode } from "@/lib/metu-course-code";
+import { upcomingTerm } from "@/lib/term";
 
 type Day = "Mon" | "Tue" | "Wed" | "Thu" | "Fri";
 // `instructor` is optional because plans saved before it existed are still in
@@ -156,18 +157,6 @@ const CONSTRAINT_CHUNK = 6;
 // Defined in globals.css as tokens, so a course keeps its colour in both
 // themes and the set stays a set rather than eight opinions.
 const COLORS = ["course-1", "course-2", "course-3", "course-4", "course-5", "course-6", "course-7", "course-8"];
-// METU term codes are a four-digit year plus a part number, where the year is
-// the one the academic year starts in: 20261 is 2026-2027 Fall, and 20253 is
-// the summer school that runs during calendar 2026. There is exactly one term
-// a student can be registering for at any point in the year, so this is
-// derived and displayed rather than offered as a choice.
-function upcomingTerm(now: Date = new Date()) {
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
-  if (month >= 8) return `${year}1`;
-  if (month <= 5) return `${year - 1}2`;
-  return `${year - 1}3`;
-}
 
 function termLabel(code: string, t: (tr: string, en: string) => string) {
   const year = Number(code.slice(0, 4));
@@ -729,6 +718,8 @@ export function SchedulePlanner() {
   const [favorites, setFavorites] = useState<Entry[][]>([]);
   const [favoriteIndex, setFavoriteIndex] = useState(-1);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [alternativesOpen, setAlternativesOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [studentDepartment, setStudentDepartment] = useState<StudentDepartment | null>(null);
   const [departmentBusy, setDepartmentBusy] = useState(true);
@@ -1191,6 +1182,28 @@ export function SchedulePlanner() {
     setAlternatives([]);
     setAlternativeIndex(0);
     toast.success(t("Ders havuzu temizlendi.", "Course pool cleared."));
+  }
+
+  /**
+   * Remove a class (its whole section) or a one-off block, with a way back.
+   *
+   * Both the grid and the mobile day list delete on a single tap and the
+   * autosave persists it 350ms later, so without an undo a misread tap was
+   * final. The snapshot restores exactly what was on screen before it.
+   */
+  function removeEntryWithUndo(entry: Entry) {
+    const snapshot = entries;
+    const isCourse = entry.kind === "course";
+    setEntries((current) => current.filter((item) =>
+      isCourse
+        ? !(item.kind === "course" && item.code === entry.code && item.section === entry.section)
+        : item.id !== entry.id));
+    toast.success(
+      isCourse
+        ? t(`${entry.code} programdan kaldırıldı.`, `${entry.code} removed from the schedule.`)
+        : t("Serbest blok kaldırıldı.", "The free block was removed."),
+      { action: { label: t("Geri al", "Undo"), onClick: () => setEntries(snapshot) } },
+    );
   }
 
   /**
@@ -1714,8 +1727,8 @@ export function SchedulePlanner() {
         ));
       } else if (solved.state.alternatives.length > 1) {
         toast.success(t(
-          `${solved.state.alternatives.length} alternatif program bulundu. Oklarla aralarında geçiş yap.`,
-          `${solved.state.alternatives.length} possible schedules found. Use the arrows to switch between them.`,
+          `${solved.state.alternatives.length} alternatif program bulundu. Listeden birini seç.`,
+          `${solved.state.alternatives.length} possible schedules found. Pick one from the list.`,
         ));
       } else if (!unavailable.length && !unpublished.length && !restricted.length && !unplaced.length) {
         toast.success(t("Tek bir çakışmasız program mümkün.", "Exactly one conflict-free schedule is possible."));
@@ -1884,8 +1897,26 @@ export function SchedulePlanner() {
       return;
     }
     const next = [...favorites, entries].slice(-10);
+    const previousFavorites = favorites;
+    const previousIndex = favoriteIndex;
+    const evicted = favorites.length >= 10;
     setFavorites(next);
     setFavoriteIndex(next.length - 1);
+    if (evicted) {
+      toast.success(
+        t("Program favorilere eklendi; en eski favori çıkarıldı.", "Schedule saved; the oldest favorite was dropped."),
+        {
+          action: {
+            label: t("Geri al", "Undo"),
+            onClick: () => {
+              setFavorites(previousFavorites);
+              setFavoriteIndex(previousIndex);
+            },
+          },
+        },
+      );
+      return;
+    }
     toast.success(t("Program favorilere eklendi.", "Schedule added to favorites."));
   }
 
@@ -1928,7 +1959,15 @@ export function SchedulePlanner() {
 
   async function copySummary() {
     const summary = DAYS.map((day) => `${dayLabel(day)}: ${entries.filter((e) => e.day === day).sort((a, b) => itemStartMinute(a) - itemStartMinute(b)).map((e) => `${formatItemTime(e)} ${e.code}-${e.section} (${e.kind === "course" ? (e.room?.trim() || "TBA") : (e.room?.trim() || "—")})`).join(", ") || "—"}`).join("\n");
-    await navigator.clipboard.writeText(summary); toast.success(t("Program özeti kopyalandı.", "Schedule summary copied."));
+    try {
+      await navigator.clipboard.writeText(summary);
+      toast.success(t("Program özeti kopyalandı.", "Schedule summary copied."));
+    } catch {
+      // Clipboard access is permission-gated and can also be denied silently;
+      // the old code awaited it unguarded, so a denial looked like nothing
+      // happened at all.
+      toast.error(t("Özet kopyalanamadı. Tarayıcı panoya izin vermemiş olabilir.", "Could not copy the summary. The browser may have blocked clipboard access."));
+    }
   }
 
   function exportCsv() {
@@ -2133,7 +2172,7 @@ export function SchedulePlanner() {
               const summary = favoriteSummary(saved);
               const current = index === favoriteIndex;
               return (
-                <li key={index} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
+                <li key={scheduleKey(saved)} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium">
                       {t(`${index + 1}. program`, `Schedule ${index + 1}`)}
@@ -2155,6 +2194,58 @@ export function SchedulePlanner() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={alternativesOpen} onOpenChange={setAlternativesOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("Alternatif programlar", "Alternative schedules")}</DialogTitle>
+            <DialogDescription>
+              {t("Çakışmasız bulunan haftalar. Birini seçtiğinde ekrandaki program onunla değişir.", "The conflict-free weeks that were found. Picking one replaces the schedule on screen.")}
+            </DialogDescription>
+          </DialogHeader>
+          {/* Arrows alone told nobody how many options there were or what
+              distinguished them; a list answers both. */}
+          <ul className="max-h-[50vh] space-y-2 overflow-y-auto">
+            {alternatives.map((saved, index) => {
+              const summary = favoriteSummary(saved);
+              const current = index === alternativeIndex;
+              return (
+                <li key={index} className={cn("flex items-center gap-3 rounded-xl border p-3", current && "border-primary bg-primary/5")}>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {t(`${index + 1}. alternatif`, `Option ${index + 1}`)}
+                      {current ? <span className="text-primary ml-2 text-xs font-semibold">{t("ekranda", "on screen")}</span> : null}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      {t(`${summary.courses} ders · ${summary.credits} kredi`, `${summary.courses} courses · ${summary.credits} credits`)}
+                      {summary.free.length ? t(` · boş: ${summary.free.join(", ")}`, ` · free: ${summary.free.join(", ")}`) : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" disabled={current} onClick={() => { showAlternative(index); setAlternativesOpen(false); }}>{current ? t("Seçili", "Selected") : t("Göster", "Show")}</Button>
+                </li>
+              );
+            })}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAlternativesOpen(false)}>{t("Kapat", "Close")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Programı temizle", "Clear the schedule")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("Dersler, alternatifler ve favori seçimi ekrandan kalkar; bu değişiklik otomatik kaydedilir.", "Courses, alternatives and the favorite selection leave the screen, and this is saved automatically.")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("Vazgeç", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={clearSchedule}>{t("Temizle", "Clear")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={prerequisiteRejections.length > 0} onOpenChange={(open) => { if (!open) setPrerequisiteRejections([]); }}>
         <AlertDialogContent>
@@ -2238,7 +2329,7 @@ export function SchedulePlanner() {
             <PlannerIntro variant="inline" />
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={clearSchedule}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
+            <Button variant="outline" size="sm" onClick={() => setClearConfirmOpen(true)}><RotateCcwIcon />{t("Programı temizle", "Clear schedule")}</Button>
             <Button variant="outline" size="sm" onClick={() => void handleUndo()} disabled={!planning.envelope?.can_undo || planning.saving || planning.retryable || Boolean(planning.conflict)}><Undo2Icon />{t("Geri al", "Undo")}</Button>
           </div>
         </div>
@@ -2268,7 +2359,11 @@ export function SchedulePlanner() {
         ) : planning.saveError ? (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             <span className="min-w-0 flex-1">
-              {planning.saveError}
+              {t("Program kaydedilemedi.", "The schedule could not be saved.")}
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs opacity-80">{t("Teknik ayrıntı", "Technical detail")}</summary>
+                <p className="mt-1 break-words text-xs opacity-80">{planning.saveError}</p>
+              </details>
               {/* A failure that cannot be replayed leaves the screen showing a
                   change the server does not have, and the raw message is the
                   broker's own English. Say what it means for the plan, and give
@@ -2607,10 +2702,13 @@ export function SchedulePlanner() {
                   {alternatives.length > 1 ? (
                   <div className="flex min-w-0 max-w-full items-center gap-0.5 rounded-md border bg-background px-0.5">
                     <Button size="icon" variant="ghost" className="size-8" aria-label={t("Önceki alternatif", "Previous option")} onClick={() => showAlternative(alternativeIndex - 1)}><ChevronLeftIcon /></Button>
-                    <span className="min-w-0 truncate px-1 text-xs tabular-nums" aria-live="polite">
-                      {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
-                      {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
-                    </span>
+                    <Button size="sm" variant="ghost" className="h-8 min-w-0 px-1.5 text-xs" aria-haspopup="dialog" onClick={() => setAlternativesOpen(true)}>
+                      <span className="min-w-0 truncate tabular-nums" aria-live="polite">
+                        {t(`Alternatif ${alternativeIndex + 1}/${alternatives.length}`, `Option ${alternativeIndex + 1}/${alternatives.length}`)}
+                        {currentShape ? <span className="ml-1.5 text-muted-foreground">{currentShape.freeDays.length ? t(`· boş: ${currentShape.freeDays.map(dayLabel).join(", ")}`, `· free: ${currentShape.freeDays.map(dayLabel).join(", ")}`) : t("· boş gün yok", "· no free day")}</span> : null}
+                      </span>
+                      <ChevronDownIcon className="size-3.5 shrink-0" />
+                    </Button>
                     <Button size="icon" variant="ghost" className="size-8" aria-label={t("Sonraki alternatif", "Next option")} onClick={() => showAlternative(alternativeIndex + 1)}><ChevronRightIcon /></Button>
                   </div>
                   ) : null}
@@ -2654,10 +2752,7 @@ export function SchedulePlanner() {
                       <button
                         key={entry.id}
                         type="button"
-                        onClick={() => setEntries((current) => current.filter((item) =>
-                          entry.kind === "block"
-                            ? item.id !== entry.id
-                            : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
+                        onClick={() => removeEntryWithUndo(entry)}
                         className={cn("course-block flex w-full items-start gap-3 rounded-xl border p-3 text-left", COLORS[entry.color % COLORS.length], conflicts.has(entry.id) && "ring-2 ring-destructive")}
                         aria-label={t(`${entry.code} dersini programdan kaldır`, `Remove ${entry.code} from the schedule`)}
                       >
@@ -2718,10 +2813,7 @@ export function SchedulePlanner() {
                               // registration that cannot exist. Blocks are the
                               // exception — those are the student's own
                               // one-off entries.
-                              onClick={() => setEntries((current) => current.filter((item) =>
-                                entry.kind === "block"
-                                  ? item.id !== entry.id
-                                  : !(item.kind === "course" && item.code === entry.code && item.section === entry.section)))}
+                              onClick={() => removeEntryWithUndo(entry)}
                               title={`${entry.code} · ${entry.name}${entry.section ? ` · ${t("Şube", "Section")} ${entry.section}` : ""} · ${entry.room?.trim() || "TBA"}${entry.instructor ? ` · ${entry.instructor}` : ""}
 ${entry.kind === "block" ? t("Kaldırmak için tıkla", "Click to remove") : t("Dersi tüm saatleriyle kaldırmak için tıkla", "Click to remove the course and all its hours")}`}
                               style={{
