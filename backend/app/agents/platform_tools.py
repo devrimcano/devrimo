@@ -5,7 +5,15 @@ from uuid import UUID
 from agno.tools.decorator import tool
 
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest, SearchResource
+from app.workspace.resources import (
+    EmailDraft,
+    ResourceKind,
+    ResourceRef,
+    SearchableKind,
+    SearchRequest,
+    SearchResource,
+    scoped_ref,
+)
 from app.workspace.service import WorkspaceService
 
 
@@ -25,17 +33,25 @@ def build_platform_tools(user_id: UUID) -> list:
 
     @tool(name="search")
     async def search(
-        resource: SearchResource,
+        resource: SearchResource | None = None,
+        kind: SearchableKind | None = None,
         query: str = "",
         limit: int = 10,
         record_types: list[str] | None = None,
         starts_after: str | None = None,
         starts_before: str | None = None,
+        department: str | None = None,
+        category: str | None = None,
+        term: str | None = None,
     ) -> dict:
-        """Text-search campus.knowledge, researcher, mail.messages, catalog.departments or catalog.department."""
+        """Text-search campus.knowledge, researcher, mail.messages, catalog.departments or catalog.department.
+
+        Pass `kind` directly (plus `query`) or the same fields inside a `resource` object; both work.
+        """
+        ref = scoped_ref(SearchResource, "search", resource, kind, department=department, category=category, term=term)
         return await workspace.search(
             SearchRequest(
-                resource=resource,
+                resource=ref,
                 query=query,
                 limit=limit,
                 record_types=record_types or [],
@@ -45,17 +61,43 @@ def build_platform_tools(user_id: UUID) -> list:
         )
 
     @tool(name="read")
-    async def read(resource: ResourceRef) -> dict:
+    async def read(
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        category: str | None = None,
+        program_type: str | None = None,
+        folder: str | None = None,
+        attachment: str | None = None,
+        term: str | None = None,
+        section: str | None = None,
+        expand: bool = False,
+    ) -> dict:
         """Read one resource by kind.
 
         Course kinds take the code in `key` ("EE 201" or 5670201) or a department in `department`; `term`
-        defaults to the active term. Find a course by name via catalog.department, then catalog.courses;
-        for one course's own facts (sections, prerequisites, credits) read the course kind directly with
-        the course code - catalog.courses only lists a department.
+        defaults to the active term. Find a course by name via catalog.department, then catalog.courses.
         student.registered_schedule is SAIS; planning.timetable is the editable week. Set `expand` true
         only when the student asked for every item after a partial list.
+        Pass the fields flat ({"kind": ..., "key": ...}) or inside a `resource` object; both work.
         """
-        return await workspace.read(ResourceRef.model_validate(resource))
+        ref = scoped_ref(
+            ResourceRef,
+            "read",
+            resource,
+            kind,
+            key=key,
+            department=department,
+            category=category,
+            program_type=program_type,
+            folder=folder,
+            attachment=attachment,
+            term=term,
+            section=section,
+            expand=expand,
+        )
+        return await workspace.read(ref)
 
     @tool(name="plan")
     async def plan(request: SemesterPlanRequest) -> dict:
@@ -64,12 +106,18 @@ def build_platform_tools(user_id: UUID) -> list:
 
     @tool(name="update")
     async def update(
-        resource: ResourceRef,
         changes: dict,
         expected_revision: int,
         idempotency_key: str,
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        term: str | None = None,
     ) -> dict:
         """Save an editable resource against its current revision with a unique request key.
+
+        Pass the resource flat (`kind`, `key`, `term`) or as a `resource` object; both work.
 
         `changes` follows `resource.kind`:
           - planning.timetable: the `application` object a prior `plan` returned, copied verbatim - it
@@ -79,17 +127,27 @@ def build_platform_tools(user_id: UUID) -> list:
             its revision; the server replaces it atomically, so a partial list deletes the rest. `id` is
             optional for new entries.
         """
+        ref = scoped_ref(ResourceRef, "update", resource, kind, key=key, department=department, term=term)
         return await workspace.update(
-            ResourceRef.model_validate(resource),
+            ref,
             changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
             expected_revision,
             idempotency_key,
         )
 
     @tool(name="undo")
-    async def undo(resource: ResourceRef, expected_revision: int, idempotency_key: str) -> dict:
+    async def undo(
+        expected_revision: int,
+        idempotency_key: str,
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        term: str | None = None,
+    ) -> dict:
         """Undo the latest saved timetable revision, preserving history and rejecting stale edits."""
-        return await workspace.undo(ResourceRef.model_validate(resource), expected_revision, idempotency_key)
+        ref = scoped_ref(ResourceRef, "undo", resource, kind, key=key, department=department, term=term)
+        return await workspace.undo(ref, expected_revision, idempotency_key)
 
     @tool(name="send_email", requires_confirmation=True)
     async def send_email(draft: EmailDraft) -> dict:

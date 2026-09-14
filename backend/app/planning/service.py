@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.campus.prerequisites import evaluate_prerequisites
 from app.db.models import PlanningPolicy, StudentAcademicSnapshot, StudentContext
 from app.logging import get_logger
 from app.planning.solver import SolverGroup, enumerate_solutions
+from app.workspace.resources import normalize_term
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,14 @@ class SemesterPlanRequest(BaseModel):
     days_off: list[str] = Field(default_factory=list)
     earliest_start: str | None = None
     latest_end: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_term_label(cls, data):
+        """A model that wrote "2026-2027 Fall" still deserves a plan."""
+        if isinstance(data, dict) and isinstance(data.get("term"), str):
+            data = {**data, "term": normalize_term(data["term"])}
+        return data
 
 
 def _code(value: str) -> str:

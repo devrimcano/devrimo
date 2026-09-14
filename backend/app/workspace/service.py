@@ -150,6 +150,12 @@ class WorkspaceService:
 
     async def read(self, ref: ResourceRef):
         await self.authorize()
+        if ref.kind == "catalog.courses" and ref.key and _looks_like_course_code(ref.key):
+            # A course code on the department-listing kind used to be a 422. The
+            # model then guessed the department from the prefix and answered
+            # about a course that does not exist (5710331 became "EE 331"), so
+            # serve the read the code actually asks for instead of refusing it.
+            ref = ref.model_copy(update={"kind": "catalog.sections"})
         if ref.kind in {"my.preferences", "my.update_state"}:
             from app.student.workspace import read_resource
 
@@ -209,12 +215,6 @@ class WorkspaceService:
                 return envelope(ref, await read_timetable(db, self.user_id, ref.term or current_term()))
         if ref.kind not in UPSTREAM:
             raise HTTPException(422, "Resource does not support read")
-        if ref.kind == "catalog.courses" and ref.key and _looks_like_course_code(ref.key):
-            raise HTTPException(
-                422,
-                "catalog.courses lists one department's courses; for a single course read catalog.sections "
-                'with the course code in "key" ({"kind": "catalog.sections", "key": "CENG 331"}).',
-            )
         return await self.upstream(ref)
 
     @staticmethod

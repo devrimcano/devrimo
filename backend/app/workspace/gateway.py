@@ -12,7 +12,15 @@ from starlette.responses import JSONResponse
 from app.auth.jwt import verify_access_token
 from app.config import get_settings
 from app.planning.service import SemesterPlanRequest
-from app.workspace.resources import EmailDraft, ResourceRef, SearchRequest, SearchResource
+from app.workspace.resources import (
+    EmailDraft,
+    ResourceKind,
+    ResourceRef,
+    SearchableKind,
+    SearchRequest,
+    SearchResource,
+    scoped_ref,
+)
 from app.workspace.service import WorkspaceService
 
 
@@ -61,23 +69,29 @@ def create_gateway():
 
     @server.tool()
     async def search(
-        resource: SearchResource,
+        resource: SearchResource | None = None,
+        kind: SearchableKind | None = None,
         query: str = "",
         limit: int = 10,
         record_types: list[str] | None = None,
         starts_after: str | None = None,
         starts_before: str | None = None,
+        department: str | None = None,
+        category: str | None = None,
+        term: str | None = None,
         ctx: Context = None,
     ) -> dict:
         """Search an authenticated workspace resource.
 
         Flat arguments rather than a nested `request` object: the model kept
         sending the resource and query at the top level, which the wrapper
-        rejected as a missing field. platform_tools.search must match this.
+        rejected as a missing field. Both the flat fields and the nested
+        `resource` object are accepted; platform_tools.search must match this.
         """
+        ref = scoped_ref(SearchResource, "search", resource, kind, department=department, category=category, term=term)
         return await service(ctx).search(
             SearchRequest(
-                resource=resource,
+                resource=ref,
                 query=query,
                 limit=limit,
                 record_types=record_types or [],
@@ -87,9 +101,37 @@ def create_gateway():
         )
 
     @server.tool()
-    async def read(resource: ResourceRef, ctx: Context) -> dict:
+    async def read(
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        category: str | None = None,
+        program_type: str | None = None,
+        folder: str | None = None,
+        attachment: str | None = None,
+        term: str | None = None,
+        section: str | None = None,
+        expand: bool = False,
+        ctx: Context = None,
+    ) -> dict:
         """Read one typed workspace resource."""
-        return await service(ctx).read(resource)
+        ref = scoped_ref(
+            ResourceRef,
+            "read",
+            resource,
+            kind,
+            key=key,
+            department=department,
+            category=category,
+            program_type=program_type,
+            folder=folder,
+            attachment=attachment,
+            term=term,
+            section=section,
+            expand=expand,
+        )
+        return await service(ctx).read(ref)
 
     @server.tool()
     async def plan(request: SemesterPlanRequest, ctx: Context) -> dict:
@@ -98,11 +140,15 @@ def create_gateway():
 
     @server.tool()
     async def update(
-        resource: ResourceRef,
         changes: dict,
         expected_revision: int,
         idempotency_key: str,
-        ctx: Context,
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        term: str | None = None,
+        ctx: Context = None,
     ) -> dict:
         """Update an editable resource with optimistic concurrency.
 
@@ -114,17 +160,28 @@ def create_gateway():
         test_stateless_mcp_seven_tools_and_private_identity pins the two
         surfaces together.
         """
+        ref = scoped_ref(ResourceRef, "update", resource, kind, key=key, department=department, term=term)
         return await service(ctx).update(
-            resource,
+            ref,
             changes.model_dump(exclude_unset=True) if hasattr(changes, "model_dump") else changes,
             expected_revision,
             idempotency_key,
         )
 
     @server.tool()
-    async def undo(resource: ResourceRef, expected_revision: int, idempotency_key: str, ctx: Context) -> dict:
+    async def undo(
+        expected_revision: int,
+        idempotency_key: str,
+        resource: ResourceRef | None = None,
+        kind: ResourceKind | None = None,
+        key: str | None = None,
+        department: str | None = None,
+        term: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
         """Undo the most recent resource revision."""
-        return await service(ctx).undo(resource, expected_revision, idempotency_key)
+        ref = scoped_ref(ResourceRef, "undo", resource, kind, key=key, department=department, term=term)
+        return await service(ctx).undo(ref, expected_revision, idempotency_key)
 
     @server.tool()
     async def send_email(draft: EmailDraft, ctx: Context) -> dict:

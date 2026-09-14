@@ -2,7 +2,47 @@
 
 from typing import Literal
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.academic_catalog.schemas import normalize_term as _normalize_term_code
+
+
+def scoped_ref(model, tool_name: str, resource, kind, **fields):
+    """Accept both the nested resource object and flat fields.
+
+    The model emits both shapes, sometimes in the same conversation, and the
+    nested-only schema turned every flat call into an Agno validation error
+    before any of our code could see it - so the coercion that was supposed to
+    absorb them never ran. Both shapes are legal from here on; the flat one is
+    the shape the model reaches for most.
+
+    One helper for the agent tools and the MCP gateway, because the two
+    surfaces are pinned to the same argument contract.
+    """
+    if resource is not None:
+        return model.model_validate(resource)
+    if kind is None:
+        raise HTTPException(
+            422,
+            f'{tool_name} needs a "kind" and the field that kind needs, e.g. '
+            '{"kind": "catalog.sections", "key": "CENG 331"}.',
+        )
+    return model(kind=kind, **{name: value for name, value in fields.items() if value is not None or name == "expand"})
+
+
+def normalize_term(value: str | None) -> str | None:
+    """The catalog's own term normaliser, with "nothing written" allowed.
+
+    The label-to-code rule lives in one place; this only adds the None/empty
+    case that read refs have and admin inputs do not.
+    """
+    if value is None or not value.strip():
+        return None
+    try:
+        return _normalize_term_code(value)
+    except ValueError:
+        return value.strip()
 
 ResourceKind = Literal[
     "researcher",
@@ -101,6 +141,14 @@ class _ScopedRef(BaseModel):
         default=False,
         description="Set true only after the student asked for every item; never on the first read.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_term_label(cls, data):
+        """Accept "2026-2027 Fall" where the catalog means "20261"."""
+        if isinstance(data, dict) and isinstance(data.get("term"), str):
+            data = {**data, "term": normalize_term(data["term"])}
+        return data
 
 
 class ResourceRef(_ScopedRef):

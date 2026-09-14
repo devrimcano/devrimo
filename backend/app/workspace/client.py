@@ -127,7 +127,7 @@ class WorkspaceClient:
         # log - saw the class name of the wrapper and nothing else.
         failure: HTTPException | None = None
         try:
-            async with httpx.AsyncClient(headers=headers, timeout=120, transport=self.transport) as http_client:
+            async with httpx.AsyncClient(headers=headers, timeout=30, transport=self.transport) as http_client:
                 async with streamable_http_client(self.url, http_client=http_client) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
                         await session.initialize()

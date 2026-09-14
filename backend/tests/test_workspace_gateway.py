@@ -122,6 +122,14 @@ async def test_stateless_mcp_seven_tools_and_private_identity(monkeypatch):
             return value
         if "$ref" in value:
             return contract(definitions[value["$ref"].split("/")[-1]], definitions)
+        # FastMCP writes a nullable annotation as anyOf [T, null] and omits an
+        # empty `required`; Agno writes T and `[]`. Same validation either way,
+        # so the comparison folds both renderings together.
+        branches = value.get("anyOf")
+        if isinstance(branches, list):
+            kept = [branch for branch in branches if branch != {"type": "null"}]
+            if len(kept) == 1:
+                return contract(kept[0], definitions)
         return {
             key: contract(item, definitions)
             for key, item in value.items()
@@ -135,8 +143,9 @@ async def test_stateless_mcp_seven_tools_and_private_identity(monkeypatch):
         actual = tool["inputSchema"]
         expected = function.parameters
         for part in ("properties", "required"):
-            assert contract(actual[part], actual.get("$defs", {})) == contract(
-                expected[part], expected.get("$defs", {})
+            default = {} if part == "properties" else []
+            assert contract(actual.get(part, default), actual.get("$defs", {})) == contract(
+                expected.get(part, default), expected.get("$defs", {})
             )
 
 
