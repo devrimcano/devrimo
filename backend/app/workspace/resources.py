@@ -1,49 +1,24 @@
 """Stable resource vocabulary; upstream method names never become model tools."""
 
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-_TERM_SEASONS = (
-    ("fall", "1"),
-    ("güz", "1"),
-    ("guz", "1"),
-    ("spring", "2"),
-    ("bahar", "2"),
-    ("summer", "3"),
-    ("yaz", "3"),
-)
+from app.academic_catalog.schemas import normalize_term as _normalize_term_code
 
 
 def normalize_term(value: str | None) -> str | None:
-    """A METU term code from whatever the model wrote.
+    """The catalog's own term normaliser, with "nothing written" allowed.
 
-    "20261" is already a code. "2026-2027 Fall", "Fall 2026" and "2026 Güz" all
-    mean 20261, and a model that wrote the label made the catalog read miss the
-    published release and answer as if the course did not exist.
+    The label-to-code rule lives in one place; this only adds the None/empty
+    case that read refs have and admin inputs do not.
     """
-    if value is None:
+    if value is None or not value.strip():
         return None
-    text = value.strip()
-    if not text:
-        return None
-    if re.fullmatch(r"\d{4,5}", text):
-        return text
-    season = next((part for key, part in _TERM_SEASONS if key in text.casefold()), None)
-    if season is None:
-        return text
-    pair = re.search(r"(\d{4})\s*[-/]\s*(\d{4})", text)
-    if pair:
-        return f"{int(pair.group(1))}{season}"
-    single = re.search(r"(\d{4})", text)
-    if single is None:
-        return text
-    year = int(single.group(1))
-    # A standalone calendar year names where the term sits, not the academic
-    # year it belongs to: spring and summer close the year that began last
-    # September.
-    return f"{year if season == '1' else year - 1}{season}"
+    try:
+        return _normalize_term_code(value)
+    except ValueError:
+        return value.strip()
 
 ResourceKind = Literal[
     "researcher",

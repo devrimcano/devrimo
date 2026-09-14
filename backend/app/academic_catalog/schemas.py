@@ -8,14 +8,42 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+_TERM_SEASONS = (
+    ("fall", "1"),
+    ("güz", "1"),
+    ("guz", "1"),
+    ("spring", "2"),
+    ("bahar", "2"),
+    ("summer", "3"),
+    ("yaz", "3"),
+)
+
 
 def normalize_term(value: str) -> str:
+    """A METU term code from whatever was written.
+
+    "20261" is already a code. "2026-2027 Fall", "Fall 2026" and "2026 Güz"
+    all mean 20261; a label that reached a catalog read made it miss the
+    published release and answer as if the course did not exist.
+    """
     value = str(value or "").strip()
     if not value:
         raise ValueError("A term is required")
     if len(value) > 32:
         raise ValueError("Term is too long")
-    return value
+    if re.fullmatch(r"\d{4,5}", value):
+        return value
+    season = next((part for key, part in _TERM_SEASONS if key in value.casefold()), None)
+    if season is None:
+        return value
+    year_match = re.search(r"(\d{4})\s*[-/]\s*\d{4}", value) or re.search(r"(\d{4})", value)
+    if year_match is None:
+        return value
+    year = int(year_match.group(1))
+    # A standalone calendar year names where the term sits, not the academic
+    # year it belongs to: spring and summer close the year that began last
+    # September.
+    return f"{year if season == '1' else year - 1}{season}"
 
 
 def normalize_course_code(value: str) -> str:
@@ -38,7 +66,7 @@ class MeetingPatch(BaseModel):
     raw_label: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
-    def valid_range(self) -> "MeetingPatch":
+    def valid_range(self) -> MeetingPatch:
         if self.start_minute is None and self.end_minute is None:
             if self.status == "scheduled":
                 raise ValueError("Scheduled meetings require a weekday and start/end minutes")
@@ -332,7 +360,7 @@ class DraftPatchIn(BaseModel):
     verification_evidence: str | None = Field(default=None, max_length=4000)
 
     @model_validator(mode="after")
-    def require_patch(self) -> "DraftPatchIn":
+    def require_patch(self) -> DraftPatchIn:
         if not self.patch:
             raise ValueError("At least one draft field must be changed")
         if self.verify and not str(self.verification_evidence or "").strip():
@@ -357,7 +385,7 @@ class PublishIn(BaseModel):
         return normalize_term(value)
 
     @model_validator(mode="after")
-    def unique_drafts(self) -> "PublishIn":
+    def unique_drafts(self) -> PublishIn:
         if len(set(self.draft_ids)) != len(self.draft_ids):
             raise ValueError("Draft IDs must be unique")
         return self
