@@ -5,7 +5,7 @@ import hashlib
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, text
 
 from app.agents.store import get_agno_db
@@ -20,7 +20,13 @@ class MemoryEntry(BaseModel):
     # Optional: a model saving a new preference has no id to give, and refusing
     # the write over one is how "hatırla" ended with a validation error and an
     # answer that claimed the preference was saved anyway.
-    id: str | None = Field(default=None, max_length=128)
+    id: str | int | None = Field(default=None, max_length=128)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_id(cls, value):
+        """An integer id is still an id; refusing it cost a saved preference."""
+        return str(value) if value is not None else None
     content: str = Field(min_length=1, max_length=500)
 
 

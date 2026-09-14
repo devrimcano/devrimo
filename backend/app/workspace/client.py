@@ -109,25 +109,24 @@ def workspace_error_text(result, name: str) -> str:
 
 
 class WorkspaceClient:
-    # The plan solver legitimately runs for a minute or more; every other call
-    # is a read or a small write. One shared timeout either cut plans off at
-    # 30s - three plan calls failed that way in one evaluation turn - or let a
-    # hung read block a whole turn for two minutes.
-    DEFAULT_TIMEOUT_SECONDS = 30.0
-    PLAN_TIMEOUT_SECONDS = 120.0
+    # A stuck transport must not hold a turn open for ever, but this is not a
+    # work deadline and nothing should be built on it: a plan legitimately runs
+    # for a minute. Making it shorter once turned real work into ReadTimeouts;
+    # making it per-call only moved the guess around. The real bounds live in
+    # the tool semantics - a catalog miss is final, a repeated plan is reused.
+    TRANSPORT_TIMEOUT_SECONDS = 120.0
 
     def __init__(self, url: str, *, transport: httpx.AsyncBaseTransport | None = None):
         self.url = url
         self.transport = transport
 
-    async def call(self, name, arguments, *, timeout: float | None = None):
+    async def call(self, name, arguments):
         token = _access_token.get()
         if not token:
             raise HTTPException(401, "Authenticated workspace token is unavailable")
         headers = {"Authorization": f"Bearer {token}"}
         if name == "send_email" and _approval_token.get():
             headers["X-Devrimo-Mail-Approval"] = _approval_token.get()
-        effective_timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_SECONDS
         # Collected inside the session and raised after it, because raising
         # inside these nested `async with` blocks is what turned a one-sentence
         # failure into ExceptionGroup(ExceptionGroup([HTTPException])). anyio's
@@ -136,7 +135,7 @@ class WorkspaceClient:
         failure: HTTPException | None = None
         try:
             async with httpx.AsyncClient(
-                headers=headers, timeout=effective_timeout, transport=self.transport
+                headers=headers, timeout=self.TRANSPORT_TIMEOUT_SECONDS, transport=self.transport
             ) as http_client:
                 async with streamable_http_client(self.url, http_client=http_client) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
@@ -170,7 +169,7 @@ class WorkspaceClient:
         return await self.call("read", {"resource": resource.model_dump()})
 
     async def plan(self, request):
-        return await self.call("plan", {"request": request}, timeout=self.PLAN_TIMEOUT_SECONDS)
+        return await self.call("plan", {"request": request})
 
     async def update(self, resource, changes, expected_revision, idempotency_key):
         return await self.call(

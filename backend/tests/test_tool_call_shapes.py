@@ -69,20 +69,34 @@ def test_a_department_read_accepts_the_department_field_as_its_key():
         ResourceRef(kind="catalog.sections")
 
 
-async def test_plan_gets_a_longer_workspace_timeout(monkeypatch):
-    from app.workspace.client import WorkspaceClient
+def test_a_final_catalog_miss_blocks_the_same_course_under_any_kind():
+    hooks._terminal_misses.clear()
+    context = SimpleNamespace(run_id="r-miss")
+    assert hooks._miss_blocker("read", {"resource": {"kind": "catalog.sections", "key": "CENG 999"}}, context) is None
+    hooks._note_terminal_miss(
+        "read",
+        {"resource": {"kind": "catalog.sections", "key": "CENG 999"}},
+        context,
+        Exception("read failed: 404: Course is not available in the published release"),
+    )
+    blocked = hooks._miss_blocker(
+        "read", {"resource": {"kind": "catalog.eligibility", "key": "ceng 999"}}, context
+    )
+    assert blocked is not None
+    assert blocked["error"] == "catalog_miss_final"
+    hooks._terminal_misses.clear()
 
-    client = WorkspaceClient("http://unused")
-    captured: dict = {}
 
-    async def fake_call(name, arguments, *, timeout=None):
-        captured["name"] = name
-        captured["timeout"] = timeout
-        return {}
-
-    monkeypatch.setattr(client, "call", fake_call)
-    await client.plan({"term": "20261"})
-    assert captured == {"name": "plan", "timeout": WorkspaceClient.PLAN_TIMEOUT_SECONDS}
+def test_a_repeated_plan_is_served_from_the_first_result():
+    hooks._plan_cache.clear()
+    context = SimpleNamespace(run_id="r-plan")
+    arguments = {"request": {"term": "20261", "days_off": ["Friday"]}}
+    key = hooks._plan_key(arguments, context)
+    assert key not in hooks._plan_cache
+    hooks._store_plan(key, {"application": {"entries": []}})
+    assert hooks._plan_key({"request": {"days_off": ["Friday"], "term": "20261"}}, context) == key
+    assert hooks._plan_cache[key] == {"application": {"entries": []}}
+    hooks._plan_cache.clear()
 
 
 async def test_a_course_code_on_catalog_courses_reads_the_course(monkeypatch):

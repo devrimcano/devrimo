@@ -285,6 +285,77 @@ def _note_repeat_failure(key: str | None) -> None:
     _repeat_failures[key] = _repeat_failures.get(key, 0) + 1
 
 
+# Once the catalog says a course is not in the published release, that is the
+# answer. Asked as sections, then eligibility, then prerequisites, the same
+# course burned eighteen tool calls in one evaluated turn because each new kind
+# looked like a fresh question. Keyed by run and course key - not by the full
+# arguments - so every later kind for that course is refused too.
+_TERMINAL_MISS_MARKERS = ("not available in the published release", "no published academic catalog")
+_terminal_misses: dict[str, str] = {}
+
+
+def _run_scope(run_context) -> str:
+    return str(getattr(run_context, "run_id", None) or current_trace_id() or current_session_id() or "-")
+
+
+def _course_key(arguments) -> str | None:
+    if not isinstance(arguments, dict):
+        return None
+    resource = arguments.get("resource") if isinstance(arguments.get("resource"), dict) else arguments
+    key = resource.get("key") if isinstance(resource, dict) else None
+    if not isinstance(key, str) or not key.strip():
+        return None
+    return "".join(key.upper().split())
+
+
+def _miss_blocker(function_name: str, arguments, run_context) -> dict | None:
+    if function_name not in {"read", "search"}:
+        return None
+    key = _course_key(arguments)
+    if key is None:
+        return None
+    if _terminal_misses.get(f"{_run_scope(run_context)}:{key}") is None:
+        return None
+    return {
+        "error": "catalog_miss_final",
+        "message": (
+            f"{key} is not in the published catalog for the requested term, and that is final. "
+            "Do not read or search it again under another kind or term; tell the student it is not offered."
+        ),
+    }
+
+
+def _note_terminal_miss(function_name: str, arguments, run_context, error) -> None:
+    if function_name != "read" or error is None:
+        return
+    detail = _tool_error_detail(error).casefold()
+    if not any(marker in detail for marker in _TERMINAL_MISS_MARKERS):
+        return
+    key = _course_key(arguments)
+    if key is None:
+        return
+    if len(_terminal_misses) > 1_000:
+        _terminal_misses.clear()
+    _terminal_misses[f"{_run_scope(run_context)}:{key}"] = detail[:80]
+
+
+# The plan tool is a pure computation: the same request cannot produce a
+# different answer inside one turn, and one evaluated turn called it twenty-two
+# times for one question. A repeat is served from the first result.
+_plan_cache: dict[str, object] = {}
+
+
+def _plan_key(arguments, run_context) -> str:
+    digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return f"{_run_scope(run_context)}:{digest}"
+
+
+def _store_plan(key: str, result) -> None:
+    if len(_plan_cache) > 200:
+        _plan_cache.clear()
+    _plan_cache[key] = result
+
+
 async def production_tool_hook(function_name, function, arguments, run_context=None):
     """Execute one tool, cap text output, audit external mutations, and observe it."""
     started = time.monotonic()
@@ -299,10 +370,21 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
             logger.warning("agent_tool_repeat_blocked", tool=function_name)
             error = RuntimeError("repeated_failing_call")
             return stop
+        blocked = _miss_blocker(function_name, arguments, run_context)
+        if blocked is not None:
+            logger.warning("agent_tool_catalog_miss_blocked", tool=function_name)
+            error = RuntimeError("catalog_miss_final")
+            return blocked
+        plan_key = _plan_key(arguments, run_context) if function_name == "plan" else None
+        if plan_key is not None and plan_key in _plan_cache:
+            logger.info("agent_tool_plan_reused", tool=function_name)
+            return _plan_cache[plan_key]
         result = function(**arguments)
         if inspect.isawaitable(result):
             result = await result
         _repeat_failures.pop(breaker_key, None)
+        if plan_key is not None:
+            _store_plan(plan_key, result)
         logger.info("agent_tool_completed", tool=function_name, duration_ms=round((time.monotonic() - started) * 1000))
         kind, expand = _requested_read(arguments, run_context)
         result = bound(
@@ -313,6 +395,7 @@ async def production_tool_hook(function_name, function, arguments, run_context=N
     except Exception as exc:
         error = exc
         _note_repeat_failure(breaker_key)
+        _note_terminal_miss(function_name, arguments, run_context, exc)
         logger.warning(
             "agent_tool_failed",
             tool=function_name,
