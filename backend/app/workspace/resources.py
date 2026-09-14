@@ -163,6 +163,13 @@ class ResourceRef(_ScopedRef):
         only sees after spending a turn.
         """
         if self.kind in KEY_REQUIRED_KINDS and not (self.key or "").strip():
+            # `catalog.department` is keyed by the department itself, and the
+            # model writes it in the `department` field about as often as in
+            # `key`; refusing that spelling spent turns on a distinction
+            # without a difference.
+            if self.kind == "catalog.department" and (self.department or "").strip():
+                self.key = self.department.strip()
+                return self
             raise ValueError(
                 f'kind "{self.kind}" needs "key" - e.g. {{"kind": "{self.kind}", "key": "5710331"}}'
             )

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.agents.platform_tools import build_platform_tools
 from app.agents.scholar import hooks
@@ -59,6 +60,29 @@ def test_the_generated_schema_accepts_both_shapes():
         assert "resource" not in tools[name].parameters.get("required", []), name
     read_properties = tools["read"].parameters["properties"]
     assert {"key", "department", "term", "section", "expand"} <= set(read_properties)
+
+
+def test_a_department_read_accepts_the_department_field_as_its_key():
+    ref = ResourceRef(kind="catalog.department", department="CENG")
+    assert ref.key == "CENG"
+    with pytest.raises(ValidationError):
+        ResourceRef(kind="catalog.sections")
+
+
+async def test_plan_gets_a_longer_workspace_timeout(monkeypatch):
+    from app.workspace.client import WorkspaceClient
+
+    client = WorkspaceClient("http://unused")
+    captured: dict = {}
+
+    async def fake_call(name, arguments, *, timeout=None):
+        captured["name"] = name
+        captured["timeout"] = timeout
+        return {}
+
+    monkeypatch.setattr(client, "call", fake_call)
+    await client.plan({"term": "20261"})
+    assert captured == {"name": "plan", "timeout": WorkspaceClient.PLAN_TIMEOUT_SECONDS}
 
 
 async def test_a_course_code_on_catalog_courses_reads_the_course(monkeypatch):
